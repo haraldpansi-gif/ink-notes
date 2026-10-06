@@ -1,22 +1,19 @@
 //! Immediate-Mode UI mit `egui` für ink-notes.
 //!
-//! Stellt eine moderne, schwebende Top-Toolbar im Pill-Design bereit:
-//! - Milchglas-Look (Transluzenter Dark-Theme-Hintergrund mit weichem Schatten)
-//! - Abgerundete Ecken (14 px Radius) und feine Kante
-//! - Visuelle Farbindikatoren (3 px hohe Balken) direkt an den Werkzeug-Buttons
-//! - Schwebendes Popover-Menü zur Konfiguration von Stiftfarbe, Dicken-Presets mit Linien-Vorschau und stufenlosem Slider
-//! - Exaktes Hit-Testing für Event-Transparenz außerhalb der Pill und des Popovers
-//! - Werkzeugauswahl: Stift (Pen), Textmarker (Highlighter), Radierer (Eraser) mit Akzent-Highlight
-//! - Undo & Redo (mit dynamischer Deaktivierung)
-//! - Diskrete Seitennavigation (◄, Seite X/Y mit Schnellauswahl, ►, ➕ Neue Seite)
-//! - Hintergrundraster-Dropdown (Kariert, Liniert, Punktraster, Blanko)
-//! - PDF-Export-Button mit Feedback-Banner
-//! - Autosave-Statusanzeige (Live-Badge mit Farbindikator)
+//! Stellt eine schmale, senkrechte Werkzeugleiste bereit, die seitlich angedockt ist
+//! (links oder rechts, umschaltbar):
+//! - Symbol-Knöpfe mit 40 px Kantenlänge (stift- und fingertauglich), Tooltips mit Kürzeln
+//! - Werkzeuge, Farben des aktiven Werkzeugs, Auswahl-Aktionen, Undo/Redo, Seitennavigation
+//! - Selten genutzte Funktionen (PDF, Hintergrund, Zoom, Touch-Modus, Leistenseite,
+//!   Updates, Speicherstatus) im ☰-Menü
+//! - Popover (Stift/Marker/Menü) öffnen sich zur Blattseite hin
+//! - Hit-Testing für Event-Transparenz außerhalb der Leiste und der Popover
 
 use std::time::Instant;
 
 use crate::autosave::AutosaveStatus;
 use crate::document::{Notebook, PageBackground};
+use crate::settings::SidebarSide;
 use crate::storage::NotebookSummary;
 
 /// Aktives Werkzeug für das Zeichnen oder Bearbeiten.
@@ -44,6 +41,9 @@ impl ActiveTool {
         matches!(self, ActiveTool::Pen | ActiveTool::Highlighter)
     }
 }
+
+/// Farbvorgabe: RGBA-Farbe und Bezeichnung.
+pub type ColorPreset = ([f32; 4], &'static str);
 
 /// Schnellauswahlfarben für den normalen Stift laut Meilenstein 8:
 /// - Notiz-Schwarz: [0.12, 0.12, 0.14, 1.0]
@@ -128,6 +128,8 @@ pub enum UiAction {
     },
     // Datenintegrität / Quarantäne
     UnlockCorruptedPage(u64),
+    /// Werkzeugleiste an die andere Fensterseite verlegen (wird gespeichert)
+    SetSidebarSide(SidebarSide),
     // Beenden-Sicherheit bei Fehlschlag
     RetryShutdown,
     ExportRecoveryAndExit,
@@ -175,6 +177,10 @@ pub struct UiState {
     pub last_deleted_notebook: Option<(std::path::PathBuf, String)>,
     /// Fehler beim Flushen vor dem Beenden
     pub shutdown_error: Option<crate::autosave::AutosaveError>,
+    /// Fensterseite der Werkzeugleiste
+    pub sidebar_side: SidebarSide,
+    /// Öffnungszustand des ☰-Menüs
+    pub is_more_menu_open: bool,
 }
 
 impl Default for UiState {
@@ -208,13 +214,55 @@ impl Default for UiState {
             touch_draw_enabled: false,
             last_deleted_notebook: None,
             shutdown_error: None,
+            sidebar_side: SidebarSide::Left,
+            is_more_menu_open: false,
         }
     }
 }
 
 impl UiState {
-    /// Radius der abgerundeten Ecken für die Toolbar-Pill.
+    /// Radius der abgerundeten Ecken der Werkzeugleiste.
     pub const TOOLBAR_ROUNDING: f32 = 14.0;
+    /// Kantenlänge der Symbol-Knöpfe (stift- und fingertauglich).
+    pub const SIDEBAR_BUTTON: f32 = 40.0;
+    /// Abstand der Werkzeugleiste zum Fensterrand.
+    pub const SIDEBAR_MARGIN: f32 = 10.0;
+
+    /// Länge der längsten Farbpalette; so viel Platz hält die Leiste immer frei.
+    pub const MAX_PALETTE_LEN: usize = 5;
+
+    /// Durchmesser der Farbtupfer passend zur Knopfgröße.
+    pub fn sidebar_swatch_size(button_size: f32) -> f32 {
+        button_size - 10.0
+    }
+
+    /// Größte Knopfgröße (40 px, schrittweise bis 28 px), bei der die Leiste mit allen Elementen
+    /// des aktiven Werkzeugs in `max_height` passt.
+    pub fn sidebar_button_size(tool: ActiveTool, max_height: f32) -> f32 {
+        let select = tool == ActiveTool::Select;
+        // Notizbücher, 5 Werkzeuge, Undo/Redo, 3× Seiten, Menü (+ 4 Auswahl-Aktionen)
+        let buttons = 12 + if select { 4 } else { 0 };
+        let dividers = 5 + usize::from(select);
+        let spacing = 3.0;
+        let needed = |b: f32| {
+            buttons as f32 * (b + spacing)
+                + Self::MAX_PALETTE_LEN as f32 * (Self::sidebar_swatch_size(b) + spacing)
+                + dividers as f32 * (7.0 + spacing)
+                + 12.0
+        };
+        [Self::SIDEBAR_BUTTON, 36.0, 32.0, 30.0, 28.0]
+            .into_iter()
+            .find(|&b| needed(b) <= max_height)
+            .unwrap_or(28.0)
+    }
+
+    /// Von der Werkzeugleiste belegte Breite (logische Punkte, inkl. Randabstand),
+    /// damit die Seite daneben zentriert werden kann.
+    pub fn sidebar_reserved_width(&self) -> f32 {
+        self.toolbar_rect
+            .map(|r| r.width() + 2.0 * Self::SIDEBAR_MARGIN)
+            .unwrap_or(0.0)
+    }
 
     pub fn new() -> Self {
         Self::default()
@@ -313,89 +361,6 @@ impl UiState {
         }
         false
     }
-}
-
-/// Stilvoller Werkzeug-Button mit 3 px hohem Farbindikator-Balken an der Unterkante
-/// und Ausklapp-Indikator (▾ / ▴).
-fn tool_pill_button_with_indicator(
-    ui: &mut egui::Ui,
-    is_active: bool,
-    text: &str,
-    indicator_color: [f32; 4],
-    is_menu_open: bool,
-    tooltip: &str,
-) -> egui::Response {
-    let size = egui::vec2(90.0, 30.0);
-    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
-
-    if ui.is_rect_visible(rect) {
-        let (bg, text_color, stroke) = if is_active {
-            (
-                egui::Color32::from_rgba_premultiplied(45, 80, 145, 230),
-                egui::Color32::WHITE,
-                egui::Stroke::new(
-                    1.0_f32,
-                    egui::Color32::from_rgba_premultiplied(110, 165, 255, 190),
-                ),
-            )
-        } else if response.hovered() {
-            (
-                egui::Color32::from_rgba_premultiplied(255, 255, 255, 16),
-                egui::Color32::WHITE,
-                egui::Stroke::new(
-                    1.0_f32,
-                    egui::Color32::from_rgba_premultiplied(255, 255, 255, 25),
-                ),
-            )
-        } else {
-            (
-                egui::Color32::from_rgba_premultiplied(255, 255, 255, 8),
-                egui::Color32::from_gray(215),
-                egui::Stroke::new(
-                    1.0_f32,
-                    egui::Color32::from_rgba_premultiplied(255, 255, 255, 15),
-                ),
-            )
-        };
-
-        // Button-Hintergrund
-        ui.painter()
-            .rect_filled(rect, egui::Rounding::same(8.0), bg);
-        ui.painter()
-            .rect_stroke(rect, egui::Rounding::same(8.0), stroke);
-
-        // Text & Caret
-        let label = if is_menu_open {
-            format!("{} ▴", text)
-        } else {
-            format!("{} ▾", text)
-        };
-        ui.painter().text(
-            egui::pos2(rect.center().x, rect.center().y - 2.5),
-            egui::Align2::CENTER_CENTER,
-            label,
-            egui::FontId::proportional(12.5),
-            text_color,
-        );
-
-        // 3 px hoher Farbbalken an der Unterkante
-        let bar_margin_x = 10.0;
-        let bar_h = 3.0;
-        let bar_rect = egui::Rect::from_min_max(
-            egui::pos2(rect.min.x + bar_margin_x, rect.max.y - bar_h - 2.5),
-            egui::pos2(rect.max.x - bar_margin_x, rect.max.y - 2.5),
-        );
-        let bar_color = egui::Color32::from_rgba_unmultiplied(
-            (indicator_color[0] * 255.0) as u8,
-            (indicator_color[1] * 255.0) as u8,
-            (indicator_color[2] * 255.0) as u8,
-            ((indicator_color[3] * 255.0) as u8).max(180),
-        );
-        ui.painter()
-            .rect_filled(bar_rect, egui::Rounding::same(1.5), bar_color);
-    }
-
-    response.on_hover_text(tooltip)
 }
 
 /// Stilvoller einfacher Werkzeug-Button (für den Radierer).
@@ -517,37 +482,6 @@ fn stroke_preview_button(
     response.on_hover_text(format!("Stärke auf {} setzen", label_text))
 }
 
-/// Kompakter Strichbreiten-Preset-Button für die Haupt-Toolbar.
-fn preset_width_button(ui: &mut egui::Ui, is_active: bool, text: &str) -> egui::Response {
-    let (bg, text_color, stroke) = if is_active {
-        (
-            egui::Color32::from_rgba_premultiplied(50, 85, 150, 230),
-            egui::Color32::WHITE,
-            egui::Stroke::new(
-                1.0_f32,
-                egui::Color32::from_rgba_premultiplied(120, 175, 255, 190),
-            ),
-        )
-    } else {
-        (
-            egui::Color32::from_rgba_premultiplied(255, 255, 255, 6),
-            egui::Color32::from_gray(190),
-            egui::Stroke::new(
-                1.0_f32,
-                egui::Color32::from_rgba_premultiplied(255, 255, 255, 12),
-            ),
-        )
-    };
-
-    let button = egui::Button::new(egui::RichText::new(text).color(text_color).size(11.5))
-        .fill(bg)
-        .stroke(stroke)
-        .rounding(egui::Rounding::same(6.0))
-        .min_size(egui::vec2(0.0, 24.0));
-
-    ui.add(button)
-}
-
 /// Abgerundeter Aktions-Button (Undo, Redo, Navigation, PDF).
 fn action_pill_button(
     ui: &mut egui::Ui,
@@ -588,19 +522,207 @@ fn action_pill_button(
     ui.add_enabled(enabled, button).on_hover_text(tooltip)
 }
 
-/// Feine, transparente Trennlinie für Gruppenabstände.
-fn toolbar_divider(ui: &mut egui::Ui) {
-    ui.add_space(2.0);
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(1.0, 20.0), egui::Sense::hover());
-    ui.painter().vline(
-        rect.center().x,
-        rect.y_range(),
+/// Inhalt eines Symbol-Knopfs der Werkzeugleiste.
+#[derive(Clone, Copy)]
+enum SidebarIcon<'a> {
+    /// Zeichen aus den eingebauten egui-Schriften
+    Glyph(&'a str),
+    /// Kurzer Text (z. B. Seitenzahl) in kleinerer Schrift
+    Text(&'a str),
+    /// Selbst gezeichneter Radiergummi (kein passendes Zeichen in den egui-Schriften)
+    Eraser,
+    /// Selbst gezeichnetes gestricheltes Auswahlrechteck
+    Lasso,
+}
+
+/// Quadratischer Symbol-Knopf der Werkzeugleiste mit optionalem Farbbalken an der Unterkante.
+fn sidebar_button(
+    ui: &mut egui::Ui,
+    size: f32,
+    icon: SidebarIcon,
+    is_active: bool,
+    enabled: bool,
+    indicator: Option<[f32; 4]>,
+    tooltip: &str,
+) -> egui::Response {
+    let size = egui::vec2(size, size);
+    let sense = if enabled {
+        egui::Sense::click()
+    } else {
+        egui::Sense::hover()
+    };
+    let (rect, response) = ui.allocate_exact_size(size, sense);
+
+    if ui.is_rect_visible(rect) {
+        let painter = ui.painter();
+        let bg = if is_active {
+            egui::Color32::from_rgba_unmultiplied(45, 80, 145, 230)
+        } else if enabled && response.hovered() {
+            egui::Color32::from_white_alpha(18)
+        } else {
+            egui::Color32::TRANSPARENT
+        };
+        painter.rect_filled(rect, egui::Rounding::same(8.0), bg);
+        if is_active {
+            painter.rect_stroke(
+                rect,
+                egui::Rounding::same(8.0),
+                egui::Stroke::new(
+                    1.0_f32,
+                    egui::Color32::from_rgba_unmultiplied(110, 165, 255, 190),
+                ),
+            );
+        }
+
+        let color = if !enabled {
+            egui::Color32::from_gray(95)
+        } else if is_active {
+            egui::Color32::WHITE
+        } else {
+            egui::Color32::from_gray(220)
+        };
+        let c = rect.center();
+        match icon {
+            SidebarIcon::Glyph(g) => {
+                painter.text(
+                    c,
+                    egui::Align2::CENTER_CENTER,
+                    g,
+                    egui::FontId::proportional(19.0),
+                    color,
+                );
+            }
+            SidebarIcon::Text(t) => {
+                painter.text(
+                    c,
+                    egui::Align2::CENTER_CENTER,
+                    t,
+                    egui::FontId::proportional(12.0),
+                    color,
+                );
+            }
+            SidebarIcon::Eraser => {
+                // Schräg liegender Radiergummi: vordere Hälfte hell, hintere Hälfte farbig
+                let dir = egui::vec2(1.0, -1.0).normalized();
+                let perp = egui::vec2(dir.y, -dir.x) * -1.0;
+                let (half_len, half_w) = (10.0, 5.5);
+                let p = |along: f32, across: f32| c + dir * along + perp * across;
+                let body = vec![
+                    p(-half_len, -half_w),
+                    p(0.0, -half_w),
+                    p(0.0, half_w),
+                    p(-half_len, half_w),
+                ];
+                let tip = vec![
+                    p(0.0, -half_w),
+                    p(half_len, -half_w),
+                    p(half_len, half_w),
+                    p(0.0, half_w),
+                ];
+                let stroke = egui::Stroke::new(1.5_f32, color);
+                painter.add(egui::Shape::convex_polygon(
+                    tip,
+                    egui::Color32::from_rgb(232, 120, 140).gamma_multiply(if enabled {
+                        1.0
+                    } else {
+                        0.4
+                    }),
+                    stroke,
+                ));
+                painter.add(egui::Shape::convex_polygon(
+                    body,
+                    egui::Color32::TRANSPARENT,
+                    stroke,
+                ));
+            }
+            SidebarIcon::Lasso => {
+                let r = egui::Rect::from_center_size(c, egui::vec2(20.0, 16.0));
+                let pts = [
+                    r.left_top(),
+                    r.right_top(),
+                    r.right_bottom(),
+                    r.left_bottom(),
+                    r.left_top(),
+                ];
+                painter.extend(egui::Shape::dashed_line(
+                    &pts,
+                    egui::Stroke::new(1.6_f32, color),
+                    3.5,
+                    2.5,
+                ));
+            }
+        }
+
+        if let Some(ind) = indicator {
+            let bar = egui::Rect::from_min_max(
+                egui::pos2(rect.min.x + 9.0, rect.max.y - 5.0),
+                egui::pos2(rect.max.x - 9.0, rect.max.y - 2.0),
+            );
+            painter.rect_filled(bar, egui::Rounding::same(1.5), color32_from(ind));
+        }
+    }
+
+    if tooltip.is_empty() {
+        response
+    } else {
+        response.on_hover_text(tooltip)
+    }
+}
+
+/// Waagerechte Trennlinie zwischen Gruppen der Werkzeugleiste.
+fn sidebar_divider(ui: &mut egui::Ui, button_size: f32) {
+    let (rect, _) =
+        ui.allocate_exact_size(egui::vec2(button_size - 12.0, 7.0), egui::Sense::hover());
+    ui.painter().hline(
+        rect.x_range(),
+        rect.center().y,
         egui::Stroke::new(
             1.0_f32,
             egui::Color32::from_rgba_premultiplied(255, 255, 255, 25),
         ),
     );
-    ui.add_space(2.0);
+}
+
+/// Wandelt eine RGBA-Farbe (0..1) in eine gut sichtbare egui-Farbe um.
+fn color32_from(color: [f32; 4]) -> egui::Color32 {
+    egui::Color32::from_rgba_unmultiplied(
+        (color[0].clamp(0.0, 1.0) * 255.0) as u8,
+        (color[1].clamp(0.0, 1.0) * 255.0) as u8,
+        (color[2].clamp(0.0, 1.0) * 255.0) as u8,
+        ((color[3].clamp(0.0, 1.0) * 255.0) as u8).max(180),
+    )
+}
+
+/// Position und Ankerpunkt eines Popovers neben einem Knopf der Werkzeugleiste,
+/// immer zur Blattseite hin geöffnet.
+fn popover_placement(
+    side: SidebarSide,
+    toolbar: egui::Rect,
+    button: egui::Rect,
+) -> (egui::Pos2, egui::Align2) {
+    match side {
+        SidebarSide::Left => (
+            egui::pos2(toolbar.max.x + 8.0, button.min.y),
+            egui::Align2::LEFT_TOP,
+        ),
+        SidebarSide::Right => (
+            egui::pos2(toolbar.min.x - 8.0, button.min.y),
+            egui::Align2::RIGHT_TOP,
+        ),
+    }
+}
+
+/// Farbe und Beschriftung der Speicherstatus-Anzeige.
+fn autosave_status_style(status: AutosaveStatus) -> (egui::Color32, &'static str) {
+    match status {
+        AutosaveStatus::Saved => (egui::Color32::from_rgb(46, 204, 113), "Alles gespeichert"),
+        AutosaveStatus::Saving => (egui::Color32::from_rgb(241, 196, 15), "Speichert …"),
+        AutosaveStatus::Pending => (
+            egui::Color32::from_rgb(230, 126, 34),
+            "Ungespeicherte Änderungen",
+        ),
+        AutosaveStatus::Error => (egui::Color32::from_rgb(231, 76, 60), "Speicherfehler!"),
+    }
 }
 
 /// Zeichnet einen runden Farbauswahl-Knopf (Color Swatch) mit anpassbarem Durchmesser.
@@ -621,17 +743,25 @@ fn color_circle_swatch(
         let a = ((color[3].clamp(0.0, 1.0) * 255.0) as u8).max(180);
         let c32 = egui::Color32::from_rgba_unmultiplied(r, g, b, a);
 
-        let stroke = if is_selected {
-            egui::Stroke::new(2.5_f32, egui::Color32::WHITE)
-        } else if response.hovered() {
-            egui::Stroke::new(1.8_f32, egui::Color32::from_white_alpha(200))
+        // Füllung bleibt immer sichtbar; die Auswahl ist ein Ring mit Abstand außen herum,
+        // dunkle Farben bekommen eine helle Kontur gegen den dunklen Hintergrund
+        let outer = (diameter / 2.0) - 1.0;
+        let fill_radius = outer - 3.0;
+        let outline = if response.hovered() {
+            egui::Stroke::new(1.5_f32, egui::Color32::from_white_alpha(200))
         } else {
-            egui::Stroke::new(1.0_f32, egui::Color32::from_white_alpha(65))
+            egui::Stroke::new(1.0_f32, egui::Color32::from_white_alpha(110))
         };
-
-        let radius = (diameter / 2.0) - 1.5;
-        ui.painter().circle_filled(rect.center(), radius, c32);
-        ui.painter().circle_stroke(rect.center(), radius, stroke);
+        ui.painter().circle_filled(rect.center(), fill_radius, c32);
+        ui.painter()
+            .circle_stroke(rect.center(), fill_radius, outline);
+        if is_selected {
+            ui.painter().circle_stroke(
+                rect.center(),
+                outer,
+                egui::Stroke::new(2.0_f32, egui::Color32::WHITE),
+            );
+        }
     }
 
     response.on_hover_text(tooltip)
@@ -651,401 +781,383 @@ pub fn render_ui(
 
     let mut pen_btn_rect = None;
     let mut high_btn_rect = None;
+    let mut more_btn_rect = None;
 
-    // 1. Schwebende Top-Toolbar (zentriert oben mit 16 px Abstand zum Fensterrand)
+    // 1. Senkrechte Werkzeugleiste, seitlich oben angedockt. Bewusst nicht vertikal
+    //    zentriert: sonst würden alle Knöpfe springen, sobald sich die Höhe ändert.
+    let (anchor, offset) = match state.sidebar_side {
+        SidebarSide::Left => (
+            egui::Align2::LEFT_TOP,
+            egui::vec2(UiState::SIDEBAR_MARGIN, UiState::SIDEBAR_MARGIN),
+        ),
+        SidebarSide::Right => (
+            egui::Align2::RIGHT_TOP,
+            egui::vec2(-UiState::SIDEBAR_MARGIN, UiState::SIDEBAR_MARGIN),
+        ),
+    };
+    // Knopfgröße an die Fensterhöhe anpassen (40 px, schrittweise bis 28 px); reicht auch das nicht,
+    // wird die Leiste scrollbar statt abgeschnitten
+    let max_height = (ctx.screen_rect().height() - 2.0 * UiState::SIDEBAR_MARGIN - 12.0).max(120.0);
+    // Größe nach dem höchsten Fall (Auswahl mit Aktionen), damit Knöpfe beim
+    // Werkzeugwechsel weder schrumpfen noch verrutschen
+    let btn = UiState::sidebar_button_size(ActiveTool::Select, max_height);
+
     let area_response = egui::Area::new(egui::Id::new("floating_toolbar_area"))
-        .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 16.0))
+        .anchor(anchor, offset)
         .order(egui::Order::Foreground)
         .show(ctx, |ui| {
-            let frame_response = egui::Frame::none()
-                .fill(egui::Color32::from_rgba_premultiplied(24, 24, 28, 225)) // Transluzenter Milchglas-Hintergrund
-                .rounding(egui::Rounding::same(UiState::TOOLBAR_ROUNDING)) // Abgerundete Pill-Ecken (14 px)
+            egui::Frame::none()
+                .fill(egui::Color32::from_rgba_premultiplied(24, 24, 28, 225))
+                .rounding(egui::Rounding::same(UiState::TOOLBAR_ROUNDING))
                 .stroke(egui::Stroke::new(
                     1.0_f32,
-                    egui::Color32::from_rgba_premultiplied(255, 255, 255, 30), // Feine Kante
+                    egui::Color32::from_rgba_premultiplied(255, 255, 255, 30),
                 ))
-                .inner_margin(egui::Margin::symmetric(14.0, 8.0))
+                .inner_margin(egui::Margin::same(6.0))
                 .shadow(egui::epaint::Shadow {
                     offset: egui::vec2(0.0, 4.0),
                     blur: 16.0,
                     spread: 0.0,
-                    color: egui::Color32::from_black_alpha(100), // Weicher Schattenwurf
+                    color: egui::Color32::from_black_alpha(100),
                 })
                 .show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing = egui::vec2(6.0, 0.0);
-
-                        // --- 0. DOKUMENTEN- & NOTIZBUCH-AUSWAHL ---
-                        let doc_title_truncated = if state.document_title.chars().count() > 16 {
-                            let prefix: String = state.document_title.chars().take(14).collect();
-                            format!("{prefix}…")
-                        } else if state.document_title.is_empty() {
-                            "Notizbuch".to_string()
-                        } else {
-                            state.document_title.clone()
-                        };
-                        let doc_btn_label = format!("📚 {} ▾", doc_title_truncated);
-                        let doc_resp = tool_pill_button(
-                            ui,
-                            state.is_document_menu_open,
-                            &doc_btn_label,
-                            "Dokumenten-Manager: Notizbuch wechseln, anlegen oder verwalten",
-                        );
-                        if doc_resp.clicked() {
-                            state.is_document_menu_open = !state.is_document_menu_open;
-                            state.is_pen_menu_open = false;
-                            state.is_highlighter_menu_open = false;
-                            if state.is_document_menu_open {
-                                actions.push(UiAction::RefreshNotebooks);
-                            }
-                        }
-
-                        toolbar_divider(ui);
-
-                        // --- 1. WERKZEUGAUSWAHL MIT FARBINDIKATOR ---
-                        let pen_resp = tool_pill_button_with_indicator(
-                            ui,
-                            state.active_tool == ActiveTool::Pen,
-                            "✏ Stift",
-                            state.pen_color,
-                            state.is_pen_menu_open,
-                            "Stift wählen / Einstellungen öffnen (Farbe & Stärke)",
-                        );
-                        pen_btn_rect = Some(pen_resp.rect);
-
-                        if pen_resp.clicked() {
-                            if state.active_tool != ActiveTool::Pen {
-                                state.active_tool = ActiveTool::Pen;
-                                state.is_pen_menu_open = true;
-                                state.is_highlighter_menu_open = false;
-                                actions.push(UiAction::SetTool(ActiveTool::Pen));
-                                actions.push(UiAction::SetColor(state.pen_color));
-                                actions.push(UiAction::SetStrokeWidthMm(state.pen_stroke_width_mm));
-                            } else {
-                                state.is_pen_menu_open = !state.is_pen_menu_open;
-                                state.is_highlighter_menu_open = false;
-                            }
-                        }
-
-                        let high_resp = tool_pill_button_with_indicator(
-                            ui,
-                            state.active_tool == ActiveTool::Highlighter,
-                            "🖍 Marker",
-                            state.highlighter_color,
-                            state.is_highlighter_menu_open,
-                            "Textmarker wählen / Einstellungen öffnen",
-                        );
-                        high_btn_rect = Some(high_resp.rect);
-
-                        if high_resp.clicked() {
-                            if state.active_tool != ActiveTool::Highlighter {
-                                state.active_tool = ActiveTool::Highlighter;
-                                state.is_highlighter_menu_open = true;
-                                state.is_pen_menu_open = false;
-                                actions.push(UiAction::SetTool(ActiveTool::Highlighter));
-                                actions.push(UiAction::SetColor(state.highlighter_color));
-                                actions.push(UiAction::SetStrokeWidthMm(state.highlighter_stroke_width_mm));
-                            } else {
-                                state.is_highlighter_menu_open = !state.is_highlighter_menu_open;
-                                state.is_pen_menu_open = false;
-                            }
-                        }
-
-                        let shape_resp = tool_pill_button(
-                            ui,
-                            state.active_tool == ActiveTool::Shape,
-                            "📐 Formen",
-                            "Geometrie / Auto-Snap (Tippe auf Striche zur perfekten Formerkennung)",
-                        );
-                        if shape_resp.clicked() {
-                            state.active_tool = ActiveTool::Shape;
-                            state.is_pen_menu_open = false;
-                            state.is_highlighter_menu_open = false;
-                            actions.push(UiAction::SetTool(ActiveTool::Shape));
-                        }
-
-                        if tool_pill_button(
-                            ui,
-                            state.active_tool == ActiveTool::Eraser,
-                            "⌫ Radierer",
-                            "Strichradierer (Taste: E oder Rechtsklick)",
+                    egui::ScrollArea::vertical()
+                        .max_height(max_height)
+                        .scroll_bar_visibility(
+                            egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded,
                         )
-                        .clicked()
-                        {
-                            state.active_tool = ActiveTool::Eraser;
-                            state.is_pen_menu_open = false;
-                            state.is_highlighter_menu_open = false;
-                            actions.push(UiAction::SetTool(ActiveTool::Eraser));
-                        }
+                        .show(ui, |ui| {
+                            // Zentriertes Layout nimmt sonst die volle Fensterbreite ein
+                            ui.set_width(btn);
+                            ui.with_layout(egui::Layout::top_down(egui::Align::Center), |ui| {
+                                ui.spacing_mut().item_spacing = egui::vec2(0.0, 3.0);
 
-                        let select_resp = tool_pill_button(
-                            ui,
-                            state.active_tool == ActiveTool::Select,
-                            "⬚ Auswählen",
-                            "Objektauswahl / Lasso (Taste: V) - Verschieben, Drehen, Skalieren, Kopieren, Löschen",
-                        );
-                        if select_resp.clicked() {
-                            state.active_tool = ActiveTool::Select;
-                            state.is_pen_menu_open = false;
-                            state.is_highlighter_menu_open = false;
-                            actions.push(UiAction::SetTool(ActiveTool::Select));
-                        }
-
-                        toolbar_divider(ui);
-
-                        // --- 2. FARBPALETTE SCHNELLAUSWAHL ---
-                        if state.active_tool == ActiveTool::Pen || state.active_tool == ActiveTool::Shape || state.active_tool == ActiveTool::Select {
-                            for (color, label) in PEN_COLOR_PRESETS {
-                                let is_sel = (state.pen_color[0] - color[0]).abs() < 0.05
-                                    && (state.pen_color[1] - color[1]).abs() < 0.05
-                                    && (state.pen_color[2] - color[2]).abs() < 0.05;
-                                if color_circle_swatch(ui, color, is_sel, label, 20.0).clicked() {
-                                    state.pen_color = color;
-                                    actions.push(UiAction::SetColor(color));
-                                }
-                            }
-                        } else if state.active_tool == ActiveTool::Highlighter {
-                            for (color, label) in HIGHLIGHTER_COLOR_PRESETS {
-                                let is_sel = (state.highlighter_color[0] - color[0]).abs() < 0.05
-                                    && (state.highlighter_color[1] - color[1]).abs() < 0.05
-                                    && (state.highlighter_color[2] - color[2]).abs() < 0.05;
-                                if color_circle_swatch(ui, color, is_sel, label, 20.0).clicked() {
-                                    state.highlighter_color = color;
-                                    actions.push(UiAction::SetColor(color));
-                                }
-                            }
-                        }
-
-                        // Bei aktiver Auswahl: Direkte Schnell-Aktionen in der Toolbar
-                        if state.active_tool == ActiveTool::Select {
-                            toolbar_divider(ui);
-                            if ui.button(egui::RichText::new("📋 Kopieren").size(12.0)).on_hover_text("Auswahl in die Zwischenablage kopieren (Strg+C)").clicked() {
-                                actions.push(UiAction::CopySelected);
-                            }
-                            if ui.button(egui::RichText::new("📥 Einfügen").size(12.0)).on_hover_text("Aus Zwischenablage einfügen (Strg+V)").clicked() {
-                                actions.push(UiAction::PasteSelected);
-                            }
-                            if ui.button(egui::RichText::new("🔄 90° Drehen").size(12.0)).on_hover_text("Ausgewählte Objekte um 90° im Uhrzeigersinn drehen (R)").clicked() {
-                                actions.push(UiAction::RotateSelected);
-                            }
-                            if ui.button(egui::RichText::new("🗑 Löschen").color(egui::Color32::from_rgb(255, 110, 110)).size(12.0)).on_hover_text("Ausgewählte Objekte entfernen (Entf/Backspace)").clicked() {
-                                actions.push(UiAction::DeleteSelected);
-                            }
-                        }
-
-                        if state.active_tool != ActiveTool::Eraser && state.active_tool != ActiveTool::Select {
-                            toolbar_divider(ui);
-                        }
-
-                        // --- 3. STRICHBREITEN-SCHNELLAUSWAHL ---
-                        if state.active_tool == ActiveTool::Pen || state.active_tool == ActiveTool::Shape {
-                            for &(preset, label) in &PEN_WIDTH_PRESETS {
-                                let is_sel = (state.pen_stroke_width_mm - preset).abs() < 0.05;
-                                if preset_width_button(ui, is_sel, label).clicked() {
-                                    state.pen_stroke_width_mm = preset;
-                                    actions.push(UiAction::SetStrokeWidthMm(preset));
-                                }
-                            }
-                            toolbar_divider(ui);
-                        } else if state.active_tool == ActiveTool::Highlighter {
-                            for &(preset, label) in &HIGHLIGHTER_WIDTH_PRESETS {
-                                let is_sel = (state.highlighter_stroke_width_mm - preset).abs() < 0.1;
-                                if preset_width_button(ui, is_sel, label).clicked() {
-                                    state.highlighter_stroke_width_mm = preset;
-                                    actions.push(UiAction::SetStrokeWidthMm(preset));
-                                }
-                            }
-                            toolbar_divider(ui);
-                        }
-
-                        // --- 4. UNDO & REDO ---
-                        let can_undo = notebook.current_page().history.can_undo();
-                        let can_redo = notebook.current_page().history.can_redo();
-
-                        if action_pill_button(ui, can_undo, "⟲ Undo", "Rückgängig (Strg + Z)").clicked() {
-                            actions.push(UiAction::Undo);
-                        }
-
-                        if action_pill_button(ui, can_redo, "⟳ Redo", "Wiederholen (Strg + Y)").clicked() {
-                            actions.push(UiAction::Redo);
-                        }
-
-                        toolbar_divider(ui);
-
-                        // --- 5. DISKRETE SEITENNAVIGATION ---
-                        let can_prev = notebook.current_page_index > 0;
-                        if action_pill_button(ui, can_prev, "◄", "Vorherige Seite (PageUp)").clicked() {
-                            actions.push(UiAction::PreviousPage);
-                        }
-
-                        let page_badge_text = format!(
-                            "Seite {} / {}",
-                            notebook.current_page_index + 1,
-                            notebook.pages.len()
-                        );
-                        if action_pill_button(ui, true, &page_badge_text, "Schnellauswahl öffnen").clicked() {
-                            state.show_page_jump_popup = !state.show_page_jump_popup;
-                        }
-
-                        if action_pill_button(ui, true, "►", "Nächste Seite (PageDown / N)").clicked() {
-                            actions.push(UiAction::NextPage);
-                        }
-
-                        if action_pill_button(ui, true, "➕", "Neue Seite anlegen").clicked() {
-                            actions.push(UiAction::AddPage);
-                        }
-
-                        toolbar_divider(ui);
-
-                        // --- 6. HINTERGRUNDRASTER-DROPDOWN ---
-                        let current_bg = notebook.current_page().background;
-                        let current_bg_text = match current_bg {
-                            PageBackground::Grid5mm => "Kariert (5mm)",
-                            PageBackground::Lined => "Liniert (7.5mm)",
-                            PageBackground::DotGrid => "Punktraster (5mm)",
-                            PageBackground::Blank => "Blanko",
-                        };
-
-                        egui::ComboBox::from_id_source("bg_dropdown_picker")
-                            .selected_text(current_bg_text)
-                            .show_ui(ui, |ui| {
-                                if ui
-                                    .selectable_label(current_bg == PageBackground::Grid5mm, "Kariert (5mm)")
-                                    .clicked()
+                                // --- Notizbücher ---
+                                let doc_tooltip = format!(
+                                    "Notizbücher verwalten (aktuell: {})",
+                                    if state.document_title.is_empty() {
+                                        "Notizbuch"
+                                    } else {
+                                        state.document_title.as_str()
+                                    }
+                                );
+                                if sidebar_button(
+                                    ui,
+                                    btn,
+                                    SidebarIcon::Glyph("📚"),
+                                    state.is_document_menu_open,
+                                    true,
+                                    None,
+                                    &doc_tooltip,
+                                )
+                                .clicked()
                                 {
-                                    actions.push(UiAction::SetBackground(PageBackground::Grid5mm));
+                                    state.is_document_menu_open = !state.is_document_menu_open;
+                                    state.is_pen_menu_open = false;
+                                    state.is_highlighter_menu_open = false;
+                                    state.is_more_menu_open = false;
+                                    if state.is_document_menu_open {
+                                        actions.push(UiAction::RefreshNotebooks);
+                                    }
                                 }
-                                if ui
-                                    .selectable_label(current_bg == PageBackground::Lined, "Liniert (7.5mm)")
-                                    .clicked()
-                                {
-                                    actions.push(UiAction::SetBackground(PageBackground::Lined));
+
+                                sidebar_divider(ui, btn);
+
+                                // --- Werkzeuge ---
+                                let pen_resp = sidebar_button(
+                                    ui,
+                                    btn,
+                                    SidebarIcon::Glyph("✏"),
+                                    state.active_tool == ActiveTool::Pen,
+                                    true,
+                                    Some(state.pen_color),
+                                    if state.is_pen_menu_open {
+                                        ""
+                                    } else {
+                                        "Stift (B/U/R für Farben) – erneut tippen für Farbe & Stärke"
+                                    },
+                                );
+                                pen_btn_rect = Some(pen_resp.rect);
+                                if pen_resp.clicked() {
+                                    state.is_highlighter_menu_open = false;
+                                    state.is_more_menu_open = false;
+                                    if state.active_tool != ActiveTool::Pen {
+                                        state.active_tool = ActiveTool::Pen;
+                                        state.is_pen_menu_open = false;
+                                        actions.push(UiAction::SetTool(ActiveTool::Pen));
+                                        actions.push(UiAction::SetColor(state.pen_color));
+                                        actions.push(UiAction::SetStrokeWidthMm(
+                                            state.pen_stroke_width_mm,
+                                        ));
+                                    } else {
+                                        state.is_pen_menu_open = !state.is_pen_menu_open;
+                                    }
                                 }
-                                if ui
-                                    .selectable_label(current_bg == PageBackground::DotGrid, "Punktraster (5mm)")
-                                    .clicked()
-                                {
-                                    actions.push(UiAction::SetBackground(PageBackground::DotGrid));
+
+                                let high_resp = sidebar_button(
+                                    ui,
+                                    btn,
+                                    SidebarIcon::Glyph("🖊"),
+                                    state.active_tool == ActiveTool::Highlighter,
+                                    true,
+                                    Some(state.highlighter_color),
+                                    if state.is_highlighter_menu_open {
+                                        ""
+                                    } else {
+                                        "Textmarker – erneut tippen für Farbe & Stärke"
+                                    },
+                                );
+                                high_btn_rect = Some(high_resp.rect);
+                                if high_resp.clicked() {
+                                    state.is_pen_menu_open = false;
+                                    state.is_more_menu_open = false;
+                                    if state.active_tool != ActiveTool::Highlighter {
+                                        state.active_tool = ActiveTool::Highlighter;
+                                        state.is_highlighter_menu_open = false;
+                                        actions.push(UiAction::SetTool(ActiveTool::Highlighter));
+                                        actions.push(UiAction::SetColor(state.highlighter_color));
+                                        actions.push(UiAction::SetStrokeWidthMm(
+                                            state.highlighter_stroke_width_mm,
+                                        ));
+                                    } else {
+                                        state.is_highlighter_menu_open =
+                                            !state.is_highlighter_menu_open;
+                                    }
                                 }
-                                if ui
-                                    .selectable_label(current_bg == PageBackground::Blank, "Blanko")
+
+                                for (tool, icon, tooltip) in [
+                                    (
+                                        ActiveTool::Shape,
+                                        SidebarIcon::Glyph("📐"),
+                                        "Formen: Striche werden zu Linien, Rechtecken, Kreisen … (S/F)",
+                                    ),
+                                    (
+                                        ActiveTool::Eraser,
+                                        SidebarIcon::Eraser,
+                                        "Radierer (E oder rechte Maustaste)",
+                                    ),
+                                    (
+                                        ActiveTool::Select,
+                                        SidebarIcon::Lasso,
+                                        "Auswählen: verschieben, drehen, skalieren, kopieren (V)",
+                                    ),
+                                ] {
+                                    if sidebar_button(
+                                        ui,
+                                        btn,
+                                        icon,
+                                        state.active_tool == tool,
+                                        true,
+                                        None,
+                                        tooltip,
+                                    )
                                     .clicked()
+                                    {
+                                        state.active_tool = tool;
+                                        state.is_pen_menu_open = false;
+                                        state.is_highlighter_menu_open = false;
+                                        state.is_more_menu_open = false;
+                                        actions.push(UiAction::SetTool(tool));
+                                    }
+                                }
+
+                                // --- Farben des aktiven Werkzeugs ---
+                                let palette: Option<(&[ColorPreset], [f32; 4])> =
+                                    match state.active_tool {
+                                        ActiveTool::Pen | ActiveTool::Shape | ActiveTool::Select => {
+                                            Some((&PEN_COLOR_PRESETS[..], state.pen_color))
+                                        }
+                                        ActiveTool::Highlighter => Some((
+                                            &HIGHLIGHTER_COLOR_PRESETS[..],
+                                            state.highlighter_color,
+                                        )),
+                                        ActiveTool::Eraser => None,
+                                    };
+                                // Fester Platz für die längste Palette, damit die Knöpfe darunter
+                                // beim Werkzeugwechsel nicht springen
+                                sidebar_divider(ui, btn);
+                                let swatch = UiState::sidebar_swatch_size(btn);
+                                let shown = palette.map_or(0, |(presets, _)| presets.len());
+                                if let Some((presets, current)) = palette {
+                                    for &(color, label) in presets {
+                                        let is_sel = (current[0] - color[0]).abs() < 0.05
+                                            && (current[1] - color[1]).abs() < 0.05
+                                            && (current[2] - color[2]).abs() < 0.05;
+                                        if color_circle_swatch(ui, color, is_sel, label, swatch)
+                                            .clicked()
+                                        {
+                                            if state.active_tool == ActiveTool::Highlighter {
+                                                state.highlighter_color = color;
+                                            } else {
+                                                state.pen_color = color;
+                                            }
+                                            actions.push(UiAction::SetColor(color));
+                                        }
+                                    }
+                                }
+                                let missing = UiState::MAX_PALETTE_LEN.saturating_sub(shown);
+                                if missing > 0 {
+                                    let spacing = ui.spacing().item_spacing.y;
+                                    ui.add_space(missing as f32 * (swatch + spacing));
+                                }
+
+                                // --- Aktionen für die Auswahl ---
+                                if state.active_tool == ActiveTool::Select {
+                                    sidebar_divider(ui, btn);
+                                    for (icon, tooltip, action) in [
+                                        ("📋", "Kopieren (Strg+C)", UiAction::CopySelected),
+                                        ("📥", "Einfügen (Strg+V)", UiAction::PasteSelected),
+                                        ("🔄", "Um 90° drehen (R)", UiAction::RotateSelected),
+                                        ("🗑", "Löschen (Entf)", UiAction::DeleteSelected),
+                                    ] {
+                                        if sidebar_button(
+                                            ui,
+                                            btn,
+                                            SidebarIcon::Glyph(icon),
+                                            false,
+                                            true,
+                                            None,
+                                            tooltip,
+                                        )
+                                        .clicked()
+                                        {
+                                            actions.push(action);
+                                        }
+                                    }
+                                }
+
+                                sidebar_divider(ui, btn);
+
+                                // --- Undo & Redo ---
+                                let history = &notebook.current_page().history;
+                                if sidebar_button(
+                                    ui,
+                                    btn,
+                                    SidebarIcon::Glyph("⟲"),
+                                    false,
+                                    history.can_undo(),
+                                    None,
+                                    "Rückgängig (Strg+Z)",
+                                )
+                                .clicked()
                                 {
-                                    actions.push(UiAction::SetBackground(PageBackground::Blank));
+                                    actions.push(UiAction::Undo);
+                                }
+                                if sidebar_button(
+                                    ui,
+                                    btn,
+                                    SidebarIcon::Glyph("⟳"),
+                                    false,
+                                    history.can_redo(),
+                                    None,
+                                    "Wiederholen (Strg+Y)",
+                                )
+                                .clicked()
+                                {
+                                    actions.push(UiAction::Redo);
+                                }
+
+                                sidebar_divider(ui, btn);
+
+                                // --- Seitennavigation ---
+                                if sidebar_button(
+                                    ui,
+                                    btn,
+                                    SidebarIcon::Glyph("⏶"),
+                                    false,
+                                    notebook.current_page_index > 0,
+                                    None,
+                                    "Vorherige Seite (Bild↑)",
+                                )
+                                .clicked()
+                                {
+                                    actions.push(UiAction::PreviousPage);
+                                }
+                                let page_text = format!(
+                                    "{}/{}",
+                                    notebook.current_page_index + 1,
+                                    notebook.pages.len()
+                                );
+                                if sidebar_button(
+                                    ui,
+                                    btn,
+                                    SidebarIcon::Text(&page_text),
+                                    state.show_page_jump_popup,
+                                    true,
+                                    None,
+                                    "Seite wählen",
+                                )
+                                .clicked()
+                                {
+                                    state.show_page_jump_popup = !state.show_page_jump_popup;
+                                }
+                                let is_last = notebook.current_page_index + 1 >= notebook.pages.len();
+                                if sidebar_button(
+                                    ui,
+                                    btn,
+                                    SidebarIcon::Glyph("⏷"),
+                                    false,
+                                    true,
+                                    None,
+                                    if is_last {
+                                        "Neue Seite anhängen (Bild↓ / N)"
+                                    } else {
+                                        "Nächste Seite (Bild↓ / N)"
+                                    },
+                                )
+                                .clicked()
+                                {
+                                    actions.push(UiAction::NextPage);
+                                }
+
+                                sidebar_divider(ui, btn);
+
+                                // --- ☰-Menü mit Status-Punkt (Speichern) und Update-Hinweis ---
+                                let update_available = matches!(
+                                    updater.status(),
+                                    crate::updater::UpdaterStatus::UpdateAvailable(_)
+                                        | crate::updater::UpdaterStatus::DownloadFinished { .. }
+                                );
+                                let more_resp = sidebar_button(
+                                    ui,
+                                    btn,
+                                    SidebarIcon::Glyph("☰"),
+                                    state.is_more_menu_open,
+                                    true,
+                                    None,
+                                    if update_available {
+                                        "Weitere Funktionen – Update verfügbar"
+                                    } else {
+                                        "Weitere Funktionen: PDF, Hintergrund, Zoom, Einstellungen"
+                                    },
+                                );
+                                more_btn_rect = Some(more_resp.rect);
+                                let (dot_color, _) = autosave_status_style(autosave_status);
+                                ui.painter().circle_filled(
+                                    more_resp.rect.right_top() + egui::vec2(-7.0, 7.0),
+                                    3.5,
+                                    dot_color,
+                                );
+                                if update_available {
+                                    ui.painter().circle_filled(
+                                        more_resp.rect.left_top() + egui::vec2(7.0, 7.0),
+                                        3.5,
+                                        egui::Color32::from_rgb(52, 152, 219),
+                                    );
+                                }
+                                if more_resp.clicked() {
+                                    state.is_more_menu_open = !state.is_more_menu_open;
+                                    state.is_pen_menu_open = false;
+                                    state.is_highlighter_menu_open = false;
                                 }
                             });
-
-                        toolbar_divider(ui);
-
-                        // --- 7. PDF-EXPORT-BUTTON ---
-                        if action_pill_button(
-                            ui,
-                            true,
-                            "📄 PDF",
-                            "Dokument als Vektor-PDF exportieren (Strg + E / S)",
-                        )
-                        .clicked()
-                        {
-                            actions.push(UiAction::ExportPdf);
-                        }
-
-                        toolbar_divider(ui);
-
-                        // --- 8. ZOOM-STEUERUNG & ANZEIGE ---
-                        if action_pill_button(ui, state.current_zoom > 0.25, "🔍-", "Herauszoomen (Mausrad)").clicked() {
-                            actions.push(UiAction::ZoomOut);
-                        }
-
-                        let zoom_pct = (state.current_zoom * 100.0).round() as u32;
-                        let zoom_badge = format!("{}%", zoom_pct);
-                        if action_pill_button(ui, true, &zoom_badge, "Zoom auf 100% zentriert zurücksetzen (Strg + 0)").clicked() {
-                            actions.push(UiAction::ResetZoom);
-                        }
-
-                        if action_pill_button(ui, state.current_zoom < 5.0, "🔍+", "Heranzoomen (Mausrad)").clicked() {
-                            actions.push(UiAction::ZoomIn);
-                        }
-
-                        toolbar_divider(ui);
-
-                        // --- 9. TOUCH-MODUS UMSCHALTER (Gesten vs. Zeichnen) ---
-                        let (touch_icon, touch_tt) = if state.touch_draw_enabled {
-                            ("✏️ Touch: Stift", "Touch-Modus: Einzelfinger zeichnet, zwei Finger zoomen/verschieben. Klicken zum Umschalten auf reine Gesten-Navigation.")
-                        } else {
-                            ("🖐️ Touch: Zoom/Pan", "Touch-Modus: Finger zoomen und verschieben die Seite (ideal für Stifte wie Lazarite!). Klicken für Finger-Zeichnen.")
-                        };
-                        if action_pill_button(ui, true, touch_icon, touch_tt).clicked() {
-                            state.touch_draw_enabled = !state.touch_draw_enabled;
-                        }
-
-                        toolbar_divider(ui);
-
-                        // --- 10. AUTOSAVE-STATUSANZEIGE ---
-                        let (dot_color, label_text) = match autosave_status {
-                            AutosaveStatus::Saved => (egui::Color32::from_rgb(46, 204, 113), "Gespeichert"),
-                            AutosaveStatus::Saving => (egui::Color32::from_rgb(241, 196, 15), "Speichert..."),
-                            AutosaveStatus::Pending => (egui::Color32::from_rgb(230, 126, 34), "Ungespeichert"),
-                            AutosaveStatus::Error => (egui::Color32::from_rgb(231, 76, 60), "Fehler"),
-                        };
-
-                        ui.horizontal(|ui| {
-                            ui.spacing_mut().item_spacing = egui::vec2(4.0, 0.0);
-                            ui.colored_label(dot_color, "●");
-                            ui.label(
-                                egui::RichText::new(label_text)
-                                    .color(dot_color)
-                                    .size(11.5)
-                                    .strong(),
-                            );
                         });
-
-                        toolbar_divider(ui);
-
-                        // --- 10. GITEA-RELEASE & UPDATE-STATUS ---
-                        let (upd_label, is_highlight) = match updater.status() {
-                            crate::updater::UpdaterStatus::UpdateAvailable(rel) => {
-                                (format!("🚀 Neu: {}", rel.tag_name), true)
-                            }
-                            crate::updater::UpdaterStatus::Downloading { percent, .. } => {
-                                (format!("⏳ {:.0}%", percent * 100.0), true)
-                            }
-                            crate::updater::UpdaterStatus::DownloadFinished { .. } => {
-                                ("✓ Update bereit".to_string(), true)
-                            }
-                            crate::updater::UpdaterStatus::Checking => {
-                                ("🔄 Prüfe...".to_string(), false)
-                            }
-                            _ => ("🔄 Update".to_string(), false),
-                        };
-
-                        let upd_btn = if is_highlight {
-                            let text = egui::RichText::new(&upd_label)
-                                .color(egui::Color32::from_rgb(46, 204, 113))
-                                .strong();
-                            ui.add(egui::Button::new(text).frame(true))
-                                .on_hover_text("Update verfügbar! Klicke hier für Release-Notes und Download.")
-                        } else {
-                            action_pill_button(
-                                ui,
-                                true,
-                                &upd_label,
-                                "Release- & Update-Manager (Gitea Releases prüfen & installieren)",
-                            )
-                        };
-
-                        if upd_btn.clicked() {
-                            state.is_update_dialog_open = !state.is_update_dialog_open;
-                            state.is_pen_menu_open = false;
-                            state.is_highlighter_menu_open = false;
-                            state.is_document_menu_open = false;
-                        }
-                    });
-                });
-
-            frame_response.response.rect
+                })
+                .response
+                .rect
         });
 
-    // Toolbar-Rechteck für pixelgenaue Event-Isolation speichern
+    // Leisten-Rechteck für pixelgenaue Event-Isolation speichern
     state.toolbar_rect = Some(area_response.inner);
 
     // 2. SCHWEBENDES POPOVER-MENÜ (FÜR STIFT ODER TEXTMARKER)
@@ -1053,9 +1165,12 @@ pub fn render_ui(
 
     if state.is_pen_menu_open {
         if let Some(btn_rect) = pen_btn_rect {
-            let popover_pos = egui::pos2(btn_rect.min.x - 12.0, btn_rect.max.y + 8.0);
+            let (popover_pos, pivot) =
+                popover_placement(state.sidebar_side, area_response.inner, btn_rect);
             let pop_response = egui::Area::new(egui::Id::new("pen_settings_popover"))
                 .fixed_pos(popover_pos)
+                .pivot(pivot)
+                .constrain(true)
                 .order(egui::Order::Foreground)
                 .show(ctx, |ui| {
                     let frame = egui::Frame::none()
@@ -1089,7 +1204,7 @@ pub fn render_ui(
                                         if ui
                                             .add(
                                                 egui::Button::new(
-                                                    egui::RichText::new("✕").size(11.0),
+                                                    egui::RichText::new("🗙").size(12.0),
                                                 )
                                                 .frame(false),
                                             )
@@ -1201,9 +1316,12 @@ pub fn render_ui(
         }
     } else if state.is_highlighter_menu_open {
         if let Some(btn_rect) = high_btn_rect {
-            let popover_pos = egui::pos2(btn_rect.min.x - 12.0, btn_rect.max.y + 8.0);
+            let (popover_pos, pivot) =
+                popover_placement(state.sidebar_side, area_response.inner, btn_rect);
             let pop_response = egui::Area::new(egui::Id::new("highlighter_settings_popover"))
                 .fixed_pos(popover_pos)
+                .pivot(pivot)
+                .constrain(true)
                 .order(egui::Order::Foreground)
                 .show(ctx, |ui| {
                     let frame = egui::Frame::none()
@@ -1236,7 +1354,7 @@ pub fn render_ui(
                                         if ui
                                             .add(
                                                 egui::Button::new(
-                                                    egui::RichText::new("✕").size(11.0),
+                                                    egui::RichText::new("🗙").size(12.0),
                                                 )
                                                 .frame(false),
                                             )
@@ -1354,10 +1472,218 @@ pub fn render_ui(
         }
     }
 
+    // 2b. ☰-MENÜ (selten genutzte Funktionen), öffnet sich nach oben zur Blattseite hin
+    if state.is_more_menu_open {
+        if let Some(btn_rect) = more_btn_rect {
+            let (mut pos, pivot) =
+                popover_placement(state.sidebar_side, area_response.inner, btn_rect);
+            pos.y = btn_rect.max.y;
+            let pivot = match pivot {
+                egui::Align2::RIGHT_TOP => egui::Align2::RIGHT_BOTTOM,
+                _ => egui::Align2::LEFT_BOTTOM,
+            };
+            let pop_response = egui::Area::new(egui::Id::new("more_menu_popover"))
+                .fixed_pos(pos)
+                .pivot(pivot)
+                .constrain(true)
+                .order(egui::Order::Foreground)
+                .show(ctx, |ui| {
+                    egui::Frame::none()
+                        .fill(egui::Color32::from_rgba_premultiplied(24, 24, 28, 235))
+                        .rounding(egui::Rounding::same(12.0))
+                        .stroke(egui::Stroke::new(
+                            1.0_f32,
+                            egui::Color32::from_rgba_premultiplied(255, 255, 255, 30),
+                        ))
+                        .inner_margin(egui::Margin::symmetric(14.0, 12.0))
+                        .shadow(egui::epaint::Shadow {
+                            offset: egui::vec2(0.0, 6.0),
+                            blur: 16.0,
+                            spread: 0.0,
+                            color: egui::Color32::from_black_alpha(120),
+                        })
+                        .show(ui, |ui| {
+                            ui.set_width(250.0);
+                            ui.spacing_mut().button_padding = egui::vec2(10.0, 7.0);
+                            let section = |ui: &mut egui::Ui, title: &str| {
+                                ui.add_space(8.0);
+                                ui.label(
+                                    egui::RichText::new(title)
+                                        .size(10.5)
+                                        .strong()
+                                        .color(egui::Color32::from_gray(160)),
+                                );
+                                ui.add_space(2.0);
+                            };
+
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    egui::RichText::new("Weitere Funktionen")
+                                        .strong()
+                                        .color(egui::Color32::WHITE)
+                                        .size(12.5),
+                                );
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        if ui
+                                            .add(egui::Button::new("🗙").frame(false))
+                                            .on_hover_text("Schließen")
+                                            .clicked()
+                                        {
+                                            state.is_more_menu_open = false;
+                                        }
+                                    },
+                                );
+                            });
+
+                            section(ui, "DOKUMENT");
+                            if ui
+                                .add_sized([ui.available_width(), 30.0], egui::Button::new("📄  Als PDF exportieren (Strg+E)"))
+                                .clicked()
+                            {
+                                actions.push(UiAction::ExportPdf);
+                                state.is_more_menu_open = false;
+                            }
+                            if ui
+                                .add_sized([ui.available_width(), 30.0], egui::Button::new("➕  Neue Seite anhängen"))
+                                .clicked()
+                            {
+                                actions.push(UiAction::AddPage);
+                            }
+
+                            section(ui, "HINTERGRUND DIESER SEITE");
+                            let current_bg = notebook.current_page().background;
+                            egui::Grid::new("more_menu_backgrounds")
+                                .num_columns(2)
+                                .spacing([6.0, 6.0])
+                                .show(ui, |ui| {
+                                    for (i, (bg, label)) in [
+                                        (PageBackground::Grid5mm, "Kariert"),
+                                        (PageBackground::Lined, "Liniert"),
+                                        (PageBackground::DotGrid, "Punkte"),
+                                        (PageBackground::Blank, "Blanko"),
+                                    ]
+                                    .into_iter()
+                                    .enumerate()
+                                    {
+                                        if ui
+                                            .add_sized(
+                                                [115.0, 28.0],
+                                                egui::SelectableLabel::new(current_bg == bg, label),
+                                            )
+                                            .clicked()
+                                        {
+                                            actions.push(UiAction::SetBackground(bg));
+                                        }
+                                        if i % 2 == 1 {
+                                            ui.end_row();
+                                        }
+                                    }
+                                });
+
+                            section(ui, "ZOOM");
+                            ui.horizontal(|ui| {
+                                if ui
+                                    .add_enabled(state.current_zoom > 0.25, egui::Button::new("🔍 -"))
+                                    .on_hover_text("Herauszoomen (Strg+-)")
+                                    .clicked()
+                                {
+                                    actions.push(UiAction::ZoomOut);
+                                }
+                                let pct = (state.current_zoom * 100.0).round() as u32;
+                                if ui
+                                    .button(format!("{pct} %"))
+                                    .on_hover_text("Zurücksetzen (Strg+0)")
+                                    .clicked()
+                                {
+                                    actions.push(UiAction::ResetZoom);
+                                }
+                                if ui
+                                    .add_enabled(state.current_zoom < 5.0, egui::Button::new("🔍 +"))
+                                    .on_hover_text("Heranzoomen (Strg++)")
+                                    .clicked()
+                                {
+                                    actions.push(UiAction::ZoomIn);
+                                }
+                            });
+
+                            section(ui, "EINGABE");
+                            ui.checkbox(
+                                &mut state.touch_draw_enabled,
+                                "Mit dem Finger zeichnen",
+                            )
+                            .on_hover_text(
+                                "Aus: ein Finger verschiebt, zwei Finger zoomen (empfohlen mit Stift).\nAn: ein Finger zeichnet.",
+                            );
+
+                            section(ui, "WERKZEUGLEISTE");
+                            ui.horizontal(|ui| {
+                                for (side, label) in
+                                    [(SidebarSide::Left, "Links"), (SidebarSide::Right, "Rechts")]
+                                {
+                                    if ui
+                                        .add_sized(
+                                            [115.0, 28.0],
+                                            egui::SelectableLabel::new(
+                                                state.sidebar_side == side,
+                                                label,
+                                            ),
+                                        )
+                                        .clicked()
+                                        && state.sidebar_side != side
+                                    {
+                                        state.sidebar_side = side;
+                                        actions.push(UiAction::SetSidebarSide(side));
+                                    }
+                                }
+                            });
+
+                            section(ui, "STATUS");
+                            let (dot_color, status_text) = autosave_status_style(autosave_status);
+                            ui.horizontal(|ui| {
+                                let (dot_rect, _) = ui.allocate_exact_size(
+                                    egui::vec2(10.0, 10.0),
+                                    egui::Sense::hover(),
+                                );
+                                ui.painter().circle_filled(dot_rect.center(), 4.0, dot_color);
+                                ui.label(egui::RichText::new(status_text).color(dot_color));
+                            });
+                            let update_label = match updater.status() {
+                                crate::updater::UpdaterStatus::UpdateAvailable(rel) => {
+                                    format!("🚀  Update {} verfügbar", rel.tag_name)
+                                }
+                                crate::updater::UpdaterStatus::Downloading { percent, .. } => {
+                                    format!("⏳  Update lädt … {:.0} %", percent * 100.0)
+                                }
+                                crate::updater::UpdaterStatus::DownloadFinished { .. } => {
+                                    "✔  Update bereit".to_string()
+                                }
+                                crate::updater::UpdaterStatus::Checking => {
+                                    "🔄  Suche nach Updates …".to_string()
+                                }
+                                _ => "🔄  Updates & Versionen".to_string(),
+                            };
+                            if ui
+                                .add_sized([ui.available_width(), 30.0], egui::Button::new(update_label))
+                                .clicked()
+                            {
+                                state.is_update_dialog_open = true;
+                                state.is_more_menu_open = false;
+                                state.is_document_menu_open = false;
+                            }
+                        })
+                        .response
+                        .rect
+                });
+            popover_rect = Some(pop_response.inner);
+        }
+    }
+
     state.popover_rect = popover_rect;
 
-    // Automatisches Schließen des Popovers bei Klick außerhalb von Toolbar und Popover
-    if (state.is_pen_menu_open || state.is_highlighter_menu_open)
+    // Automatisches Schließen der Popover bei Klick außerhalb von Leiste und Popover
+    if (state.is_pen_menu_open || state.is_highlighter_menu_open || state.is_more_menu_open)
         && ctx.input(|i| i.pointer.any_pressed())
     {
         if let Some(pos) = ctx.input(|i| i.pointer.press_origin()) {
@@ -1366,6 +1692,7 @@ pub fn render_ui(
             if !in_toolbar && !in_popover {
                 state.is_pen_menu_open = false;
                 state.is_highlighter_menu_open = false;
+                state.is_more_menu_open = false;
             }
         }
     }
@@ -2345,5 +2672,242 @@ mod tests {
 
         state.touch_draw_enabled = true;
         assert!(state.touch_draw_enabled);
+    }
+
+    /// Rendert mehrere Frames bei fester Fenstergröße. Angedockte Areas brauchen bis zu 6 Frames,
+    /// bis egui ihre Größe vermessen hat und sie korrekt positioniert.
+    fn render_frames(state: &mut UiState, notebook: &Notebook, frames: usize) -> egui::Context {
+        render_frames_sized(state, notebook, frames, egui::vec2(1280.0, 850.0))
+    }
+
+    fn render_frames_sized(
+        state: &mut UiState,
+        notebook: &Notebook,
+        frames: usize,
+        screen: egui::Vec2,
+    ) -> egui::Context {
+        let ctx = egui::Context::default();
+        let updater = crate::updater::UpdaterController::new();
+        for _ in 0..frames {
+            ctx.begin_frame(egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, screen)),
+                ..Default::default()
+            });
+            let _ = render_ui(&ctx, state, notebook, AutosaveStatus::Saved, &updater);
+            let _ = ctx.end_frame();
+        }
+        ctx
+    }
+
+    #[test]
+    fn test_sidebar_is_vertical_and_docked_to_chosen_side() {
+        let notebook = Notebook::new();
+
+        let mut left = UiState::new();
+        render_frames(&mut left, &notebook, 10);
+        let r = left.toolbar_rect.unwrap();
+        assert!(
+            r.height() > r.width() * 4.0,
+            "Leiste muss senkrecht sein: {r:?}"
+        );
+        assert!(r.width() <= 60.0, "Leiste muss schmal sein: {r:?}");
+        assert!(
+            (r.min.x - UiState::SIDEBAR_MARGIN).abs() < 1.0,
+            "links angedockt: {r:?}"
+        );
+        assert!(
+            (r.min.y - UiState::SIDEBAR_MARGIN).abs() < 1.0,
+            "oben angedockt: {r:?}"
+        );
+        assert!(
+            r.max.y <= 850.0 && r.min.y >= 0.0,
+            "passt ins Fenster: {r:?}"
+        );
+        assert!((left.sidebar_reserved_width() - (r.width() + 20.0)).abs() < 0.01);
+
+        let mut right = UiState::new();
+        right.sidebar_side = SidebarSide::Right;
+        render_frames(&mut right, &notebook, 10);
+        let r = right.toolbar_rect.unwrap();
+        assert!(
+            (r.max.x - (1280.0 - UiState::SIDEBAR_MARGIN)).abs() < 1.0,
+            "rechts angedockt: {r:?}"
+        );
+    }
+
+    #[test]
+    fn test_popovers_open_towards_the_page() {
+        let notebook = Notebook::new();
+        for side in [SidebarSide::Left, SidebarSide::Right] {
+            for open in ["pen", "more"] {
+                let mut state = UiState::new();
+                state.sidebar_side = side;
+                match open {
+                    "pen" => state.is_pen_menu_open = true,
+                    _ => state.is_more_menu_open = true,
+                }
+                render_frames(&mut state, &notebook, 10);
+                let bar = state.toolbar_rect.unwrap();
+                let pop = state.popover_rect.expect("Popover muss offen sein");
+                match side {
+                    SidebarSide::Left => {
+                        assert!(pop.min.x > bar.max.x, "{open}: {pop:?} / {bar:?}")
+                    }
+                    SidebarSide::Right => {
+                        assert!(pop.max.x < bar.min.x, "{open}: {pop:?} / {bar:?}")
+                    }
+                }
+                assert!(
+                    pop.min.y >= 0.0 && pop.max.y <= 850.0,
+                    "{open} im Fenster: {pop:?}"
+                );
+                assert!(state.is_point_in_ui(pop.center().x, pop.center().y));
+            }
+        }
+    }
+
+    #[test]
+    fn test_sidebar_buttons_react_to_raw_pointer_events() {
+        // Gleicher Weg wie die Stift-Eingabe: PointerMoved + PointerButton in die RawInput
+        let notebook = Notebook::new();
+        let mut probe = UiState::new();
+        render_frames(&mut probe, &notebook, 10);
+        let bar = probe.toolbar_rect.unwrap();
+
+        let updater = crate::updater::UpdaterController::new();
+        let mut found = Vec::new();
+        let mut y = bar.min.y + 4.0;
+        while y < bar.max.y {
+            let mut state = UiState::new();
+            let ctx = render_frames(&mut state, &notebook, 10);
+            let pos = egui::pos2(bar.center().x, y);
+            let screen = Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1280.0, 850.0),
+            ));
+            let mut actions = Vec::new();
+            for (pressed, with_move) in [(true, true), (false, false)] {
+                let mut events = Vec::new();
+                if with_move {
+                    events.push(egui::Event::PointerMoved(pos));
+                }
+                events.push(egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::default(),
+                });
+                ctx.begin_frame(egui::RawInput {
+                    screen_rect: screen,
+                    events,
+                    ..Default::default()
+                });
+                actions.extend(render_ui(
+                    &ctx,
+                    &mut state,
+                    &notebook,
+                    AutosaveStatus::Saved,
+                    &updater,
+                ));
+                let _ = ctx.end_frame();
+            }
+            for a in actions {
+                if let UiAction::SetTool(t) = a {
+                    if !found.contains(&t) {
+                        found.push(t);
+                    }
+                }
+            }
+            y += 6.0;
+        }
+        for tool in [
+            ActiveTool::Highlighter,
+            ActiveTool::Shape,
+            ActiveTool::Eraser,
+            ActiveTool::Select,
+        ] {
+            assert!(
+                found.contains(&tool),
+                "{tool:?} nicht per Klick erreichbar, gefunden: {found:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_sidebar_fits_window_height_for_every_tool() {
+        let notebook = Notebook::new();
+        for height in [850.0, 768.0] {
+            for tool in [
+                ActiveTool::Pen,
+                ActiveTool::Highlighter,
+                ActiveTool::Shape,
+                ActiveTool::Eraser,
+                ActiveTool::Select,
+            ] {
+                let mut state = UiState::new();
+                state.active_tool = tool;
+                render_frames_sized(&mut state, &notebook, 10, egui::vec2(1280.0, height));
+                let r = state.toolbar_rect.unwrap();
+                assert!(
+                    r.min.y >= 0.0 && r.max.y <= height,
+                    "{tool:?} bei {height} px Höhe: {r:?}"
+                );
+                // Ohne Scrollen: Würde gescrollt, wäre die Leiste genau Maximalhöhe + Rahmen hoch
+                let max_inner = height - 2.0 * UiState::SIDEBAR_MARGIN - 12.0;
+                assert!(
+                    r.height() < max_inner + 12.0 - 0.5,
+                    "{tool:?} bei {height} px Höhe muss ohne Scrollen passen: {r:?}"
+                );
+            }
+        }
+        // Große Fenster behalten die volle Knopfgröße
+        assert_eq!(
+            UiState::sidebar_button_size(ActiveTool::Select, 1000.0),
+            40.0
+        );
+    }
+
+    #[test]
+    fn test_sidebar_buttons_stay_in_place_when_switching_tools() {
+        // Gleiche Lage und Höhe = Undo/Redo, Seiten und Menü bleiben beim Werkzeugwechsel stehen
+        let notebook = Notebook::new();
+        let mut rects = Vec::new();
+        for tool in [
+            ActiveTool::Pen,
+            ActiveTool::Highlighter,
+            ActiveTool::Shape,
+            ActiveTool::Eraser,
+        ] {
+            let mut state = UiState::new();
+            state.active_tool = tool;
+            render_frames(&mut state, &notebook, 10);
+            rects.push((tool, state.toolbar_rect.unwrap()));
+        }
+        let first = rects[0].1;
+        for (tool, r) in &rects {
+            assert!(
+                (r.min.y - first.min.y).abs() < 0.5 && (r.height() - first.height()).abs() < 0.5,
+                "{tool:?}: {r:?} statt {first:?}"
+            );
+        }
+
+        // Auswahl: gleiche Knopfgröße (Breite) und Oberkante, nur unten kommen Aktionen dazu.
+        // Sonst verrutschen die Werkzeugknöpfe und das Blatt verschiebt sich.
+        let mut state = UiState::new();
+        state.active_tool = ActiveTool::Select;
+        render_frames(&mut state, &notebook, 10);
+        let r = state.toolbar_rect.unwrap();
+        assert!(
+            (r.width() - first.width()).abs() < 0.5,
+            "Auswahl: {r:?} statt {first:?}"
+        );
+        assert!(
+            (r.min.y - first.min.y).abs() < 0.5,
+            "Auswahl: {r:?} statt {first:?}"
+        );
+        assert!(
+            r.height() > first.height(),
+            "Auswahl-Aktionen fehlen: {r:?}"
+        );
     }
 }

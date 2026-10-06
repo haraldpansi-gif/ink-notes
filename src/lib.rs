@@ -9,6 +9,7 @@ pub mod filter;
 pub mod geometry;
 pub mod history;
 pub mod selection;
+pub mod settings;
 pub mod spline;
 pub mod storage;
 pub mod ui;

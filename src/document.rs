@@ -772,7 +772,21 @@ pub struct PageViewport {
 impl PageViewport {
     /// Berechnet die zentrierte DIN-A4-Projektionsfläche unter Beibehaltung des 210x297-Seitenverhältnisses.
     pub fn calculate(window_width: f32, window_height: f32, margin: f32) -> Self {
-        let avail_w = (window_width - 2.0 * margin).max(10.0);
+        Self::calculate_with_insets(window_width, window_height, margin, 0.0, 0.0)
+    }
+
+    /// Wie [`Self::calculate`], aber ohne die von seitlicher UI (z. B. Werkzeugleiste)
+    /// belegten Streifen links/rechts: Die Seite wird im verbleibenden Bereich zentriert.
+    pub fn calculate_with_insets(
+        window_width: f32,
+        window_height: f32,
+        margin: f32,
+        inset_left: f32,
+        inset_right: f32,
+    ) -> Self {
+        let inset_left = inset_left.clamp(0.0, window_width * 0.5);
+        let inset_right = inset_right.clamp(0.0, window_width * 0.5);
+        let avail_w = (window_width - inset_left - inset_right - 2.0 * margin).max(10.0);
         let avail_h = (window_height - 2.0 * margin).max(10.0);
 
         let window_ratio = avail_w / avail_h;
@@ -790,7 +804,7 @@ impl PageViewport {
             (w, h)
         };
 
-        let page_x = (window_width - page_w) / 2.0;
+        let page_x = inset_left + (window_width - inset_left - inset_right - page_w) / 2.0;
         let page_y = (window_height - page_h) / 2.0;
 
         Self {
@@ -929,6 +943,25 @@ mod tests {
         assert_eq!(nb.current_page_index, 1);
         nb.first_page();
         assert_eq!(nb.current_page_index, 0);
+    }
+
+    #[test]
+    fn test_viewport_insets_center_page_in_free_area() {
+        // Breites Fenster: Seite wird durch die Höhe begrenzt und im freien Bereich zentriert
+        let plain = PageViewport::calculate(1600.0, 900.0, 20.0);
+        let inset = PageViewport::calculate_with_insets(1600.0, 900.0, 20.0, 120.0, 0.0);
+        assert!((inset.page_width - plain.page_width).abs() < 0.01);
+        let free_center = 120.0 + (1600.0 - 120.0) / 2.0;
+        assert!((inset.page_x + inset.page_width / 2.0 - free_center).abs() < 0.01);
+
+        // Hohes Fenster: Breite begrenzt, Seite wird schmaler und bleibt rechts der Leiste
+        let narrow = PageViewport::calculate_with_insets(600.0, 1200.0, 20.0, 100.0, 0.0);
+        assert!(narrow.page_x >= 100.0 + 20.0 - 0.01);
+        assert!(narrow.page_x + narrow.page_width <= 600.0 - 20.0 + 0.01);
+
+        // Leiste rechts
+        let right = PageViewport::calculate_with_insets(600.0, 1200.0, 20.0, 0.0, 100.0);
+        assert!(right.page_x + right.page_width <= 500.0 - 20.0 + 0.01);
     }
 
     #[test]

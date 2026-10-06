@@ -23,6 +23,7 @@ use ink_notes::geometry::{self, RecognizedShape};
 use ink_notes::selection::{
     render_selection_overlay, DragMode, SelectionHandleHit, SelectionState,
 };
+use ink_notes::settings::{SidebarSide, UiSettings};
 use ink_notes::storage::{self, NotebookManifest};
 use ink_notes::ui::{self, ActiveTool, UiAction, UiState};
 use ink_notes::updater::UpdaterController;
@@ -52,6 +53,21 @@ fn update_window_title(
         bg_name
     );
     window.set_title(&title);
+}
+
+/// Prüft, ob ein Bildschirmpunkt (physische Pixel) auf einem UI-Element liegt.
+///
+/// egui arbeitet in logischen Punkten; Touch- und Stift-Positionen kommen in physischen
+/// Pixeln. `layer_id_at` erfasst jedes egui-Element des letzten Frames (Leiste, Popover,
+/// Fenster), auch wenn egui den Zeiger selbst noch nicht kennt (Stift, erster Touch).
+fn is_screen_point_in_ui(
+    egui_ctx: &egui::Context,
+    ui_state: &UiState,
+    screen_pos: (f32, f32),
+    scale: f32,
+) -> bool {
+    let pos = egui::pos2(screen_pos.0 / scale, screen_pos.1 / scale);
+    ui_state.is_point_in_ui(pos.x, pos.y) || egui_ctx.layer_id_at(pos).is_some()
 }
 
 /// Exportiert das Notizbuch im Hintergrund als PDF. Noch nicht geladene Seiten werden vorher
@@ -230,6 +246,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     let mut ui_state = UiState::new();
+    // Gespeicherte UI-Einstellungen (Seite der Werkzeugleiste)
+    let ui_settings_path = UiSettings::default_path();
+    let mut ui_settings = ui_settings_path
+        .as_deref()
+        .map(UiSettings::load_from)
+        .unwrap_or_default();
+    ui_state.sidebar_side = ui_settings.sidebar_side;
     ui_state.current_notebook_id = manifest.id.clone();
     ui_state.document_title = manifest.title.clone();
     ui_state.available_notebooks = available_notebooks;
@@ -275,6 +298,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut active_touches: std::collections::HashMap<u64, (f32, f32)> =
         std::collections::HashMap::new();
     let mut pinch_prev_distance: Option<f32> = None;
+    // Berührungen, die auf der UI begonnen haben, gehören bis zum Abheben egui
+    let mut ui_touch_ids: std::collections::HashSet<u64> = std::collections::HashSet::new();
     let mut pinch_prev_center: Option<(f32, f32)> = None;
     let mut is_pinch_gesturing = false;
     let mut is_touch_drawing = false;
@@ -287,6 +312,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut stylus_tool_id: Option<octotablet::tool::ID> = None;
     let mut stylus_barrel_pressed = false;
     let mut stylus_screen_pos = (0.0_f32, 0.0_f32);
+    // Stift hat auf der UI aufgesetzt: alle Ereignisse bis zum Abheben gehen an egui
+    let mut stylus_ui_capture = false;
+    // Von egui angeforderter Zeitpunkt für das nächste Neuzeichnen (Layout-Vermessung, Tooltips)
+    let mut egui_repaint_at: Option<Instant> = None;
 
     // Viewport-Pan & Zoom-Zustand
     let mut is_panning = false;
@@ -379,6 +408,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     octotablet::events::ToolEvent::Out
                                     | octotablet::events::ToolEvent::Removed => {
                                         is_stylus_in_proximity = false;
+                                        if stylus_ui_capture {
+                                            stylus_ui_capture = false;
+                                            let (sx, sy) = stylus_screen_pos;
+                                            let input = egui_winit_state.egui_input_mut();
+                                            input.events.push(egui::Event::PointerButton {
+                                                pos: egui::pos2(sx / scale, sy / scale),
+                                                button: egui::PointerButton::Primary,
+                                                pressed: false,
+                                                modifiers: egui::Modifiers::default(),
+                                            });
+                                            input.events.push(egui::Event::PointerGone);
+                                            window.request_redraw();
+                                        }
                                         if stylus_tool_id == Some(tool.id()) {
                                             stylus_tool_id = None;
                                             if is_stylus_drawing {
@@ -424,6 +466,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                                         if let Some(p) = pose.pressure.get() {
                                             current_pressure = p;
+                                        }
+
+                                        // Stiftbewegung an egui weitergeben (Hover, Schieberegler ziehen),
+                                        // solange nicht auf dem Blatt gezeichnet oder radiert wird
+                                        if stylus_ui_capture || (!is_stylus_drawing && !is_erasing) {
+                                            let ui_pos = egui::pos2(sx / scale, sy / scale);
+                                            egui_winit_state
+                                                .egui_input_mut()
+                                                .events
+                                                .push(egui::Event::PointerMoved(ui_pos));
+                                            if stylus_ui_capture
+                                                || is_screen_point_in_ui(&egui_ctx, &ui_state, (sx, sy), scale)
+                                            {
+                                                window.request_redraw();
+                                            }
+                                        }
+                                        if stylus_ui_capture {
+                                            continue;
                                         }
 
                                         if is_erasing {
@@ -472,28 +532,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         stylus_tool_id = Some(tool.id());
                                         let (sx, sy) = stylus_screen_pos;
 
-                                        let is_stylus_in_ui = egui_ctx.wants_pointer_input()
-                                            || ui_state.is_point_in_ui(sx, sy)
-                                            || (ui_state.show_page_jump_popup
-                                                && egui_ctx.is_pointer_over_area())
-                                            || (ui_state.is_document_menu_open
-                                                && egui_ctx.is_pointer_over_area())
-                                            || (ui_state.is_update_dialog_open
-                                                && egui_ctx.is_pointer_over_area());
-
-                                        if is_stylus_in_ui {
-                                            egui_ctx.input_mut(|i| {
-                                                i.events.push(egui::Event::PointerMoved(egui::pos2(
-                                                    sx / scale,
-                                                    sy / scale,
-                                                )));
-                                                i.events.push(egui::Event::PointerButton {
-                                                    pos: egui::pos2(sx / scale, sy / scale),
-                                                    button: egui::PointerButton::Primary,
-                                                    pressed: true,
-                                                    modifiers: egui::Modifiers::default(),
-                                                });
+                                        if is_screen_point_in_ui(&egui_ctx, &ui_state, (sx, sy), scale) {
+                                            // In die Eingabe-Warteschlange des NÄCHSTEN egui-Frames
+                                            // (egui_ctx.input_mut würde vom nächsten Frame überschrieben)
+                                            let ui_pos = egui::pos2(sx / scale, sy / scale);
+                                            let input = egui_winit_state.egui_input_mut();
+                                            input.events.push(egui::Event::PointerMoved(ui_pos));
+                                            input.events.push(egui::Event::PointerButton {
+                                                pos: ui_pos,
+                                                button: egui::PointerButton::Primary,
+                                                pressed: true,
+                                                modifiers: egui::Modifiers::default(),
                                             });
+                                            stylus_ui_capture = true;
                                             window.request_redraw();
                                             continue;
                                         }
@@ -546,24 +597,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     }
                                     octotablet::events::ToolEvent::Up => {
                                         let (sx, sy) = stylus_screen_pos;
-                                        let is_stylus_in_ui = egui_ctx.wants_pointer_input()
-                                            || ui_state.is_point_in_ui(sx, sy)
-                                            || (ui_state.show_page_jump_popup
-                                                && egui_ctx.is_pointer_over_area())
-                                            || (ui_state.is_document_menu_open
-                                                && egui_ctx.is_pointer_over_area())
-                                            || (ui_state.is_update_dialog_open
-                                                && egui_ctx.is_pointer_over_area());
-
-                                        if is_stylus_in_ui {
-                                            egui_ctx.input_mut(|i| {
-                                                i.events.push(egui::Event::PointerButton {
+                                        if stylus_ui_capture {
+                                            stylus_ui_capture = false;
+                                            egui_winit_state.egui_input_mut().events.push(
+                                                egui::Event::PointerButton {
                                                     pos: egui::pos2(sx / scale, sy / scale),
                                                     button: egui::PointerButton::Primary,
                                                     pressed: false,
                                                     modifiers: egui::Modifiers::default(),
-                                                });
-                                            });
+                                                },
+                                            );
                                             window.request_redraw();
                                             continue;
                                         }
@@ -633,6 +676,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
 
+                // Von egui angefordertes, verzögertes Neuzeichnen (Tooltips, Animationen)
+                if let Some(at) = egui_repaint_at {
+                    if Instant::now() >= at {
+                        egui_repaint_at = None;
+                        window.request_redraw();
+                    }
+                }
+
                 // Bei anstehenden Änderungen, aktivem Toast, Stylus in Proximity oder aktivem Zeichnen regelmäßig aufwachen
                 if new_status == AutosaveStatus::Pending
                     || new_status == AutosaveStatus::Saving
@@ -642,6 +693,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     || is_stylus_in_proximity
                 {
                     target.set_control_flow(ControlFlow::wait_duration(Duration::from_millis(8)));
+                } else if let Some(at) = egui_repaint_at {
+                    target.set_control_flow(ControlFlow::WaitUntil(at));
                 } else {
                     target.set_control_flow(ControlFlow::Wait);
                 }
@@ -657,9 +710,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // 2. Prüfen, ob das UI Pointer-Interaktionen beansprucht (Event-Isolation)
                 // Konsumiert Klicks innerhalb der abgerundeten Pill-Toolbar, des Popovers oder offener Menüs
                 let is_pointer_in_ui = egui_ctx.wants_pointer_input()
-                    || ui_state.is_point_in_ui(cursor_screen_pos.0, cursor_screen_pos.1)
-                    || (ui_state.show_page_jump_popup && egui_ctx.is_pointer_over_area())
-                    || (ui_state.is_document_menu_open && egui_ctx.is_pointer_over_area());
+                    || is_screen_point_in_ui(
+                        &egui_ctx,
+                        &ui_state,
+                        cursor_screen_pos,
+                        window.scale_factor() as f32,
+                    );
 
                 match event {
                     WindowEvent::CloseRequested => {
@@ -686,6 +742,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         is_erasing = false;
                         is_mouse_drawing = false;
                         active_touches.clear();
+                        ui_touch_ids.clear();
+                        stylus_ui_capture = false;
                         is_pinch_gesturing = false;
                         pinch_prev_distance = None;
                         pinch_prev_center = None;
@@ -1469,15 +1527,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             return;
                         }
 
+                        // Berührungen der UI (egui-winit hat sie bereits an egui weitergegeben)
+                        if ui_touch_ids.contains(&touch.id) {
+                            if matches!(touch.phase, TouchPhase::Ended | TouchPhase::Cancelled) {
+                                ui_touch_ids.remove(&touch.id);
+                            }
+                            window.request_redraw();
+                            return;
+                        }
+
                         match touch.phase {
                             TouchPhase::Started => {
                                 // Event-Isolation für Touch-Eingaben
-                                let is_touch_in_ui = egui_ctx.wants_pointer_input()
-                                    || ui_state.is_point_in_ui(tx, ty)
-                                    || (ui_state.show_page_jump_popup && egui_ctx.is_pointer_over_area())
-                                    || (ui_state.is_document_menu_open && egui_ctx.is_pointer_over_area())
-                                    || (ui_state.is_update_dialog_open && egui_ctx.is_pointer_over_area());
+                                let is_touch_in_ui = is_screen_point_in_ui(
+                                    &egui_ctx,
+                                    &ui_state,
+                                    (tx, ty),
+                                    window.scale_factor() as f32,
+                                );
                                 if is_touch_in_ui {
+                                    ui_touch_ids.insert(touch.id);
+                                    window.request_redraw();
                                     return;
                                 }
 
@@ -1806,6 +1876,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         // 3. Toolbar & Widgets rendern
                         updater.update();
                         let actions = ui::render_ui(&egui_ctx, &mut ui_state, &notebook, autosave.status(), &updater);
+
+                        // Seite neben der Werkzeugleiste zentrieren (Leistenbreite in physischen Pixeln)
+                        let reserved = ui_state.sidebar_reserved_width() * window.scale_factor() as f32;
+                        let (inset_left, inset_right) = match ui_state.sidebar_side {
+                            SidebarSide::Left => (reserved, 0.0),
+                            SidebarSide::Right => (0.0, reserved),
+                        };
+                        if canvas.set_ui_insets(inset_left, inset_right) {
+                            window.request_redraw();
+                        }
 
                         // 4. UI-Aktionen verarbeiten
                         for action in actions {
@@ -2312,6 +2392,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         }
                                     }
                                 }
+                                UiAction::SetSidebarSide(side) => {
+                                    ui_settings.sidebar_side = side;
+                                    if let Some(path) = ui_settings_path.as_deref() {
+                                        if let Err(err) = ui_settings.save_to(path) {
+                                            eprintln!("[Einstellungen] Konnte '{}' nicht speichern: {err}", path.display());
+                                            ui_state.set_export_message(format!("Einstellung nicht gespeichert: {err}"));
+                                        }
+                                    }
+                                    window.request_redraw();
+                                }
                                 UiAction::ForceExit => {
                                     println!("[Shutdown] Beenden erzwungen trotz ungespeicherter Änderungen.");
                                     target.exit();
@@ -2322,6 +2412,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         // 4. egui Frame beenden & Primitives tessellieren
                         let full_output = egui_ctx.end_frame();
                         egui_winit_state.handle_platform_output(&window, full_output.platform_output);
+
+                        // egui braucht Folge-Frames, z. B. um neu angeordnete Bereiche zu vermessen
+                        // (die Werkzeugleiste wird erst im 2.–3. Frame korrekt zentriert)
+                        let repaint_delay = full_output
+                            .viewport_output
+                            .get(&egui::ViewportId::ROOT)
+                            .map(|v| v.repaint_delay)
+                            .unwrap_or(Duration::MAX);
+                        if repaint_delay.is_zero() {
+                            egui_repaint_at = None;
+                            window.request_redraw();
+                        } else if repaint_delay < Duration::from_secs(10) {
+                            egui_repaint_at = Some(Instant::now() + repaint_delay);
+                        } else {
+                            egui_repaint_at = None;
+                        }
 
                         let clipped_primitives = egui_ctx.tessellate(full_output.shapes, egui_ctx.pixels_per_point());
                         let screen_descriptor = egui_wgpu::ScreenDescriptor {

@@ -94,6 +94,9 @@ pub struct CanvasState {
     pub config: wgpu::SurfaceConfiguration,
     pub size: PhysicalSize<u32>,
     pub viewport: PageViewport,
+    /// Von seitlicher UI belegte Breite links/rechts in physischen Pixeln
+    ui_inset_left: f32,
+    ui_inset_right: f32,
     pub camera: crate::viewport::ViewportState,
 
     // Pipelines
@@ -371,6 +374,8 @@ impl CanvasState {
             config,
             size,
             viewport,
+            ui_inset_left: 0.0,
+            ui_inset_right: 0.0,
             strip_pipeline,
             triangle_pipeline,
             camera_buffer,
@@ -418,6 +423,29 @@ impl CanvasState {
         );
     }
 
+    /// Setzt die von seitlicher UI belegten Streifen (physische Pixel), damit die Seite
+    /// im freien Bereich zentriert wird. Gibt `true` zurück, wenn sich etwas geändert hat.
+    pub fn set_ui_insets(&mut self, left: f32, right: f32) -> bool {
+        if (self.ui_inset_left - left).abs() < 0.5 && (self.ui_inset_right - right).abs() < 0.5 {
+            return false;
+        }
+        self.ui_inset_left = left;
+        self.ui_inset_right = right;
+        self.recalculate_viewport();
+        true
+    }
+
+    fn recalculate_viewport(&mut self) {
+        self.viewport = PageViewport::calculate_with_insets(
+            self.size.width as f32,
+            self.size.height as f32,
+            Self::VIEWPORT_MARGIN,
+            self.ui_inset_left,
+            self.ui_inset_right,
+        );
+        self.update_uniforms();
+    }
+
     /// Passt die Surface und Projektionsmatrizen an eine neue Fenstergröße an.
     pub fn resize(&mut self, new_size: PhysicalSize<u32>) {
         if new_size.width > 0 && new_size.height > 0 {
@@ -425,14 +453,7 @@ impl CanvasState {
             self.config.width = new_size.width;
             self.config.height = new_size.height;
             self.surface.configure(&self.device, &self.config);
-
-            self.viewport = PageViewport::calculate(
-                new_size.width as f32,
-                new_size.height as f32,
-                Self::VIEWPORT_MARGIN,
-            );
-
-            self.update_uniforms();
+            self.recalculate_viewport();
         }
     }
 
