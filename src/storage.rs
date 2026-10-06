@@ -229,6 +229,8 @@ pub enum StorageError {
     CorruptedPage(u64, String),
     PageNotFound(u64),
     UnsupportedVersion { found: u32, supported: u32 },
+    AlreadyLocked(String),
+    PathTraversal(String),
 }
 
 impl fmt::Display for StorageError {
@@ -245,6 +247,8 @@ impl fmt::Display for StorageError {
                 f,
                 "Notizbuch wurde mit neuerer Version erstellt (Formatversion {found}, unterstützt wird bis {supported})"
             ),
+            StorageError::AlreadyLocked(msg) => write!(f, "Notizbuch ist gesperrt: {msg}"),
+            StorageError::PathTraversal(msg) => write!(f, "Ungültiger Pfad (Path Traversal): {msg}"),
         }
     }
 }
@@ -321,7 +325,19 @@ pub fn reconstruct_stroke_vertices(samples: &[StylusSample], color: [f32; 4]) ->
         .collect()
 }
 
+/// Erstellt ein Verzeichnis mit gesicherten Rechten (0700 unter Unix).
+pub fn create_secure_dir_all(path: &Path) -> io::Result<()> {
+    fs::create_dir_all(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o700));
+    }
+    Ok(())
+}
+
 /// Schreibt Inhalt atomar auf die Festplatte (über temporäre Datei + `std::fs::rename`).
+/// Setzt Berechtigung 0600 unter Unix und synchronisiert das übergeordnete Verzeichnis nach dem Rename.
 pub fn atomic_write_file(path: &Path, content: &[u8]) -> Result<(), io::Error> {
     let dir = path.parent().ok_or_else(|| {
         io::Error::new(
@@ -329,7 +345,7 @@ pub fn atomic_write_file(path: &Path, content: &[u8]) -> Result<(), io::Error> {
             "Übergeordnetes Verzeichnis nicht gefunden",
         )
     })?;
-    fs::create_dir_all(dir)?;
+    create_secure_dir_all(dir)?;
 
     let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("file");
     let random_suffix: u64 = std::time::SystemTime::now()
@@ -339,9 +355,14 @@ pub fn atomic_write_file(path: &Path, content: &[u8]) -> Result<(), io::Error> {
     let temp_filename = format!("{filename}.tmp.{}.{random_suffix}", std::process::id());
     let temp_path = dir.join(temp_filename);
 
-    // In temporäre Datei schreiben und auf Datenträger flushen
+    // In temporäre Datei schreiben, Rechte 0600 setzen und auf Datenträger flushen
     {
         let mut file = File::create(&temp_path)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&temp_path, fs::Permissions::from_mode(0o600));
+        }
         file.write_all(content)?;
         file.sync_all()?;
     }
@@ -350,6 +371,15 @@ pub fn atomic_write_file(path: &Path, content: &[u8]) -> Result<(), io::Error> {
     if let Err(e) = fs::rename(&temp_path, path) {
         let _ = fs::remove_file(&temp_path);
         return Err(e);
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o600));
+        if let Ok(dir_file) = File::open(dir) {
+            let _ = dir_file.sync_all();
+        }
     }
 
     Ok(())
@@ -363,6 +393,7 @@ pub fn atomic_write_json<T: Serialize>(path: &Path, value: &T) -> Result<(), Sto
 }
 
 /// Speichert das Manifest atomar in `manifest.json`.
+/// Sichert das bisherige Manifest als `manifest.json.bak` vor dem Überschreiben.
 pub fn save_manifest(notebook_dir: &Path, manifest: &NotebookManifest) -> Result<(), StorageError> {
     let path = notebook_dir.join("manifest.json");
     if path.exists() {
@@ -376,20 +407,15 @@ pub fn save_manifest(notebook_dir: &Path, manifest: &NotebookManifest) -> Result
                 }
             }
         }
+        // Rolling Backup: Vor Überschreiben sichern
+        let rolling_bak = notebook_dir.join("manifest.json.bak");
+        let _ = fs::copy(&path, &rolling_bak);
     }
     atomic_write_json(&path, manifest)
 }
 
-/// Lädt das Manifest aus `manifest.json`.
-pub fn load_manifest(notebook_dir: &Path) -> Result<NotebookManifest, StorageError> {
-    let path = notebook_dir.join("manifest.json");
-    if !path.exists() {
-        return Err(StorageError::InvalidManifest(format!(
-            "Manifestdatei nicht gefunden: {}",
-            path.display()
-        )));
-    }
-    let mut file = File::open(&path)?;
+fn load_manifest_from_file(path: &Path) -> Result<NotebookManifest, StorageError> {
+    let mut file = File::open(path)?;
     let mut json_str = String::new();
     file.read_to_string(&mut json_str)?;
     let mut manifest: NotebookManifest = serde_json::from_str(&json_str)?;
@@ -409,6 +435,39 @@ pub fn load_manifest(notebook_dir: &Path) -> Result<NotebookManifest, StorageErr
             .collect();
     }
     Ok(manifest)
+}
+
+/// Lädt das Manifest aus `manifest.json`.
+/// Fällt bei Fehlern/Beschädigung automatisch auf `manifest.json.bak` zurück.
+pub fn load_manifest(notebook_dir: &Path) -> Result<NotebookManifest, StorageError> {
+    let path = notebook_dir.join("manifest.json");
+    if !path.exists() {
+        let bak_path = notebook_dir.join("manifest.json.bak");
+        if bak_path.exists() {
+            eprintln!("[Storage-Warnung] manifest.json fehlt, lade aus manifest.json.bak");
+            return load_manifest_from_file(&bak_path);
+        }
+        return Err(StorageError::InvalidManifest(format!(
+            "Manifestdatei nicht gefunden: {}",
+            path.display()
+        )));
+    }
+
+    match load_manifest_from_file(&path) {
+        Ok(manifest) => Ok(manifest),
+        Err(e) => {
+            let bak_path = notebook_dir.join("manifest.json.bak");
+            if bak_path.exists() {
+                eprintln!(
+                    "[Storage-Warnung] manifest.json ist korrupt ({e}). Versuche Wiederherstellung aus manifest.json.bak"
+                );
+                if let Ok(bak_manifest) = load_manifest_from_file(&bak_path) {
+                    return Ok(bak_manifest);
+                }
+            }
+            Err(e)
+        }
+    }
 }
 
 /// Verschiebt eine defekte Seitendatei nach `page_<id>.json.corrupt-<unix_ts>`.
@@ -493,7 +552,7 @@ pub fn save_notebook(
     notebook: &Notebook,
     manifest: &mut NotebookManifest,
 ) -> Result<(), StorageError> {
-    fs::create_dir_all(notebook_dir)?;
+    create_secure_dir_all(notebook_dir)?;
 
     manifest.sync_from_notebook(notebook);
 
@@ -511,6 +570,7 @@ pub fn save_notebook(
 
 /// Lädt ein Notizbuch aus einem Ordner (erste Seite sofort, Folgeseiten als Platzhalter für Lazy Loading).
 pub fn load_notebook(notebook_dir: &Path) -> Result<(Notebook, NotebookManifest), StorageError> {
+    let _ = cleanup_orphaned_temp_files(notebook_dir, std::time::Duration::from_secs(3600));
     let manifest = load_manifest(notebook_dir)?;
     let page_ids = manifest.page_ids();
     if page_ids.is_empty() {
@@ -677,6 +737,14 @@ pub fn default_storage_dir() -> PathBuf {
     PathBuf::from("./data/notebooks")
 }
 
+/// Status eines Notizbuchs in der Dokumentenliste.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum NotebookStatus {
+    #[default]
+    Normal,
+    Damaged,
+}
+
 /// Zusammenfassende Metadaten eines Notizbuchs für die Dokumentenliste.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NotebookSummary {
@@ -684,9 +752,91 @@ pub struct NotebookSummary {
     pub title: String,
     pub page_count: usize,
     pub modified_at: u64,
+    #[serde(default)]
+    pub status: NotebookStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Dateibasierter Lock für ein geöffnetes Notizbuch, um parallele Schreibvorgänge mehrerer Instanzen zu verhindern.
+#[derive(Debug)]
+pub struct NotebookLock {
+    _file: File,
+    pub path: PathBuf,
+}
+
+impl NotebookLock {
+    /// Versucht, einen exklusiven, nicht-blockierenden Lock auf `notebook_dir/.lock` zu erwerben.
+    pub fn acquire(notebook_dir: &Path) -> Result<Self, StorageError> {
+        create_secure_dir_all(notebook_dir)?;
+        let lock_path = notebook_dir.join(".lock");
+        let file = File::options()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)
+            .map_err(StorageError::Io)?;
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&lock_path, fs::Permissions::from_mode(0o600));
+        }
+
+        use fs2::FileExt;
+        match file.try_lock_exclusive() {
+            Ok(()) => Ok(Self {
+                _file: file,
+                path: lock_path,
+            }),
+            Err(e) => {
+                let kind = e.kind();
+                if kind == io::ErrorKind::WouldBlock || e.raw_os_error() == Some(11) {
+                    Err(StorageError::AlreadyLocked(format!(
+                        "Notizbuch '{}' wird bereits von einer anderen Instanz verwendet",
+                        notebook_dir.display()
+                    )))
+                } else {
+                    Err(StorageError::Io(e))
+                }
+            }
+        }
+    }
+}
+
+/// Räumt verwaiste temporäre Dateien (*.tmp.*) auf, die älter als `max_age` sind.
+pub fn cleanup_orphaned_temp_files(
+    notebook_dir: &Path,
+    max_age: std::time::Duration,
+) -> io::Result<usize> {
+    let mut cleaned = 0;
+    if let Ok(entries) = fs::read_dir(notebook_dir) {
+        let now = std::time::SystemTime::now();
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_file() {
+                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                    if name.contains(".tmp.") {
+                        if let Ok(metadata) = entry.metadata() {
+                            if let Ok(modified) = metadata.modified() {
+                                if let Ok(age) = now.duration_since(modified) {
+                                    if age >= max_age && fs::remove_file(&path).is_ok() {
+                                        cleaned += 1;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(cleaned)
 }
 
 /// Durchsucht das Basis-Verzeichnis nach allen vorhandenen Notizbüchern.
+/// Beschädigte Notizbücher werden als `NotebookStatus::Damaged` aufgeführt. `.trash` wird ignoriert.
 pub fn list_notebooks(base_dir: &Path) -> Vec<NotebookSummary> {
     let mut list = Vec::new();
     let Ok(entries) = fs::read_dir(base_dir) else {
@@ -696,16 +846,66 @@ pub fn list_notebooks(base_dir: &Path) -> Vec<NotebookSummary> {
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
+            let dir_name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or_default();
+
+            // Versteckte Ordner (wie .trash, .recovery) ignorieren
+            if dir_name.starts_with('.') {
+                continue;
+            }
+
             let manifest_path = path.join("manifest.json");
             if manifest_path.exists() {
-                if let Ok(manifest) = load_manifest(&path) {
-                    list.push(NotebookSummary {
-                        id: manifest.id,
-                        title: manifest.title,
-                        page_count: manifest.page_ids.len(),
-                        modified_at: manifest.modified_at,
-                    });
+                match load_manifest(&path) {
+                    Ok(manifest) => {
+                        let page_count = manifest.page_ids().len();
+                        list.push(NotebookSummary {
+                            id: manifest.id,
+                            title: manifest.title,
+                            page_count,
+                            modified_at: manifest.modified_at,
+                            status: NotebookStatus::Normal,
+                            error: None,
+                        });
+                    }
+                    Err(err) => {
+                        let modified_at = entry
+                            .metadata()
+                            .and_then(|m| m.modified())
+                            .ok()
+                            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                            .map(|d| d.as_secs())
+                            .unwrap_or(0);
+
+                        list.push(NotebookSummary {
+                            id: dir_name.to_string(),
+                            title: format!("⚠️ {dir_name} (Beschädigt)"),
+                            page_count: 0,
+                            modified_at,
+                            status: NotebookStatus::Damaged,
+                            error: Some(err.to_string()),
+                        });
+                    }
                 }
+            } else {
+                let modified_at = entry
+                    .metadata()
+                    .and_then(|m| m.modified())
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+
+                list.push(NotebookSummary {
+                    id: dir_name.to_string(),
+                    title: format!("⚠️ {dir_name} (Beschädigt - kein Manifest)"),
+                    page_count: 0,
+                    modified_at,
+                    status: NotebookStatus::Damaged,
+                    error: Some("Keine manifest.json vorhanden".to_string()),
+                });
             }
         }
     }
@@ -716,11 +916,12 @@ pub fn list_notebooks(base_dir: &Path) -> Vec<NotebookSummary> {
 }
 
 /// Erstellt ein neues Notizbuch mit dem angegebenen Titel und initialisiert Seite 1.
+/// Verhindert Kollisionen durch automatischen Suffix-Inkrement.
 pub fn create_new_notebook(
     base_dir: &Path,
     title: &str,
 ) -> Result<(Notebook, NotebookManifest, PathBuf), StorageError> {
-    fs::create_dir_all(base_dir)?;
+    create_secure_dir_all(base_dir)?;
 
     let now_ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -741,14 +942,28 @@ pub fn create_new_notebook(
         .collect();
     let clean_slug = clean_slug.trim_matches('_');
 
-    let id = if clean_slug.is_empty() {
+    let base_id = if clean_slug.is_empty() {
         format!("nb_{now_ts}")
     } else {
         format!("{clean_slug}_{now_ts}")
     };
 
-    let notebook_dir = base_dir.join(&id);
-    fs::create_dir_all(&notebook_dir)?;
+    let mut id = base_id.clone();
+    let mut notebook_dir = base_dir.join(&id);
+    let mut counter = 1;
+    while notebook_dir.exists() {
+        id = format!("{base_id}_{counter}");
+        notebook_dir = base_dir.join(&id);
+        counter += 1;
+        if counter > 100 {
+            return Err(StorageError::Io(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "Konnte nach 100 Versuchen kein eindeutiges Notizbuch-Verzeichnis finden",
+            )));
+        }
+    }
+
+    create_secure_dir_all(&notebook_dir)?;
 
     let notebook = Notebook::new();
     let mut manifest = NotebookManifest::new(&id, title);
@@ -773,12 +988,174 @@ pub fn rename_notebook(
     Ok(())
 }
 
-/// Löscht ein Notizbuch vollständig vom Datenträger.
-pub fn delete_notebook(notebook_dir: &Path) -> Result<(), StorageError> {
-    if notebook_dir.exists() {
-        fs::remove_dir_all(notebook_dir)?;
+/// Verschiebt ein Notizbuch sicher in den Papierkorb (`<base_dir>/.trash/<id>_<ts>`).
+/// Prüft, dass der Pfad direkt unter `base_dir` liegt, kein Symlink ist und `manifest.json` enthält.
+pub fn delete_notebook(notebook_dir: &Path, base_dir: &Path) -> Result<PathBuf, StorageError> {
+    if !notebook_dir.exists() {
+        return Err(StorageError::InvalidManifest(format!(
+            "Verzeichnis '{}' existiert nicht",
+            notebook_dir.display()
+        )));
     }
-    Ok(())
+
+    // Prüfen auf Symlink
+    let symlink_meta = fs::symlink_metadata(notebook_dir).map_err(StorageError::Io)?;
+    if symlink_meta.file_type().is_symlink() {
+        return Err(StorageError::InvalidManifest(format!(
+            "Pfad '{}' ist ein Symlink und darf nicht gelöscht werden",
+            notebook_dir.display()
+        )));
+    }
+
+    let canon_base = base_dir.canonicalize().map_err(StorageError::Io)?;
+    let canon_target = notebook_dir.canonicalize().map_err(StorageError::Io)?;
+
+    // Prüfen, dass der Pfad direkt unter base_dir liegt
+    if canon_target.parent() != Some(&canon_base) {
+        return Err(StorageError::PathTraversal(format!(
+            "Pfad '{}' liegt nicht direkt unter Basis-Verzeichnis '{}'",
+            notebook_dir.display(),
+            base_dir.display()
+        )));
+    }
+
+    // Prüfen, dass manifest.json vorhanden ist
+    if !canon_target.join("manifest.json").exists() {
+        return Err(StorageError::InvalidManifest(format!(
+            "Verzeichnis '{}' enthält kein manifest.json",
+            notebook_dir.display()
+        )));
+    }
+
+    let notebook_id = canon_target
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("unknown");
+
+    let trash_dir = canon_base.join(".trash");
+    create_secure_dir_all(&trash_dir)?;
+
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let trash_target = trash_dir.join(format!("{notebook_id}_{ts}"));
+
+    fs::rename(&canon_target, &trash_target)?;
+
+    Ok(trash_target)
+}
+
+/// Stellt ein Notizbuch aus dem Papierkorb wieder her (`<base_dir>/.trash/<eintrag>` -> `<base_dir>/<id>`).
+pub fn restore_notebook_from_trash(
+    base_dir: &Path,
+    trash_target: &Path,
+) -> Result<PathBuf, StorageError> {
+    if !trash_target.exists() {
+        return Err(StorageError::Io(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!(
+                "Papierkorb-Eintrag '{}' existiert nicht",
+                trash_target.display()
+            ),
+        )));
+    }
+
+    let canon_base = base_dir.canonicalize().map_err(StorageError::Io)?;
+    let canon_trash = trash_target.canonicalize().map_err(StorageError::Io)?;
+
+    let expected_trash_dir = canon_base.join(".trash");
+    if !expected_trash_dir.exists() {
+        return Err(StorageError::InvalidManifest(
+            "Papierkorb-Verzeichnis existiert nicht".to_string(),
+        ));
+    }
+    let canon_trash_base = expected_trash_dir
+        .canonicalize()
+        .map_err(StorageError::Io)?;
+
+    if canon_trash.parent() != Some(&canon_trash_base) {
+        return Err(StorageError::PathTraversal(format!(
+            "Papierkorb-Pfad '{}' liegt nicht im Papierkorb",
+            trash_target.display()
+        )));
+    }
+
+    let manifest_path = canon_trash.join("manifest.json");
+    let target_id = if manifest_path.exists() {
+        if let Ok(content) = fs::read_to_string(&manifest_path) {
+            serde_json::from_str::<NotebookManifest>(&content)
+                .map(|m| m.id)
+                .unwrap_or_else(|_| {
+                    canon_trash
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("restored")
+                        .to_string()
+                })
+        } else {
+            "restored".to_string()
+        }
+    } else {
+        "restored".to_string()
+    };
+
+    let mut restored_dir = canon_base.join(&target_id);
+    if restored_dir.exists() {
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        restored_dir = canon_base.join(format!("{target_id}_restored_{ts}"));
+    }
+
+    fs::rename(&canon_trash, &restored_dir)?;
+    Ok(restored_dir)
+}
+
+/// Stellt ein beschädigtes Manifest aus der Rolling-Backup-Datei (`manifest.json.bak`) wieder her.
+pub fn restore_manifest_from_backup(notebook_dir: &Path) -> Result<(), StorageError> {
+    let bak_path = notebook_dir.join("manifest.json.bak");
+    let manifest_path = notebook_dir.join("manifest.json");
+    if bak_path.exists() {
+        fs::copy(&bak_path, &manifest_path).map_err(StorageError::Io)?;
+        Ok(())
+    } else {
+        Err(StorageError::InvalidManifest(
+            "Keine Sicherungskopie (manifest.json.bak) vorhanden".to_string(),
+        ))
+    }
+}
+
+/// Entfernt Einträge aus `.trash`, die älter als `max_age` sind.
+pub fn cleanup_trash(base_dir: &Path, max_age: std::time::Duration) -> io::Result<usize> {
+    let trash_dir = base_dir.join(".trash");
+    if !trash_dir.exists() {
+        return Ok(0);
+    }
+    let mut removed = 0;
+    let now = std::time::SystemTime::now();
+    if let Ok(entries) = fs::read_dir(&trash_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if let Ok(metadata) = entry.metadata() {
+                if let Ok(modified) = metadata.modified() {
+                    if let Ok(age) = now.duration_since(modified) {
+                        if age >= max_age {
+                            if path.is_dir() {
+                                if fs::remove_dir_all(&path).is_ok() {
+                                    removed += 1;
+                                }
+                            } else if fs::remove_file(&path).is_ok() {
+                                removed += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(removed)
 }
 
 #[cfg(test)]
@@ -1005,7 +1382,7 @@ mod tests {
             .any(|s| s.id == m1.id && s.title == "Höhere Mathematik"));
 
         // 5. Löschen
-        delete_notebook(&dir2).expect("Löschen muss klappen");
+        delete_notebook(&dir2, base_dir).expect("Löschen muss klappen");
         assert!(!dir2.exists());
 
         let final_summaries = list_notebooks(base_dir);
@@ -1244,5 +1621,243 @@ mod tests {
         // Files on disk must remain completely untouched
         assert_eq!(fs::read(&dest_manifest).unwrap(), orig_manifest_content);
         assert_eq!(fs::read(&dest_page).unwrap(), orig_page_content);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_permissions_0600_0700() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp_dir = tempfile::tempdir().unwrap();
+        let base_dir = temp_dir.path();
+
+        let (_nb, _m, nb_dir) = create_new_notebook(base_dir, "PermTest").unwrap();
+        let dir_mode = fs::metadata(&nb_dir).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            dir_mode, 0o700,
+            "Notizbuch-Verzeichnis muss 0700 Rechte haben"
+        );
+
+        let manifest_path = nb_dir.join("manifest.json");
+        let manifest_mode = fs::metadata(&manifest_path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(manifest_mode, 0o600, "manifest.json muss 0600 Rechte haben");
+
+        let page_path = nb_dir.join("page_1.json");
+        let page_mode = fs::metadata(&page_path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(page_mode, 0o600, "page_1.json muss 0600 Rechte haben");
+    }
+
+    #[test]
+    fn test_cleanup_orphaned_temp_files() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let nb_dir = temp_dir.path();
+
+        let old_temp = nb_dir.join("manifest.json.tmp.111.222");
+        let new_temp = nb_dir.join("manifest.json.tmp.333.444");
+        fs::write(&old_temp, b"old").unwrap();
+        fs::write(&new_temp, b"new").unwrap();
+
+        // 1 Stunde alt simulieren
+        let cleaned = cleanup_orphaned_temp_files(nb_dir, Duration::ZERO).unwrap();
+        assert_eq!(
+            cleaned, 2,
+            "Beide temporären Dateien müssen aufgeräumt werden"
+        );
+        assert!(!old_temp.exists());
+        assert!(!new_temp.exists());
+    }
+
+    #[test]
+    fn test_corrupted_manifest_fallback_to_bak() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let nb_dir = temp_dir.path();
+
+        let valid_manifest = NotebookManifest::new("nb_test", "Backup Test");
+        let bak_path = nb_dir.join("manifest.json.bak");
+        atomic_write_json(&bak_path, &valid_manifest).unwrap();
+
+        let broken_manifest_path = nb_dir.join("manifest.json");
+        fs::write(&broken_manifest_path, b"{ broken json ... ").unwrap();
+
+        let loaded = load_manifest(nb_dir).expect("Muss aus .bak geladen werden");
+        assert_eq!(loaded.id, "nb_test");
+        assert_eq!(loaded.title, "Backup Test");
+    }
+
+    #[test]
+    fn test_create_notebook_collision_generates_new_id() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let base_dir = temp_dir.path();
+
+        let (_nb1, m1, dir1) = create_new_notebook(base_dir, "Notiz").unwrap();
+        assert!(dir1.exists());
+
+        // Erzwinge absichtlich existierendes Verzeichnis mit demselben ID-Schema
+        let (_nb2, m2, dir2) = create_new_notebook(base_dir, "Notiz").unwrap();
+        assert!(dir2.exists());
+        assert_ne!(m1.id, m2.id, "IDs müssen bei Kollision eindeutig sein");
+        assert_ne!(dir1, dir2, "Verzeichnisse dürfen sich nicht überschreiben");
+    }
+
+    #[test]
+    fn test_delete_notebook_path_traversal_rejected() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let base_dir = temp_dir.path().join("storage");
+        let outside_dir = temp_dir.path().join("secret");
+        fs::create_dir_all(&base_dir).unwrap();
+        fs::create_dir_all(&outside_dir).unwrap();
+
+        let malicious_path = base_dir.join("../secret");
+        let res = delete_notebook(&malicious_path, &base_dir);
+        assert!(res.is_err(), "Path-Traversal muss abgewehrt werden");
+        match res.unwrap_err() {
+            StorageError::PathTraversal(_) => {}
+            other => panic!("Erwartet PathTraversal Fehler, erhalten: {other:?}"),
+        }
+        assert!(
+            outside_dir.exists(),
+            "Verzeichnis außerhalb darf nicht berührt werden"
+        );
+    }
+
+    #[test]
+    fn test_delete_notebook_moves_to_trash_and_can_be_restored() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let base_dir = temp_dir.path();
+        let (_nb, m, nb_dir) = create_new_notebook(base_dir, "TrashTest").unwrap();
+        assert!(nb_dir.exists());
+
+        let trash_target =
+            delete_notebook(&nb_dir, base_dir).expect("Löschen muss erfolgreich sein");
+        assert!(
+            !nb_dir.exists(),
+            "Originalverzeichnis muss verschwunden sein"
+        );
+        assert!(trash_target.exists(), "Papierkorb-Eintrag muss existieren");
+
+        let trash_dir = base_dir.join(".trash");
+        assert!(trash_dir.exists(), ".trash Ordner muss existieren");
+        let entries: Vec<_> = fs::read_dir(&trash_dir).unwrap().flatten().collect();
+        assert_eq!(
+            entries.len(),
+            1,
+            "Gelöschtes Notizbuch muss im Papierkorb liegen"
+        );
+        assert!(entries[0].file_name().to_string_lossy().starts_with(&m.id));
+
+        // Wiederherstellung prüfen
+        let restored_dir = restore_notebook_from_trash(base_dir, &trash_target)
+            .expect("Wiederherstellung aus Papierkorb muss erfolgreich sein");
+        assert!(
+            restored_dir.exists(),
+            "Wiederhergestelltes Verzeichnis muss existieren"
+        );
+        assert!(restored_dir.join("manifest.json").exists());
+        assert!(
+            !trash_target.exists(),
+            "Eintrag darf nicht mehr im Papierkorb liegen"
+        );
+    }
+
+    #[test]
+    fn test_delete_notebook_missing_manifest_rejected() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let base_dir = temp_dir.path();
+        let no_manifest_dir = base_dir.join("no_manifest");
+        fs::create_dir_all(&no_manifest_dir).unwrap();
+
+        let res = delete_notebook(&no_manifest_dir, base_dir);
+        assert!(
+            res.is_err(),
+            "Löschen ohne manifest.json muss abgewiesen werden"
+        );
+        match res.unwrap_err() {
+            StorageError::InvalidManifest(_) => {}
+            other => panic!("Erwartet InvalidManifest Fehler, erhalten: {other:?}"),
+        }
+        assert!(
+            no_manifest_dir.exists(),
+            "Verzeichnis ohne manifest.json darf nicht gelöscht werden"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_delete_notebook_symlink_rejected() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let base_dir = temp_dir.path();
+        let (_nb, _m, real_dir) = create_new_notebook(base_dir, "RealNB").unwrap();
+
+        let symlink_path = base_dir.join("symlink_nb");
+        std::os::unix::fs::symlink(&real_dir, &symlink_path).unwrap();
+
+        let res = delete_notebook(&symlink_path, base_dir);
+        assert!(res.is_err(), "Löschen von Symlinks muss abgewiesen werden");
+        match res.unwrap_err() {
+            StorageError::InvalidManifest(_) => {}
+            other => panic!("Erwartet InvalidManifest Fehler, erhalten: {other:?}"),
+        }
+        assert!(
+            real_dir.exists(),
+            "Reales Notizbuch darf nicht angetastet werden"
+        );
+        assert!(
+            symlink_path.exists(),
+            "Symlink darf nicht angetastet werden"
+        );
+    }
+
+    #[test]
+    fn test_list_notebooks_includes_damaged_and_ignores_trash() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let base_dir = temp_dir.path();
+
+        // 1. Intaktes Notizbuch
+        let (_nb, _m, _dir) = create_new_notebook(base_dir, "Intakt").unwrap();
+
+        // 2. Beschädigtes Notizbuch (defektes manifest.json)
+        let damaged_dir = base_dir.join("damaged_nb");
+        fs::create_dir_all(&damaged_dir).unwrap();
+        fs::write(damaged_dir.join("manifest.json"), b"corrupt").unwrap();
+
+        // 3. .trash Ordner
+        let trash_dir = base_dir.join(".trash");
+        fs::create_dir_all(&trash_dir).unwrap();
+
+        let summaries = list_notebooks(base_dir);
+        // .trash darf nicht auftauchen!
+        assert!(!summaries.iter().any(|s| s.id == ".trash"));
+
+        // damaged_nb MUSS auftauchen mit Status Damaged
+        let damaged_summary = summaries.iter().find(|s| s.id == "damaged_nb");
+        assert!(
+            damaged_summary.is_some(),
+            "Beschädigtes Notizbuch muss aufgelistet werden"
+        );
+        assert_eq!(damaged_summary.unwrap().status, NotebookStatus::Damaged);
+    }
+
+    #[test]
+    fn test_notebook_instance_lock_prevents_concurrent_open() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let nb_dir = temp_dir.path();
+
+        let lock1 = NotebookLock::acquire(nb_dir).expect("Erster Lock muss gelingen");
+        let lock2 = NotebookLock::acquire(nb_dir);
+        assert!(
+            lock2.is_err(),
+            "Zweiter Lock auf selbes Verzeichnis muss scheitern"
+        );
+        match lock2.unwrap_err() {
+            StorageError::AlreadyLocked(_) => {}
+            other => panic!("Erwartet AlreadyLocked, erhalten: {other:?}"),
+        }
+
+        // Lock 1 freigeben
+        drop(lock1);
+        let lock3 = NotebookLock::acquire(nb_dir);
+        assert!(
+            lock3.is_ok(),
+            "Nach Drop muss Lock wieder erworben werden können"
+        );
     }
 }

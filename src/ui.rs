@@ -113,6 +113,9 @@ pub enum UiAction {
         new_title: String,
     },
     DeleteNotebook(String),
+    UndoDeleteNotebook,
+    RestoreNotebookBackup(String),
+    OpenNotebookFolder(String),
     RefreshNotebooks,
     // Gitea Release & Updater
     CheckForUpdates,
@@ -168,6 +171,8 @@ pub struct UiState {
     pub update_modal_rect: Option<egui::Rect>,
     /// Steuert, ob Touch-Eingaben mit einem Finger zeichnen oder das Dokument verschieben (Default: false = reine Gesten-Navigation & Zoom)
     pub touch_draw_enabled: bool,
+    /// Zuletzt gelöschtes Notizbuch für Rückgängig während der Sitzung (Papierkorb-Pfad, Titel)
+    pub last_deleted_notebook: Option<(std::path::PathBuf, String)>,
     /// Fehler beim Flushen vor dem Beenden
     pub shutdown_error: Option<crate::autosave::AutosaveError>,
 }
@@ -201,6 +206,7 @@ impl Default for UiState {
             show_updater_config: false,
             update_modal_rect: None,
             touch_draw_enabled: false,
+            last_deleted_notebook: None,
             shutdown_error: None,
         }
     }
@@ -1555,11 +1561,17 @@ pub fn render_ui(
                                                             .size(13.0)
                                                             .color(egui::Color32::WHITE),
                                                     );
-                                                    if is_current {
+                                                    if summary.status == crate::storage::NotebookStatus::Damaged {
+                                                        ui.colored_label(egui::Color32::from_rgb(255, 100, 100), "⚠️ Beschädigt");
+                                                    } else if is_current {
                                                         ui.colored_label(egui::Color32::from_rgb(46, 204, 113), "● Aktiv");
                                                     }
                                                 });
-                                                let subtext = format!("{} Seite(n)", summary.page_count);
+                                                let subtext = if let Some(ref err) = summary.error {
+                                                    format!("Fehler: {err}")
+                                                } else {
+                                                    format!("{} Seite(n)", summary.page_count)
+                                                };
                                                 ui.label(
                                                     egui::RichText::new(subtext)
                                                         .size(11.0)
@@ -1568,27 +1580,47 @@ pub fn render_ui(
                                             });
 
                                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                                if state.available_notebooks.len() > 1
-                                                    && ui
-                                                        .button(egui::RichText::new("🗑").size(11.0).color(egui::Color32::from_rgb(255, 120, 120)))
-                                                        .on_hover_text("Notizbuch unwiderruflich löschen")
+                                                if summary.status == crate::storage::NotebookStatus::Damaged {
+                                                    if ui
+                                                        .button(egui::RichText::new("🔄 Backup").size(11.0).color(egui::Color32::from_rgb(100, 200, 255)))
+                                                        .on_hover_text("Aus manifest.json.bak wiederherstellen")
                                                         .clicked()
-                                                {
-                                                    actions.push(UiAction::DeleteNotebook(summary.id.clone()));
-                                                }
+                                                    {
+                                                        actions.push(UiAction::RestoreNotebookBackup(summary.id.clone()));
+                                                    }
+                                                    if ui
+                                                        .button(egui::RichText::new("📁 Ordner").size(11.0))
+                                                        .on_hover_text("Pfad in Statusleiste anzeigen")
+                                                        .clicked()
+                                                    {
+                                                        actions.push(UiAction::OpenNotebookFolder(summary.id.clone()));
+                                                    }
+                                                } else {
+                                                    if state.available_notebooks.len() > 1
+                                                        && ui
+                                                            .button(egui::RichText::new("🗑").size(11.0).color(egui::Color32::from_rgb(255, 120, 120)))
+                                                            .on_hover_text("Notizbuch in Papierkorb verschieben")
+                                                            .clicked()
+                                                    {
+                                                        actions.push(UiAction::DeleteNotebook(summary.id.clone()));
+                                                    }
 
-                                                if ui.button(egui::RichText::new("✏").size(11.0))
-                                                    .on_hover_text("Titel umbenennen")
-                                                    .clicked()
-                                                {
-                                                    state.renaming_notebook_id = Some(summary.id.clone());
-                                                    state.renaming_title_input = summary.title.clone();
+                                                    if ui.button(egui::RichText::new("✏").size(11.0))
+                                                        .on_hover_text("Titel umbenennen")
+                                                        .clicked()
+                                                    {
+                                                        state.renaming_notebook_id = Some(summary.id.clone());
+                                                        state.renaming_title_input = summary.title.clone();
+                                                    }
                                                 }
                                             });
                                         });
                                     });
 
-                                if frame_resp.response.interact(egui::Sense::click()).clicked() && !is_current {
+                                if summary.status != crate::storage::NotebookStatus::Damaged
+                                    && frame_resp.response.interact(egui::Sense::click()).clicked()
+                                    && !is_current
+                                {
                                     actions.push(UiAction::OpenNotebook(summary.id.clone()));
                                     state.is_document_menu_open = false;
                                 }
@@ -1597,6 +1629,23 @@ pub fn render_ui(
                         ui.add_space(4.0);
                     }
                 });
+
+                if let Some((_, ref title)) = state.last_deleted_notebook {
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new(format!("'{title}' gelöscht"))
+                                .size(11.0)
+                                .color(egui::Color32::from_rgb(255, 180, 100)),
+                        );
+                        if ui
+                            .button(egui::RichText::new("↩ Rückgängig").size(11.0).color(egui::Color32::from_rgb(100, 200, 255)))
+                            .clicked()
+                        {
+                            actions.push(UiAction::UndoDeleteNotebook);
+                        }
+                    });
+                }
 
                 ui.add_space(8.0);
                 ui.separator();
@@ -2244,12 +2293,16 @@ mod tests {
                 title: "Mathematik I".to_string(),
                 page_count: 3,
                 modified_at: 100,
+                status: crate::storage::NotebookStatus::Normal,
+                error: None,
             },
             NotebookSummary {
                 id: "nb-2".to_string(),
                 title: "Physik II".to_string(),
                 page_count: 5,
                 modified_at: 200,
+                status: crate::storage::NotebookStatus::Normal,
+                error: None,
             },
         ];
         state.current_notebook_id = "nb-1".to_string();

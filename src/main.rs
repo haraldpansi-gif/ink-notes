@@ -119,6 +119,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 1. Notizbuch aus Storage laden oder initialisieren (Session-Wiederherstellung)
     let storage_base_dir = storage::default_storage_dir();
+    let _ = storage::cleanup_trash(
+        &storage_base_dir,
+        std::time::Duration::from_secs(30 * 24 * 3600),
+    );
     let available_notebooks = storage::list_notebooks(&storage_base_dir);
 
     let (initial_id, initial_title) = if let Some(first) = available_notebooks.first() {
@@ -175,6 +179,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ui_state.document_title = manifest.title.clone();
     ui_state.available_notebooks = available_notebooks;
     let mut selection_state = SelectionState::new();
+
+    let mut _notebook_lock = match storage::NotebookLock::acquire(&storage_dir) {
+        Ok(lock) => {
+            autosave.set_read_only(false);
+            Some(lock)
+        }
+        Err(storage::StorageError::AlreadyLocked(msg)) => {
+            eprintln!("[Storage-Lock] {msg}");
+            autosave.set_read_only(true);
+            ui_state.set_export_message("⚠️ In anderer Instanz geöffnet (Schreibschutz)");
+            None
+        }
+        Err(e) => {
+            eprintln!("[Storage-Lock] Konnte Lock nicht erwerben: {e}");
+            autosave.set_read_only(true);
+            None
+        }
+    };
 
     // Initiale Seite und Werkzeugeinstellungen mit Canvas synchronisieren
     canvas.sync_page(notebook.current_page_mut());
@@ -2011,6 +2033,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         let new_notebook_dir = storage_base_dir.join(&id);
                                         match storage::load_notebook(&new_notebook_dir) {
                                             Ok((loaded_nb, loaded_manifest)) => {
+                                                let _ = autosave.flush();
+                                                match storage::NotebookLock::acquire(&new_notebook_dir) {
+                                                    Ok(lock) => {
+                                                        _notebook_lock = Some(lock);
+                                                        autosave.set_read_only(false);
+                                                    }
+                                                    Err(storage::StorageError::AlreadyLocked(msg)) => {
+                                                        eprintln!("[Storage-Lock] {msg}");
+                                                        _notebook_lock = None;
+                                                        autosave.set_read_only(true);
+                                                        ui_state.set_export_message("⚠️ In anderer Instanz geöffnet (Schreibschutz)");
+                                                    }
+                                                    Err(e) => {
+                                                        eprintln!("[Storage-Lock] Konnte Lock nicht erwerben: {e}");
+                                                        _notebook_lock = None;
+                                                        autosave.set_read_only(true);
+                                                    }
+                                                }
                                                 autosave.switch_notebook_dir(new_notebook_dir.clone());
                                                 notebook = loaded_nb;
                                                 manifest = loaded_manifest;
@@ -2022,7 +2062,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 ui_state.is_document_menu_open = false;
                                                 canvas.sync_page(notebook.current_page_mut());
                                                 update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
-                                                ui_state.set_export_message(format!("Dokument '{}' geöffnet", manifest.title));
+                                                if _notebook_lock.is_some() {
+                                                    ui_state.set_export_message(format!("Dokument '{}' geöffnet", manifest.title));
+                                                }
                                                 window.request_redraw();
                                             }
                                             Err(err) => {
@@ -2036,6 +2078,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     let _ = autosave.flush();
                                     match storage::create_new_notebook(&storage_base_dir, &title) {
                                         Ok((new_nb, new_manifest, new_dir)) => {
+                                            _notebook_lock = storage::NotebookLock::acquire(&new_dir).ok();
+                                            autosave.set_read_only(_notebook_lock.is_none());
                                             autosave.switch_notebook_dir(new_dir.clone());
                                             notebook = new_nb;
                                             manifest = new_manifest;
@@ -2088,14 +2132,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 UiAction::DeleteNotebook(id) => {
                                     let target_dir = storage_base_dir.join(&id);
                                     let is_current = id == manifest.id;
-                                    match storage::delete_notebook(&target_dir) {
-                                        Ok(()) => {
+                                    let deleted_title = ui_state
+                                        .available_notebooks
+                                        .iter()
+                                        .find(|s| s.id == id)
+                                        .map(|s| s.title.clone())
+                                        .unwrap_or_else(|| id.clone());
+
+                                    if is_current {
+                                        let _ = autosave.flush();
+                                        drop(_notebook_lock.take());
+                                    }
+
+                                    match storage::delete_notebook(&target_dir, &storage_base_dir) {
+                                        Ok(trash_path) => {
+                                            ui_state.last_deleted_notebook = Some((trash_path, deleted_title));
                                             ui_state.available_notebooks = storage::list_notebooks(&storage_base_dir);
                                             if is_current {
-                                                if let Some(first) = ui_state.available_notebooks.first().cloned() {
+                                                if let Some(first) = ui_state
+                                                    .available_notebooks
+                                                    .iter()
+                                                    .find(|s| s.status != storage::NotebookStatus::Damaged)
+                                                    .cloned()
+                                                {
                                                     let new_notebook_dir = storage_base_dir.join(&first.id);
                                                     match storage::load_notebook(&new_notebook_dir) {
                                                         Ok((loaded_nb, loaded_manifest)) => {
+                                                            _notebook_lock = storage::NotebookLock::acquire(&new_notebook_dir).ok();
+                                                            autosave.set_read_only(_notebook_lock.is_none());
                                                             autosave.switch_notebook_dir(new_notebook_dir.clone());
                                                             notebook = loaded_nb;
                                                             manifest = loaded_manifest;
@@ -2112,6 +2176,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                         }
                                                     }
                                                 } else if let Ok((new_nb, new_manifest, new_dir)) = storage::create_new_notebook(&storage_base_dir, "Standard-Notizbuch") {
+                                                    _notebook_lock = storage::NotebookLock::acquire(&new_dir).ok();
+                                                    autosave.set_read_only(_notebook_lock.is_none());
                                                     autosave.switch_notebook_dir(new_dir.clone());
                                                     notebook = new_nb;
                                                     manifest = new_manifest;
@@ -2125,7 +2191,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                     ui_state.set_export_message("Standard-Notizbuch erstellt".to_string());
                                                 }
                                             } else {
-                                                ui_state.set_export_message("Dokument gelöscht".to_string());
+                                                ui_state.set_export_message("Dokument in Papierkorb verschoben".to_string());
                                             }
                                             window.request_redraw();
                                         }
@@ -2134,6 +2200,40 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             ui_state.set_export_message(format!("Fehler beim Löschen: {err}"));
                                         }
                                     }
+                                }
+                                UiAction::UndoDeleteNotebook => {
+                                    if let Some((trash_path, _title)) = ui_state.last_deleted_notebook.take() {
+                                        match storage::restore_notebook_from_trash(&storage_base_dir, &trash_path) {
+                                            Ok(_restored_dir) => {
+                                                ui_state.available_notebooks = storage::list_notebooks(&storage_base_dir);
+                                                ui_state.set_export_message("Notizbuch wiederhergestellt".to_string());
+                                                window.request_redraw();
+                                            }
+                                            Err(err) => {
+                                                eprintln!("[Dokument-Fehler] Konnte Notizbuch nicht wiederherstellen: {err}");
+                                                ui_state.set_export_message(format!("Fehler beim Wiederherstellen: {err}"));
+                                            }
+                                        }
+                                    }
+                                }
+                                UiAction::RestoreNotebookBackup(id) => {
+                                    let target_dir = storage_base_dir.join(&id);
+                                    match storage::restore_manifest_from_backup(&target_dir) {
+                                        Ok(()) => {
+                                            ui_state.available_notebooks = storage::list_notebooks(&storage_base_dir);
+                                            ui_state.set_export_message("Manifest aus Backup wiederhergestellt".to_string());
+                                            window.request_redraw();
+                                        }
+                                        Err(err) => {
+                                            eprintln!("[Dokument-Fehler] Konnte Backup für '{id}' nicht wiederherstellen: {err}");
+                                            ui_state.set_export_message(format!("Wiederherstellung fehlgeschlagen: {err}"));
+                                        }
+                                    }
+                                }
+                                UiAction::OpenNotebookFolder(id) => {
+                                    let target_dir = storage_base_dir.join(&id);
+                                    ui_state.set_export_message(format!("Ordner: {}", target_dir.display()));
+                                    window.request_redraw();
                                 }
                                 UiAction::CheckForUpdates => {
                                     updater.check_for_updates();

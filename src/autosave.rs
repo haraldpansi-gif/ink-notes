@@ -236,6 +236,7 @@ pub struct AutosaveController {
     clock: Arc<dyn Clock>,
     cmd_tx: Sender<AutosaveCommand>,
     resp_rx: Receiver<AutosaveResponse>,
+    read_only: bool,
     worker_handle: Option<JoinHandle<()>>,
     worker_restart_count: usize,
 }
@@ -288,14 +289,30 @@ impl AutosaveController {
             clock,
             cmd_tx,
             resp_rx,
+            read_only: false,
             worker_handle: Some(worker_handle),
             worker_restart_count: 0,
         }
     }
 
+    /// Aktiviert oder deaktiviert den Nur-Lese-Modus (z. B. wenn das Notizbuch von einer anderen Instanz gelockt ist).
+    pub fn set_read_only(&mut self, read_only: bool) {
+        self.read_only = read_only;
+        if read_only {
+            self.pending_pages.clear();
+            self.pending_manifest = None;
+            self.status = AutosaveStatus::Saved;
+        }
+    }
+
+    /// Prüft, ob der Nur-Lese-Modus aktiv ist.
+    pub fn is_read_only(&self) -> bool {
+        self.read_only
+    }
+
     /// Markiert eine Seite als geändert und startet/erneuert das Debounce-Fenster.
     pub fn mark_page_dirty(&mut self, page: &Page, manifest: &NotebookManifest) {
-        if page.persist == crate::document::PersistState::ReadOnlyAfterLoadError {
+        if self.read_only || page.persist == crate::document::PersistState::ReadOnlyAfterLoadError {
             return;
         }
         let page_data = PageData::from(page);
@@ -315,6 +332,9 @@ impl AutosaveController {
 
     /// Markiert das Manifest als geändert (z. B. bei Seitenwechsel oder Umbenennen).
     pub fn mark_manifest_dirty(&mut self, manifest: &NotebookManifest) {
+        if self.read_only {
+            return;
+        }
         self.pending_manifest = Some(manifest.clone());
 
         let now = self.clock.now();
@@ -361,6 +381,9 @@ impl AutosaveController {
 
     /// Prüft den Worker-Kanal und stößt fällige Schreibvorgänge nach Ablauf von Debounce oder MaxWait an.
     pub fn update(&mut self) -> AutosaveStatus {
+        if self.read_only {
+            return AutosaveStatus::Saved;
+        }
         let now = self.clock.now();
 
         // 1. Antworten des Hintergrund-Workers verarbeiten
@@ -504,6 +527,9 @@ impl AutosaveController {
     /// Führt einen synchronen Flush aller anstehenden Änderungen durch.
     /// Gibt `Result<(), AutosaveError>` mit allen Fehlermeldungen zurück.
     pub fn flush(&mut self) -> Result<(), AutosaveError> {
+        if self.read_only {
+            return Ok(());
+        }
         // Backoff für den Flush ignorieren, damit sofort geschrieben wird
         self.retries.clear();
 
