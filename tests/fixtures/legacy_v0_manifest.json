@@ -1,0 +1,10 @@
+{
+  "id": "legacy_notebook",
+  "title": "Legacy Notizbuch v0",
+  "created_at": 1700000000,
+  "modified_at": 1700001000,
+  "current_page_index": 0,
+  "page_ids": [1],
+  "next_stroke_id": 5,
+  "next_page_id": 2
+}

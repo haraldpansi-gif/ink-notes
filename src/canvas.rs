@@ -104,6 +104,8 @@ pub struct CanvasState {
     pub camera_buffer: wgpu::Buffer,
     pub camera_bind_group: wgpu::BindGroup,
     pub current_ink_color: [f32; 4],
+    pub current_stroke_width_mm: f32,
+    pub current_tool: crate::document::StrokeTool,
 
     // Statische Hintergrund-Geometrie
     pub paper_buffer: wgpu::Buffer,
@@ -374,6 +376,8 @@ impl CanvasState {
             camera_buffer,
             camera_bind_group,
             current_ink_color: default_ink_color,
+            current_stroke_width_mm: 0.5,
+            current_tool: crate::document::StrokeTool::Pen,
             paper_buffer,
             background_buffer,
             background_vertex_capacity: Self::INITIAL_BACKGROUND_CAPACITY,
@@ -502,10 +506,14 @@ impl CanvasState {
 
     /// Konfiguriert die Strichbreite in Millimetern.
     pub fn set_stroke_width_mm(&mut self, width_mm: f32) {
-        // 10 Einheiten = 1 mm. Radius = (width_mm * 10.0) / 2.0 = width_mm * 5.0.
-        let base_radius = (width_mm * 5.0).max(0.25);
-        self.spline_config.min_radius = (base_radius * 0.5).max(0.15);
-        self.spline_config.max_radius = (base_radius * 1.5).max(0.35);
+        self.current_stroke_width_mm = width_mm;
+        self.spline_config =
+            SplineConfig::from_width_units(width_mm * crate::document::UNITS_PER_MM);
+    }
+
+    /// Setzt das aktive Zeichenwerkzeug für den Stift.
+    pub fn set_tool(&mut self, tool: crate::document::StrokeTool) {
+        self.current_tool = tool;
     }
 
     /// Setzt den Seitenhintergrund und aktualisiert bei Bedarf den Vertex-Puffer.
@@ -643,6 +651,10 @@ impl CanvasState {
             self.current_ink_color,
             &self.spline_config,
         );
+        let mut stroke = stroke;
+        stroke.tool = self.current_tool;
+        stroke.width = self.current_stroke_width_mm * crate::document::UNITS_PER_MM;
+        stroke.finalized = true;
 
         // Temporären GPU-Live-Buffer vollständig leeren
         self.live_samples.clear();

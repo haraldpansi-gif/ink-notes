@@ -113,6 +113,9 @@ pub enum UiAction {
         new_title: String,
     },
     DeleteNotebook(String),
+    UndoDeleteNotebook,
+    RestoreNotebookBackup(String),
+    OpenNotebookFolder(String),
     RefreshNotebooks,
     // Gitea Release & Updater
     CheckForUpdates,
@@ -123,6 +126,12 @@ pub enum UiAction {
         server_url: String,
         auth_token: Option<String>,
     },
+    // Datenintegrität / Quarantäne
+    UnlockCorruptedPage(u64),
+    // Beenden-Sicherheit bei Fehlschlag
+    RetryShutdown,
+    ExportRecoveryAndExit,
+    ForceExit,
 }
 
 /// Zustand der grafischen Benutzeroberfläche.
@@ -162,6 +171,10 @@ pub struct UiState {
     pub update_modal_rect: Option<egui::Rect>,
     /// Steuert, ob Touch-Eingaben mit einem Finger zeichnen oder das Dokument verschieben (Default: false = reine Gesten-Navigation & Zoom)
     pub touch_draw_enabled: bool,
+    /// Zuletzt gelöschtes Notizbuch für Rückgängig während der Sitzung (Papierkorb-Pfad, Titel)
+    pub last_deleted_notebook: Option<(std::path::PathBuf, String)>,
+    /// Fehler beim Flushen vor dem Beenden
+    pub shutdown_error: Option<crate::autosave::AutosaveError>,
 }
 
 impl Default for UiState {
@@ -193,6 +206,8 @@ impl Default for UiState {
             show_updater_config: false,
             update_modal_rect: None,
             touch_draw_enabled: false,
+            last_deleted_notebook: None,
+            shutdown_error: None,
         }
     }
 }
@@ -1546,11 +1561,17 @@ pub fn render_ui(
                                                             .size(13.0)
                                                             .color(egui::Color32::WHITE),
                                                     );
-                                                    if is_current {
+                                                    if summary.status == crate::storage::NotebookStatus::Damaged {
+                                                        ui.colored_label(egui::Color32::from_rgb(255, 100, 100), "⚠️ Beschädigt");
+                                                    } else if is_current {
                                                         ui.colored_label(egui::Color32::from_rgb(46, 204, 113), "● Aktiv");
                                                     }
                                                 });
-                                                let subtext = format!("{} Seite(n)", summary.page_count);
+                                                let subtext = if let Some(ref err) = summary.error {
+                                                    format!("Fehler: {err}")
+                                                } else {
+                                                    format!("{} Seite(n)", summary.page_count)
+                                                };
                                                 ui.label(
                                                     egui::RichText::new(subtext)
                                                         .size(11.0)
@@ -1559,27 +1580,47 @@ pub fn render_ui(
                                             });
 
                                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                                if state.available_notebooks.len() > 1
-                                                    && ui
-                                                        .button(egui::RichText::new("🗑").size(11.0).color(egui::Color32::from_rgb(255, 120, 120)))
-                                                        .on_hover_text("Notizbuch unwiderruflich löschen")
+                                                if summary.status == crate::storage::NotebookStatus::Damaged {
+                                                    if ui
+                                                        .button(egui::RichText::new("🔄 Backup").size(11.0).color(egui::Color32::from_rgb(100, 200, 255)))
+                                                        .on_hover_text("Aus manifest.json.bak wiederherstellen")
                                                         .clicked()
-                                                {
-                                                    actions.push(UiAction::DeleteNotebook(summary.id.clone()));
-                                                }
+                                                    {
+                                                        actions.push(UiAction::RestoreNotebookBackup(summary.id.clone()));
+                                                    }
+                                                    if ui
+                                                        .button(egui::RichText::new("📁 Ordner").size(11.0))
+                                                        .on_hover_text("Pfad in Statusleiste anzeigen")
+                                                        .clicked()
+                                                    {
+                                                        actions.push(UiAction::OpenNotebookFolder(summary.id.clone()));
+                                                    }
+                                                } else {
+                                                    if state.available_notebooks.len() > 1
+                                                        && ui
+                                                            .button(egui::RichText::new("🗑").size(11.0).color(egui::Color32::from_rgb(255, 120, 120)))
+                                                            .on_hover_text("Notizbuch in Papierkorb verschieben")
+                                                            .clicked()
+                                                    {
+                                                        actions.push(UiAction::DeleteNotebook(summary.id.clone()));
+                                                    }
 
-                                                if ui.button(egui::RichText::new("✏").size(11.0))
-                                                    .on_hover_text("Titel umbenennen")
-                                                    .clicked()
-                                                {
-                                                    state.renaming_notebook_id = Some(summary.id.clone());
-                                                    state.renaming_title_input = summary.title.clone();
+                                                    if ui.button(egui::RichText::new("✏").size(11.0))
+                                                        .on_hover_text("Titel umbenennen")
+                                                        .clicked()
+                                                    {
+                                                        state.renaming_notebook_id = Some(summary.id.clone());
+                                                        state.renaming_title_input = summary.title.clone();
+                                                    }
                                                 }
                                             });
                                         });
                                     });
 
-                                if frame_resp.response.interact(egui::Sense::click()).clicked() && !is_current {
+                                if summary.status != crate::storage::NotebookStatus::Damaged
+                                    && frame_resp.response.interact(egui::Sense::click()).clicked()
+                                    && !is_current
+                                {
                                     actions.push(UiAction::OpenNotebook(summary.id.clone()));
                                     state.is_document_menu_open = false;
                                 }
@@ -1588,6 +1629,23 @@ pub fn render_ui(
                         ui.add_space(4.0);
                     }
                 });
+
+                if let Some((_, ref title)) = state.last_deleted_notebook {
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new(format!("'{title}' gelöscht"))
+                                .size(11.0)
+                                .color(egui::Color32::from_rgb(255, 180, 100)),
+                        );
+                        if ui
+                            .button(egui::RichText::new("↩ Rückgängig").size(11.0).color(egui::Color32::from_rgb(100, 200, 255)))
+                            .clicked()
+                        {
+                            actions.push(UiAction::UndoDeleteNotebook);
+                        }
+                    });
+                }
 
                 ui.add_space(8.0);
                 ui.separator();
@@ -1932,6 +1990,183 @@ pub fn render_ui(
         }
     }
 
+    // 5. Nicht-wegklickbare Warnung bei Ladefehlern / Quarantäne (Block 1)
+    if let Some(warning) = notebook.load_warnings.get(&notebook.current_page().id) {
+        egui::Window::new("⚠️ Datenintegritäts-Warnung")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .frame(
+                egui::Frame::none()
+                    .fill(egui::Color32::from_rgba_premultiplied(35, 20, 20, 245))
+                    .rounding(egui::Rounding::same(12.0))
+                    .stroke(egui::Stroke::new(
+                        1.5_f32,
+                        egui::Color32::from_rgb(235, 87, 87),
+                    ))
+                    .inner_margin(egui::Margin::symmetric(24.0, 20.0))
+                    .shadow(egui::epaint::Shadow {
+                        offset: egui::vec2(0.0, 8.0),
+                        blur: 24.0,
+                        spread: 0.0,
+                        color: egui::Color32::from_black_alpha(180),
+                    }),
+            )
+            .show(ctx, |ui| {
+                ui.set_width(420.0);
+                ui.horizontal(|ui| {
+                    ui.colored_label(egui::Color32::from_rgb(255, 80, 80), "⚠️");
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "Seite {} konnte nicht fehlerfrei geladen werden!",
+                            warning.page_id
+                        ))
+                        .strong()
+                        .size(15.0)
+                        .color(egui::Color32::WHITE),
+                    );
+                });
+                ui.add_space(8.0);
+                ui.label(
+                    egui::RichText::new(format!("Fehlermeldung: {}", warning.message))
+                        .size(12.0)
+                        .color(egui::Color32::from_gray(200)),
+                );
+                ui.add_space(8.0);
+                if let Some(ref q_path) = warning.quarantine_path {
+                    ui.label(
+                        egui::RichText::new("Die beschädigte Originaldatei wurde in Quarantäne gesichert:")
+                            .size(12.0)
+                            .color(egui::Color32::from_gray(220)),
+                    );
+                    ui.add_space(4.0);
+                    ui.monospace(
+                        egui::RichText::new(q_path.display().to_string())
+                            .size(11.0)
+                            .color(egui::Color32::from_rgb(255, 215, 0)),
+                    );
+                    ui.add_space(10.0);
+                    ui.label(
+                        egui::RichText::new(
+                            "Um Datenverlust zu verhindern, ist diese Seite schreibgeschützt.\n\
+                             Wenn Sie diese Seite bearbeiten möchten, können Sie den Schreibschutz aufheben.",
+                        )
+                        .size(11.5)
+                        .color(egui::Color32::from_gray(180)),
+                    );
+                    ui.add_space(12.0);
+                    if ui
+                        .button(
+                            egui::RichText::new("Als leere Seite bearbeiten (Schreibschutz aufheben)")
+                                .color(egui::Color32::WHITE)
+                                .size(12.5),
+                        )
+                        .clicked()
+                    {
+                        actions.push(UiAction::UnlockCorruptedPage(warning.page_id));
+                    }
+                } else {
+                    ui.label(
+                        egui::RichText::new(
+                            "Zugriffsfehler (I/O). Die Datei existiert, kann aber nicht gelesen werden.\n\
+                             Die Seite bleibt schreibgeschützt, um ein Überschreiben zu verhindern.",
+                        )
+                        .size(12.0)
+                        .color(egui::Color32::from_gray(200)),
+                    );
+                }
+            });
+    }
+
+    // Notfall-/Sicherheits-Dialog bei Fehlschlag des Speicherns vor dem Beenden
+    if let Some(err) = &state.shutdown_error {
+        let mut dismiss = false;
+        egui::Window::new("⚠️ Ungespeicherte Änderungen")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .frame(
+                egui::Frame::none()
+                    .fill(egui::Color32::from_rgba_premultiplied(35, 20, 20, 250))
+                    .rounding(egui::Rounding::same(12.0))
+                    .stroke(egui::Stroke::new(
+                        1.5_f32,
+                        egui::Color32::from_rgb(235, 87, 87),
+                    ))
+                    .inner_margin(egui::Margin::symmetric(24.0, 20.0))
+                    .shadow(egui::epaint::Shadow {
+                        offset: egui::vec2(0.0, 8.0),
+                        blur: 24.0,
+                        spread: 0.0,
+                        color: egui::Color32::from_black_alpha(200),
+                    }),
+            )
+            .show(ctx, |ui| {
+                ui.set_width(460.0);
+                ui.horizontal(|ui| {
+                    ui.colored_label(egui::Color32::from_rgb(255, 80, 80), "⚠️");
+                    ui.label(
+                        egui::RichText::new("Fehler beim Beenden")
+                            .color(egui::Color32::from_rgb(255, 100, 100))
+                            .size(16.0)
+                            .strong(),
+                    );
+                });
+                ui.add_space(8.0);
+                ui.label(
+                    egui::RichText::new(
+                        "Ungespeicherte Änderungen konnten nicht gesichert werden:",
+                    )
+                    .size(13.0)
+                    .color(egui::Color32::WHITE),
+                );
+                ui.add_space(6.0);
+                egui::Frame::none()
+                    .fill(egui::Color32::from_black_alpha(100))
+                    .rounding(egui::Rounding::same(6.0))
+                    .inner_margin(egui::Margin::same(8.0))
+                    .show(ui, |ui| {
+                        for msg in &err.messages {
+                            ui.label(
+                                egui::RichText::new(msg)
+                                    .size(11.5)
+                                    .color(egui::Color32::from_rgb(255, 180, 180)),
+                            );
+                        }
+                    });
+                ui.add_space(8.0);
+                ui.label(
+                    egui::RichText::new("Trotzdem beenden?")
+                        .size(13.0)
+                        .color(egui::Color32::WHITE),
+                );
+                ui.add_space(12.0);
+                ui.horizontal_wrapped(|ui| {
+                    if ui.button("Abbrechen").clicked() {
+                        dismiss = true;
+                    }
+                    if ui.button("Wiederholen").clicked() {
+                        actions.push(UiAction::RetryShutdown);
+                    }
+                    if ui.button("Notfall-Export").clicked() {
+                        actions.push(UiAction::ExportRecoveryAndExit);
+                    }
+                    if ui
+                        .button(
+                            egui::RichText::new("Trotzdem beenden")
+                                .color(egui::Color32::from_rgb(255, 100, 100)),
+                        )
+                        .clicked()
+                    {
+                        actions.push(UiAction::ForceExit);
+                    }
+                });
+            });
+        if dismiss {
+            state.shutdown_error = None;
+        }
+    }
+
     actions
 }
 
@@ -2058,12 +2293,16 @@ mod tests {
                 title: "Mathematik I".to_string(),
                 page_count: 3,
                 modified_at: 100,
+                status: crate::storage::NotebookStatus::Normal,
+                error: None,
             },
             NotebookSummary {
                 id: "nb-2".to_string(),
                 title: "Physik II".to_string(),
                 page_count: 5,
                 modified_at: 200,
+                status: crate::storage::NotebookStatus::Normal,
+                error: None,
             },
         ];
         state.current_notebook_id = "nb-1".to_string();

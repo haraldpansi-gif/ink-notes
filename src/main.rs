@@ -159,9 +159,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 1. Notizbuch aus Storage laden oder initialisieren (Session-Wiederherstellung)
     let storage_base_dir = storage::default_storage_dir();
+    let _ = storage::cleanup_trash(
+        &storage_base_dir,
+        std::time::Duration::from_secs(30 * 24 * 3600),
+    );
     let available_notebooks = storage::list_notebooks(&storage_base_dir);
 
-    let (initial_id, initial_title) = if let Some(first) = available_notebooks.first() {
+    // Beschädigte Notizbücher nicht automatisch öffnen
+    let (initial_id, initial_title) = if let Some(first) = available_notebooks
+        .iter()
+        .find(|s| s.status == storage::NotebookStatus::Normal)
+    {
         (first.id.clone(), first.title.clone())
     } else {
         ("default".to_string(), "Standard-Notizbuch".to_string())
@@ -230,6 +238,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ui_state.set_export_message(warning);
     }
     let mut selection_state = SelectionState::new();
+
+    let mut _notebook_lock = match storage::NotebookLock::acquire(&storage_dir) {
+        Ok(lock) => {
+            autosave.set_read_only(false);
+            Some(lock)
+        }
+        Err(storage::StorageError::AlreadyLocked(msg)) => {
+            eprintln!("[Storage-Lock] {msg}");
+            autosave.set_read_only(true);
+            ui_state.set_export_message("⚠️ In anderer Instanz geöffnet (Schreibschutz)");
+            None
+        }
+        Err(e) => {
+            eprintln!("[Storage-Lock] Konnte Lock nicht erwerben: {e}");
+            autosave.set_read_only(true);
+            None
+        }
+    };
 
     // Initiale Seite und Werkzeugeinstellungen mit Canvas synchronisieren
     canvas.sync_page(notebook.current_page_mut());
@@ -410,7 +436,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 );
                                                 if !removed.is_empty() {
                                                     canvas.sync_page(page);
-                                                    autosave.mark_dirty(&notebook, &manifest);
+                                                    autosave.mark_dirty(&notebook, &mut manifest);
                                                     update_window_title(
                                                         &window,
                                                         &notebook,
@@ -487,7 +513,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 );
                                                 if !removed.is_empty() {
                                                     canvas.sync_page(page);
-                                                    autosave.mark_dirty(&notebook, &manifest);
+                                                    autosave.mark_dirty(&notebook, &mut manifest);
                                                     update_window_title(
                                                         &window,
                                                         &notebook,
@@ -638,8 +664,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 match event {
                     WindowEvent::CloseRequested => {
                         println!("[Shutdown] Sichere alle ungespeicherten Daten auf Festplatte...");
-                        autosave.shutdown();
-                        target.exit();
+                        match autosave.shutdown() {
+                            Ok(()) => {
+                                target.exit();
+                            }
+                            Err(err) => {
+                                eprintln!("[Shutdown-Fehler] Konnte nicht geordnet beenden: {err}");
+                                ui_state.shutdown_error = Some(err);
+                                window.request_redraw();
+                            }
+                        }
                     }
 
                     WindowEvent::Focused(false) => {
@@ -708,7 +742,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         match &logical_key {
                             Key::Named(NamedKey::Escape) => {
                                 let mut changed = false;
-                                if ui_state.is_pen_menu_open
+                                if ui_state.shutdown_error.is_some() {
+                                    ui_state.shutdown_error = None;
+                                    changed = true;
+                                } else if ui_state.is_pen_menu_open
                                     || ui_state.is_highlighter_menu_open
                                     || ui_state.show_page_jump_popup
                                     || ui_state.is_document_menu_open
@@ -737,7 +774,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 if notebook.current_page_mut().undo() {
                                     selection_state.clear();
                                     canvas.sync_page(notebook.current_page_mut());
-                                    autosave.mark_dirty(&notebook, &manifest);
+                                    autosave.mark_dirty(&notebook, &mut manifest);
                                     update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
                                     window.request_redraw();
                                 }
@@ -751,7 +788,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 if notebook.current_page_mut().redo() {
                                     selection_state.clear();
                                     canvas.sync_page(notebook.current_page_mut());
-                                    autosave.mark_dirty(&notebook, &manifest);
+                                    autosave.mark_dirty(&notebook, &mut manifest);
                                     update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
                                     window.request_redraw();
                                 }
@@ -781,7 +818,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 if !new_ids.is_empty() {
                                     canvas.sync_page(notebook.current_page_mut());
                                     manifest.next_stroke_id = notebook.next_stroke_id;
-                                    autosave.mark_dirty(&notebook, &manifest);
+                                    autosave.mark_dirty(&notebook, &mut manifest);
                                     ui_state.set_export_message(format!("{} Objekt(e) eingefügt", new_ids.len()));
                                     window.request_redraw();
                                 }
@@ -793,7 +830,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     let removed = selection_state.delete_selected(notebook.current_page_mut());
                                     if !removed.is_empty() {
                                         canvas.sync_page(notebook.current_page_mut());
-                                        autosave.mark_dirty(&notebook, &manifest);
+                                        autosave.mark_dirty(&notebook, &mut manifest);
                                         ui_state.set_export_message(format!("{} Objekt(e) gelöscht", removed.len()));
                                         window.request_redraw();
                                     }
@@ -802,9 +839,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                             // Jetzt speichern (Disk Flush): Strg + S
                             Key::Character(c) if c.eq_ignore_ascii_case("s") && ctrl => {
-                                match autosave.save_now(&notebook, &manifest) {
-                                    Ok(()) => ui_state.set_export_message("Gespeichert"),
-                                    Err(err) => ui_state.set_export_message(format!("Speichern fehlgeschlagen: {err}")),
+                                match autosave.flush() {
+                                    Ok(()) => {
+                                        ui_state.set_export_message("Gespeichert");
+                                    }
+                                    Err(err) => {
+                                        ui_state.set_export_message(format!(
+                                            "Speicherfehler: {}",
+                                            err.messages.join(", ")
+                                        ));
+                                    }
                                 }
                                 update_window_title(
                                     &window,
@@ -855,7 +899,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     let color = [0.12, 0.12, 0.14, 1.0];
                                     if selection_state.recolor_selected(notebook.current_page_mut(), color) {
                                         canvas.sync_page(notebook.current_page_mut());
-                                        autosave.mark_dirty(&notebook, &manifest);
+                                        autosave.mark_dirty(&notebook, &mut manifest);
                                         ui_state.set_export_message("Auswahl auf Schwarz umgefärbt".to_string());
                                         window.request_redraw();
                                     }
@@ -875,7 +919,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     let color = [0.15, 0.35, 0.85, 1.0];
                                     if selection_state.recolor_selected(notebook.current_page_mut(), color) {
                                         canvas.sync_page(notebook.current_page_mut());
-                                        autosave.mark_dirty(&notebook, &manifest);
+                                        autosave.mark_dirty(&notebook, &mut manifest);
                                         ui_state.set_export_message("Auswahl auf Blau umgefärbt".to_string());
                                         window.request_redraw();
                                     }
@@ -894,7 +938,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 if !selection_state.is_empty() {
                                     if selection_state.rotate_selected_90_deg(notebook.current_page_mut()) {
                                         canvas.sync_page(notebook.current_page_mut());
-                                        autosave.mark_dirty(&notebook, &manifest);
+                                        autosave.mark_dirty(&notebook, &mut manifest);
                                         ui_state.set_export_message("Auswahl um 90° gedreht".to_string());
                                         window.request_redraw();
                                     }
@@ -918,7 +962,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     PageBackground::Blank => PageBackground::Grid5mm,
                                 };
                                 canvas.sync_page(page);
-                                autosave.mark_dirty(&notebook, &manifest);
+                                autosave.mark_dirty(&notebook, &mut manifest);
                                 update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
                                 window.request_redraw();
                             }
@@ -932,7 +976,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 canvas.sync_page(notebook.current_page_mut());
                                 manifest.current_page_index = notebook.current_page_index;
                                 manifest.next_page_id = notebook.next_page_id;
-                                autosave.mark_dirty(&notebook, &manifest);
+                                manifest.sync_from_notebook(&notebook);
+                                autosave.mark_manifest_dirty(&manifest);
+                                autosave.mark_dirty(&notebook, &mut manifest);
                                 update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
                                 window.request_redraw();
                             }
@@ -944,7 +990,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 canvas.sync_page(notebook.current_page_mut());
                                 manifest.current_page_index = notebook.current_page_index;
                                 manifest.next_page_id = notebook.next_page_id;
-                                autosave.mark_dirty(&notebook, &manifest);
+                                manifest.sync_from_notebook(&notebook);
+                                autosave.mark_manifest_dirty(&manifest);
+                                autosave.mark_dirty(&notebook, &mut manifest);
                                 update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
                                 window.request_redraw();
                             }
@@ -957,7 +1005,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 let _ = storage::ensure_page_loaded(&storage_dir, &mut notebook, curr);
                                 canvas.sync_page(notebook.current_page_mut());
                                 manifest.current_page_index = notebook.current_page_index;
-                                autosave.mark_dirty(&notebook, &manifest);
+                                manifest.sync_from_notebook(&notebook);
+                                autosave.mark_manifest_dirty(&manifest);
+                                autosave.mark_dirty(&notebook, &mut manifest);
                                 update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
                                 window.request_redraw();
                             }
@@ -970,7 +1020,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 let _ = storage::ensure_page_loaded(&storage_dir, &mut notebook, curr);
                                 canvas.sync_page(notebook.current_page_mut());
                                 manifest.current_page_index = notebook.current_page_index;
-                                autosave.mark_dirty(&notebook, &manifest);
+                                manifest.sync_from_notebook(&notebook);
+                                autosave.mark_manifest_dirty(&manifest);
+                                autosave.mark_dirty(&notebook, &mut manifest);
                                 update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
                                 window.request_redraw();
                             }
@@ -983,7 +1035,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 let _ = storage::ensure_page_loaded(&storage_dir, &mut notebook, curr);
                                 canvas.sync_page(notebook.current_page_mut());
                                 manifest.current_page_index = notebook.current_page_index;
-                                autosave.mark_dirty(&notebook, &manifest);
+                                manifest.sync_from_notebook(&notebook);
+                                autosave.mark_manifest_dirty(&manifest);
+                                autosave.mark_dirty(&notebook, &mut manifest);
                                 update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
                                 window.request_redraw();
                             }
@@ -1023,8 +1077,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             // Beenden: Strg + Q
                             Key::Character(c) if c.eq_ignore_ascii_case("q") && ctrl => {
                                 println!("[Shutdown] Sichere alle ungespeicherten Daten auf Festplatte...");
-                                autosave.shutdown();
-                                target.exit();
+                                match autosave.shutdown() {
+                                    Ok(()) => {
+                                        target.exit();
+                                    }
+                                    Err(err) => {
+                                        eprintln!("[Shutdown-Fehler] Konnte nicht geordnet beenden: {err}");
+                                        ui_state.shutdown_error = Some(err);
+                                        window.request_redraw();
+                                    }
+                                }
                             }
 
 
@@ -1064,7 +1126,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         let removed = page.erase_at(page_pt, eraser_radius, stroke_max_radius);
                                         if !removed.is_empty() {
                                             canvas.sync_page(page);
-                                            autosave.mark_dirty(&notebook, &manifest);
+                                            autosave.mark_dirty(&notebook, &mut manifest);
                                             update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
                                             window.request_redraw();
                                         }
@@ -1162,7 +1224,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                     let new_stroke = geometry::shape_to_stroke(shape, old_id, stroke_color, stroke_width);
                                                     notebook.current_page_mut().replace_stroke(old_id, new_stroke);
                                                     canvas.sync_page(notebook.current_page_mut());
-                                                    autosave.mark_dirty(&notebook, &manifest);
+                                                    autosave.mark_dirty(&notebook, &mut manifest);
                                                     ui_state.set_export_message(format!("{shape_name} ausgerichtet! (Undo mit Strg+Z)"));
                                                     window.request_redraw();
                                                     return;
@@ -1219,7 +1281,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             let final_strokes = notebook.current_page().get_strokes(&selection_state.selected_ids);
                                             if !initial_strokes.is_empty() && !final_strokes.is_empty() && initial_strokes != final_strokes {
                                                 notebook.current_page_mut().commit_modified_strokes(initial_strokes, final_strokes);
-                                                autosave.mark_dirty(&notebook, &manifest);
+                                                autosave.mark_dirty(&notebook, &mut manifest);
                                             }
                                             window.request_redraw();
                                         }
@@ -1332,7 +1394,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     let removed = page.erase_at(page_pt, eraser_radius, stroke_max_radius);
                                     if !removed.is_empty() {
                                         canvas.sync_page(page);
-                                        autosave.mark_dirty(&notebook, &manifest);
+                                        autosave.mark_dirty(&notebook, &mut manifest);
                                         update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
                                         window.request_redraw();
                                     }
@@ -1456,7 +1518,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 let removed = page.erase_at(page_pt, eraser_radius, stroke_max_radius);
                                                 if !removed.is_empty() {
                                                     canvas.sync_page(page);
-                                                    autosave.mark_dirty(&notebook, &manifest);
+                                                    autosave.mark_dirty(&notebook, &mut manifest);
                                                     update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
                                                     window.request_redraw();
                                                 }
@@ -1597,7 +1659,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             let removed = page.erase_at(page_pt, eraser_radius, stroke_max_radius);
                                             if !removed.is_empty() {
                                                 canvas.sync_page(page);
-                                                autosave.mark_dirty(&notebook, &manifest);
+                                                autosave.mark_dirty(&notebook, &mut manifest);
                                                 update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
                                                 window.request_redraw();
                                             }
@@ -1688,7 +1750,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 let final_strokes = notebook.current_page().get_strokes(&selection_state.selected_ids);
                                                 if !initial_strokes.is_empty() && !final_strokes.is_empty() && initial_strokes != final_strokes {
                                                     notebook.current_page_mut().commit_modified_strokes(initial_strokes, final_strokes);
-                                                    autosave.mark_dirty(&notebook, &manifest);
+                                                    autosave.mark_dirty(&notebook, &mut manifest);
                                                 }
                                                 window.request_redraw();
                                             }
@@ -1772,7 +1834,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     if !selection_state.is_empty()
                                         && selection_state.recolor_selected(notebook.current_page_mut(), color) {
                                             canvas.sync_page(notebook.current_page_mut());
-                                            autosave.mark_dirty(&notebook, &manifest);
+                                            autosave.mark_dirty(&notebook, &mut manifest);
                                             ui_state.set_export_message("Auswahl umgefärbt".to_string());
                                         }
                                     match ui_state.active_tool {
@@ -1807,7 +1869,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         let removed = selection_state.delete_selected(notebook.current_page_mut());
                                         if !removed.is_empty() {
                                             canvas.sync_page(notebook.current_page_mut());
-                                            autosave.mark_dirty(&notebook, &manifest);
+                                            autosave.mark_dirty(&notebook, &mut manifest);
                                             ui_state.set_export_message(format!("{} Objekt(e) gelöscht", removed.len()));
                                             window.request_redraw();
                                         }
@@ -1834,7 +1896,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     if !new_ids.is_empty() {
                                         canvas.sync_page(notebook.current_page_mut());
                                         manifest.next_stroke_id = notebook.next_stroke_id;
-                                        autosave.mark_dirty(&notebook, &manifest);
+                                        autosave.mark_dirty(&notebook, &mut manifest);
                                         ui_state.set_export_message(format!("{} Objekt(e) eingefügt", new_ids.len()));
                                         window.request_redraw();
                                     }
@@ -1843,7 +1905,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     if !selection_state.is_empty()
                                         && selection_state.rotate_selected_90_deg(notebook.current_page_mut()) {
                                             canvas.sync_page(notebook.current_page_mut());
-                                            autosave.mark_dirty(&notebook, &manifest);
+                                            autosave.mark_dirty(&notebook, &mut manifest);
                                             ui_state.set_export_message("Auswahl um 90° gedreht".to_string());
                                             window.request_redraw();
                                         }
@@ -1871,7 +1933,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     if notebook.current_page_mut().undo() {
                                         selection_state.clear();
                                         canvas.sync_page(notebook.current_page_mut());
-                                        autosave.mark_dirty(&notebook, &manifest);
+                                        autosave.mark_dirty(&notebook, &mut manifest);
                                         update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
                                         window.request_redraw();
                                     }
@@ -1880,7 +1942,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     if notebook.current_page_mut().redo() {
                                         selection_state.clear();
                                         canvas.sync_page(notebook.current_page_mut());
-                                        autosave.mark_dirty(&notebook, &manifest);
+                                        autosave.mark_dirty(&notebook, &mut manifest);
                                         update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
                                         window.request_redraw();
                                     }
@@ -1892,7 +1954,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     let _ = storage::ensure_page_loaded(&storage_dir, &mut notebook, curr);
                                     canvas.sync_page(notebook.current_page_mut());
                                     manifest.current_page_index = notebook.current_page_index;
-                                    autosave.mark_dirty(&notebook, &manifest);
+                                    manifest.sync_from_notebook(&notebook);
+                                    autosave.mark_manifest_dirty(&manifest);
+                                    autosave.mark_dirty(&notebook, &mut manifest);
                                     update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
                                     window.request_redraw();
                                 }
@@ -1904,7 +1968,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     canvas.sync_page(notebook.current_page_mut());
                                     manifest.current_page_index = notebook.current_page_index;
                                     manifest.next_page_id = notebook.next_page_id;
-                                    autosave.mark_dirty(&notebook, &manifest);
+                                    manifest.pages = notebook
+                                        .pages
+                                        .iter()
+                                        .map(|p| storage::PageMeta {
+                                            id: p.id,
+                                            background: Some(p.background),
+                                        })
+                                        .collect();
+                                    manifest.sync_from_notebook(&notebook);
+                                    autosave.mark_manifest_dirty(&manifest);
+                                    autosave.mark_dirty(&notebook, &mut manifest);
                                     update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
                                     window.request_redraw();
                                 }
@@ -1914,8 +1988,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     notebook.add_page(bg);
                                     manifest.current_page_index = notebook.current_page_index;
                                     manifest.next_page_id = notebook.next_page_id;
+                                    manifest.pages = notebook
+                                        .pages
+                                        .iter()
+                                        .map(|p| storage::PageMeta {
+                                            id: p.id,
+                                            background: Some(p.background),
+                                        })
+                                        .collect();
                                     canvas.sync_page(notebook.current_page_mut());
-                                    autosave.mark_dirty(&notebook, &manifest);
+                                    manifest.sync_from_notebook(&notebook);
+                                    autosave.mark_manifest_dirty(&manifest);
+                                    autosave.mark_dirty(&notebook, &mut manifest);
                                     update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
                                     window.request_redraw();
                                 }
@@ -1926,7 +2010,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         let _ = storage::ensure_page_loaded(&storage_dir, &mut notebook, idx);
                                         canvas.sync_page(notebook.current_page_mut());
                                         manifest.current_page_index = idx;
-                                        autosave.mark_dirty(&notebook, &manifest);
+                                        manifest.sync_from_notebook(&notebook);
+                                        autosave.mark_manifest_dirty(&manifest);
+                                        autosave.mark_dirty(&notebook, &mut manifest);
                                         update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
                                         window.request_redraw();
                                     }
@@ -1935,7 +2021,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     let page = notebook.current_page_mut();
                                     page.background = bg;
                                     canvas.sync_page(page);
-                                    autosave.mark_dirty(&notebook, &manifest);
+                                    autosave.mark_dirty(&notebook, &mut manifest);
                                     update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
                                     window.request_redraw();
                                 }
@@ -1957,9 +2043,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         let new_notebook_dir = storage_base_dir.join(&id);
                                         match storage::load_notebook(&new_notebook_dir) {
                                             Ok((loaded_nb, loaded_manifest)) => {
-                                                if let Err(err) = autosave.switch_notebook_dir(new_notebook_dir.clone()) {
-    eprintln!("[Autosave-Fehler] Vorheriges Notizbuch nicht vollständig gespeichert: {err}");
-}
+                                                let _ = autosave.flush();
+                                                match storage::NotebookLock::acquire(&new_notebook_dir) {
+                                                    Ok(lock) => {
+                                                        _notebook_lock = Some(lock);
+                                                        autosave.set_read_only(false);
+                                                    }
+                                                    Err(storage::StorageError::AlreadyLocked(msg)) => {
+                                                        eprintln!("[Storage-Lock] {msg}");
+                                                        _notebook_lock = None;
+                                                        autosave.set_read_only(true);
+                                                        ui_state.set_export_message("⚠️ In anderer Instanz geöffnet (Schreibschutz)");
+                                                    }
+                                                    Err(e) => {
+                                                        eprintln!("[Storage-Lock] Konnte Lock nicht erwerben: {e}");
+                                                        _notebook_lock = None;
+                                                        autosave.set_read_only(true);
+                                                    }
+                                                }
+                                                autosave.switch_notebook_dir(new_notebook_dir.clone());
                                                 notebook = loaded_nb;
                                                 manifest = loaded_manifest;
                                                 storage_dir = new_notebook_dir;
@@ -1970,7 +2072,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 ui_state.is_document_menu_open = false;
                                                 canvas.sync_page(notebook.current_page_mut());
                                                 update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
-                                                ui_state.set_export_message(format!("Dokument '{}' geöffnet", manifest.title));
+                                                if _notebook_lock.is_some() {
+                                                    ui_state.set_export_message(format!("Dokument '{}' geöffnet", manifest.title));
+                                                }
                                                 window.request_redraw();
                                             }
                                             Err(err) => {
@@ -1981,11 +2085,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     }
                                 }
                                 UiAction::CreateNotebook(title) => {
+                                    let _ = autosave.flush();
                                     match storage::create_new_notebook(&storage_base_dir, &title) {
                                         Ok((new_nb, new_manifest, new_dir)) => {
-                                            if let Err(err) = autosave.switch_notebook_dir(new_dir.clone()) {
-    eprintln!("[Autosave-Fehler] Vorheriges Notizbuch nicht vollständig gespeichert: {err}");
-}
+                                            _notebook_lock = storage::NotebookLock::acquire(&new_dir).ok();
+                                            autosave.set_read_only(_notebook_lock.is_none());
+                                            autosave.switch_notebook_dir(new_dir.clone());
                                             notebook = new_nb;
                                             manifest = new_manifest;
                                             storage_dir = new_dir;
@@ -2012,6 +2117,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             Ok(()) => {
                                                 ui_state.document_title = manifest.title.clone();
                                                 ui_state.available_notebooks = storage::list_notebooks(&storage_base_dir);
+                                                manifest.sync_from_notebook(&notebook);
+                                                autosave.mark_manifest_dirty(&manifest);
                                                 update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
                                                 ui_state.set_export_message(format!("Umbenannt in '{}'", new_title));
                                                 window.request_redraw();
@@ -2036,54 +2143,66 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 UiAction::DeleteNotebook(id) => {
                                     let target_dir = storage_base_dir.join(&id);
                                     let is_current = id == manifest.id;
+                                    let deleted_title = ui_state
+                                        .available_notebooks
+                                        .iter()
+                                        .find(|s| s.id == id)
+                                        .map(|s| s.title.clone())
+                                        .unwrap_or_else(|| id.clone());
+
                                     if is_current {
-                                        // Ausstehende Autosave-Schreibvorgänge VOR dem Löschen abarbeiten,
-                                        // sonst legen sie den gelöschten Ordner danach wieder an.
                                         let _ = autosave.flush();
+                                        drop(_notebook_lock.take());
                                     }
-                                    match storage::delete_notebook(&target_dir) {
-                                        Ok(()) => {
+
+                                    match storage::delete_notebook(&target_dir, &storage_base_dir) {
+                                        Ok(trash_path) => {
+                                            ui_state.last_deleted_notebook = Some((trash_path, deleted_title));
                                             ui_state.available_notebooks = storage::list_notebooks(&storage_base_dir);
                                             if is_current {
-                                                // Erstes ladbares Notizbuch öffnen, sonst ein neues anlegen
-                                                let replacement = ui_state
+                                                if let Some(first) = ui_state
                                                     .available_notebooks
                                                     .iter()
-                                                    .find_map(|summary| {
-                                                        let dir = storage_base_dir.join(&summary.id);
-                                                        match storage::load_notebook(&dir) {
-                                                            Ok((nb, m)) => Some((nb, m, dir)),
-                                                            Err(err) => {
-                                                                eprintln!("[Dokument-Fehler] Konnte Dokument '{}' nicht laden: {err}", summary.id);
-                                                                None
-                                                            }
+                                                    .find(|s| s.status != storage::NotebookStatus::Damaged)
+                                                    .cloned()
+                                                {
+                                                    let new_notebook_dir = storage_base_dir.join(&first.id);
+                                                    match storage::load_notebook(&new_notebook_dir) {
+                                                        Ok((loaded_nb, loaded_manifest)) => {
+                                                            _notebook_lock = storage::NotebookLock::acquire(&new_notebook_dir).ok();
+                                                            autosave.set_read_only(_notebook_lock.is_none());
+                                                            autosave.switch_notebook_dir(new_notebook_dir.clone());
+                                                            notebook = loaded_nb;
+                                                            manifest = loaded_manifest;
+                                                            storage_dir = new_notebook_dir;
+                                                            selection_state.clear();
+                                                            ui_state.current_notebook_id = manifest.id.clone();
+                                                            ui_state.document_title = manifest.title.clone();
+                                                            canvas.sync_page(notebook.current_page_mut());
+                                                            update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
+                                                            ui_state.set_export_message(format!("Gewechselt zu '{}'", manifest.title));
                                                         }
-                                                    })
-                                                    .map(Ok)
-                                                    .unwrap_or_else(|| storage::create_new_notebook(&storage_base_dir, "Standard-Notizbuch"));
-                                                match replacement {
-                                                    Ok((new_nb, new_manifest, new_dir)) => {
-                                                        if let Err(err) = autosave.switch_notebook_dir(new_dir.clone()) {
-                                                            eprintln!("[Autosave-Fehler] Vorheriges Notizbuch nicht vollständig gespeichert: {err}");
+                                                        Err(err) => {
+                                                            eprintln!("[Dokument-Fehler] Konnte Dokument '{}' nicht laden: {err}", first.id);
                                                         }
-                                                        notebook = new_nb;
-                                                        manifest = new_manifest;
-                                                        storage_dir = new_dir;
-                                                        selection_state.clear();
-                                                        ui_state.current_notebook_id = manifest.id.clone();
-                                                        ui_state.document_title = manifest.title.clone();
-                                                        ui_state.available_notebooks = storage::list_notebooks(&storage_base_dir);
-                                                        canvas.sync_page(notebook.current_page_mut());
-                                                        update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
-                                                        ui_state.set_export_message(format!("Gewechselt zu '{}'", manifest.title));
                                                     }
-                                                    Err(err) => {
-                                                        eprintln!("[Dokument-Fehler] Konnte kein Ersatz-Notizbuch anlegen: {err}");
-                                                        ui_state.set_export_message(format!("Dokument gelöscht, aber kein Ersatz-Notizbuch: {err}"));
-                                                    }
+                                                } else if let Ok((new_nb, new_manifest, new_dir)) = storage::create_new_notebook(&storage_base_dir, "Standard-Notizbuch") {
+                                                    _notebook_lock = storage::NotebookLock::acquire(&new_dir).ok();
+                                                    autosave.set_read_only(_notebook_lock.is_none());
+                                                    autosave.switch_notebook_dir(new_dir.clone());
+                                                    notebook = new_nb;
+                                                    manifest = new_manifest;
+                                                    storage_dir = new_dir;
+                                                    selection_state.clear();
+                                                    ui_state.current_notebook_id = manifest.id.clone();
+                                                    ui_state.document_title = manifest.title.clone();
+                                                    ui_state.available_notebooks = storage::list_notebooks(&storage_base_dir);
+                                                    canvas.sync_page(notebook.current_page_mut());
+                                                    update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
+                                                    ui_state.set_export_message("Standard-Notizbuch erstellt".to_string());
                                                 }
                                             } else {
-                                                ui_state.set_export_message("Dokument gelöscht".to_string());
+                                                ui_state.set_export_message("Dokument in Papierkorb verschoben".to_string());
                                             }
                                             window.request_redraw();
                                         }
@@ -2092,6 +2211,40 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             ui_state.set_export_message(format!("Fehler beim Löschen: {err}"));
                                         }
                                     }
+                                }
+                                UiAction::UndoDeleteNotebook => {
+                                    if let Some((trash_path, _title)) = ui_state.last_deleted_notebook.take() {
+                                        match storage::restore_notebook_from_trash(&storage_base_dir, &trash_path) {
+                                            Ok(_restored_dir) => {
+                                                ui_state.available_notebooks = storage::list_notebooks(&storage_base_dir);
+                                                ui_state.set_export_message("Notizbuch wiederhergestellt".to_string());
+                                                window.request_redraw();
+                                            }
+                                            Err(err) => {
+                                                eprintln!("[Dokument-Fehler] Konnte Notizbuch nicht wiederherstellen: {err}");
+                                                ui_state.set_export_message(format!("Fehler beim Wiederherstellen: {err}"));
+                                            }
+                                        }
+                                    }
+                                }
+                                UiAction::RestoreNotebookBackup(id) => {
+                                    let target_dir = storage_base_dir.join(&id);
+                                    match storage::restore_manifest_from_backup(&target_dir) {
+                                        Ok(()) => {
+                                            ui_state.available_notebooks = storage::list_notebooks(&storage_base_dir);
+                                            ui_state.set_export_message("Manifest aus Backup wiederhergestellt".to_string());
+                                            window.request_redraw();
+                                        }
+                                        Err(err) => {
+                                            eprintln!("[Dokument-Fehler] Konnte Backup für '{id}' nicht wiederherstellen: {err}");
+                                            ui_state.set_export_message(format!("Wiederherstellung fehlgeschlagen: {err}"));
+                                        }
+                                    }
+                                }
+                                UiAction::OpenNotebookFolder(id) => {
+                                    let target_dir = storage_base_dir.join(&id);
+                                    ui_state.set_export_message(format!("Ordner: {}", target_dir.display()));
+                                    window.request_redraw();
                                 }
                                 UiAction::CheckForUpdates => {
                                     updater.check_for_updates();
@@ -2117,6 +2270,51 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     updater.set_auth_token(auth_token);
                                     ui_state.set_export_message("Server-Einstellungen gespeichert");
                                     window.request_redraw();
+                                }
+                                UiAction::UnlockCorruptedPage(page_id) => {
+                                    notebook.load_warnings.remove(&page_id);
+                                    if let Some(page) = notebook.pages.iter_mut().find(|p| p.id == page_id) {
+                                        page.unlock_after_load_error();
+                                    }
+                                    autosave.mark_dirty(&notebook, &mut manifest);
+                                    window.request_redraw();
+                                }
+                                UiAction::RetryShutdown => {
+                                    println!("[Shutdown] Wiederhole Speichern vor Beenden...");
+                                    match autosave.shutdown() {
+                                        Ok(()) => {
+                                            ui_state.shutdown_error = None;
+                                            target.exit();
+                                        }
+                                        Err(err) => {
+                                            ui_state.shutdown_error = Some(err);
+                                            window.request_redraw();
+                                        }
+                                    }
+                                }
+                                UiAction::ExportRecoveryAndExit => {
+                                    println!("[Shutdown] Starte Notfall-Export aller ungespeicherten Daten...");
+                                    match autosave.export_recovery(Some(&notebook)) {
+                                        Ok(paths) => {
+                                            eprintln!(
+                                                "[Recovery] Notfall-Export erfolgreich geschrieben ({} Dateien): {:?}",
+                                                paths.len(),
+                                                paths
+                                            );
+                                            target.exit();
+                                        }
+                                        Err(err) => {
+                                            eprintln!("[Recovery-Fehler] Konnte Notfall-Export nicht schreiben: {err}");
+                                            if let Some(ref mut se) = ui_state.shutdown_error {
+                                                se.messages.push(format!("Notfall-Export fehlgeschlagen: {err}"));
+                                            }
+                                            window.request_redraw();
+                                        }
+                                    }
+                                }
+                                UiAction::ForceExit => {
+                                    println!("[Shutdown] Beenden erzwungen trotz ungespeicherter Änderungen.");
+                                    target.exit();
                                 }
                             }
                         }

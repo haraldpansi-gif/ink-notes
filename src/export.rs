@@ -140,11 +140,9 @@ pub fn generate_pdf_document(
         return Err("Notizbuch enthält keine Seiten".into());
     }
     // Nicht geladene Seiten würden sonst stillschweigend als leere Seiten exportiert
-    if let Some(page) = notebook
-        .pages
-        .iter()
-        .find(|p| !p.is_loaded || p.load_failed)
-    {
+    if let Some(page) = notebook.pages.iter().find(|p| {
+        !p.is_loaded || p.persist == crate::document::PersistState::ReadOnlyAfterLoadError
+    }) {
         return Err(format!(
             "Seite {} ist nicht geladen – Export abgebrochen (vorher storage::load_all_pages aufrufen)",
             page.id

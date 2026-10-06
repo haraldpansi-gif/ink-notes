@@ -103,6 +103,16 @@ pub fn point_to_segment_distance(p: glam::Vec2, a: glam::Vec2, b: glam::Vec2) ->
     (p - projection).length()
 }
 
+/// Das Werkzeug, mit dem ein Strich gezeichnet wurde.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum StrokeTool {
+    #[default]
+    Pen,
+    Highlighter,
+    Shape,
+}
+
 /// Ein einzelner Vektor-Strich auf einer Seite.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Stroke {
@@ -112,6 +122,9 @@ pub struct Stroke {
     pub aabb: Aabb,
     pub color: [f32; 4],
     pub shape: Option<crate::geometry::RecognizedShape>,
+    pub tool: StrokeTool,
+    pub width: f32,
+    pub finalized: bool,
 }
 
 impl Stroke {
@@ -141,6 +154,9 @@ impl Stroke {
             aabb,
             color,
             shape: None,
+            tool: StrokeTool::Pen,
+            width: 5.0,
+            finalized: true,
         }
     }
 
@@ -157,6 +173,22 @@ impl Stroke {
     /// Verknüpft diesen Strich mit einer mathematisch erkannten Form.
     pub fn with_shape(mut self, shape: crate::geometry::RecognizedShape) -> Self {
         self.shape = Some(shape);
+        self.tool = StrokeTool::Shape;
+        self
+    }
+
+    pub fn with_tool(mut self, tool: StrokeTool) -> Self {
+        self.tool = tool;
+        self
+    }
+
+    pub fn with_width(mut self, width: f32) -> Self {
+        self.width = width;
+        self
+    }
+
+    pub fn with_finalized(mut self, finalized: bool) -> Self {
+        self.finalized = finalized;
         self
     }
 
@@ -304,6 +336,22 @@ pub enum PageBackground {
     DotGrid,
 }
 
+/// Persistenzstatus einer Seite zum Schutz vor unbeabsichtigtem Überschreiben bei Ladefehlern.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PersistState {
+    #[default]
+    Normal,
+    ReadOnlyAfterLoadError,
+}
+
+/// Warnung beim Laden einer Seite (beschädigte Datei oder I/O-Fehler).
+#[derive(Debug, Clone, PartialEq)]
+pub struct PageLoadWarning {
+    pub page_id: u64,
+    pub message: String,
+    pub quarantine_path: Option<std::path::PathBuf>,
+}
+
 /// Eine einzelne Notizbuchseite mit Strichen, Hintergrund und gecachten Meshes.
 #[derive(Debug, Clone)]
 pub struct Page {
@@ -314,9 +362,7 @@ pub struct Page {
     pub stroke_ranges: Vec<Range<u32>>,
     pub is_dirty: bool,
     pub is_loaded: bool,
-    /// Laden von der Festplatte ist fehlgeschlagen; die Seite ist ein leerer Ersatz und
-    /// darf niemals gespeichert werden, damit die Originaldatei nicht überschrieben wird.
-    pub load_failed: bool,
+    pub persist: PersistState,
     pub history: HistoryStack,
 }
 
@@ -330,7 +376,7 @@ impl Page {
             stroke_ranges: Vec::new(),
             is_dirty: false,
             is_loaded: true,
-            load_failed: false,
+            persist: PersistState::Normal,
             history: HistoryStack::new(),
         }
     }
@@ -345,9 +391,17 @@ impl Page {
             stroke_ranges: Vec::new(),
             is_dirty: false,
             is_loaded: false,
-            load_failed: false,
+            persist: PersistState::Normal,
             history: HistoryStack::new(),
         }
+    }
+
+    pub fn is_readonly(&self) -> bool {
+        self.persist == PersistState::ReadOnlyAfterLoadError
+    }
+
+    pub fn unlock_after_load_error(&mut self) {
+        self.persist = PersistState::Normal;
     }
 
     /// Fügt einen neuen Strich hinzu und registriert ihn im History-Stack.
@@ -592,6 +646,7 @@ pub struct Notebook {
     pub current_page_index: usize,
     pub next_stroke_id: u64,
     pub next_page_id: u64,
+    pub load_warnings: std::collections::HashMap<u64, PageLoadWarning>,
 }
 
 impl Notebook {
@@ -601,6 +656,7 @@ impl Notebook {
             current_page_index: 0,
             next_stroke_id: 1,
             next_page_id: 1,
+            load_warnings: std::collections::HashMap::new(),
         };
         // Erste Standardseite anlegen (5mm Grid)
         nb.add_page(PageBackground::Grid5mm);
@@ -619,6 +675,7 @@ impl Notebook {
             current_page_index,
             next_stroke_id,
             next_page_id,
+            load_warnings: std::collections::HashMap::new(),
         };
         if nb.pages.is_empty() {
             nb.add_page(PageBackground::Grid5mm);

@@ -105,6 +105,18 @@ impl Default for SplineConfig {
     }
 }
 
+impl SplineConfig {
+    /// Erzeugt eine Spline-Konfiguration aus der Strichbreite in internen Einheiten (10 Einheiten = 1 mm).
+    pub fn from_width_units(width_units: f32) -> Self {
+        let base_radius = (width_units / 2.0).max(0.25);
+        Self {
+            min_radius: (base_radius * 0.5).max(0.15),
+            max_radius: (base_radius * 1.5).max(0.35),
+            samples_per_segment: 16,
+        }
+    }
+}
+
 /// Berechnet den druckabhängigen Radius r(p) = min_r + p * (max_r - min_r).
 pub fn calculate_radius(pressure: f32, min_radius: f32, max_radius: f32) -> f32 {
     let p = pressure.clamp(0.0, 1.0);
@@ -653,7 +665,10 @@ pub fn finalize_stroke_with_config(
         .map(|v| InkVertex::new(v.position[0], v.position[1], color))
         .collect();
 
-    Stroke::new(stroke_id, decimated, ink_vertices, color)
+    let mut stroke = Stroke::new(stroke_id, decimated, ink_vertices, color);
+    stroke.width = config.min_radius + config.max_radius;
+    stroke.finalized = true;
+    stroke
 }
 
 #[cfg(test)]

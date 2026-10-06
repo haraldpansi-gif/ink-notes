@@ -1,0 +1,11 @@
+{
+  "format_version": 1,
+  "id": 1,
+  "background": "Lined",
+  "strokes": [],
+  "unknown_experimental_feature": {
+    "nested_data": [1, 2, 3],
+    "author": "Antigravity"
+  },
+  "random_future_flag": true
+}
