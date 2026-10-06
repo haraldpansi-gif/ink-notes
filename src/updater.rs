@@ -317,7 +317,8 @@ pub fn verify_checksum(
 /// signiert sein muss. Ist er leer, lehnt diese Version alle In-App-Updates ab.
 /// Erzeugen: `minisign -G -W -p ink-notes.pub -s ink-notes.key`, dann die zweite Zeile
 /// aus `ink-notes.pub` hier eintragen (siehe README, Abschnitt Release-Signatur).
-pub const UPDATE_SIGNING_PUBLIC_KEY: &str = "RWTZqQ0ZDCn+PHTpqgI8NwjtgtkJk5QyJ0FYHWZlCZtABsXBcdPDv9WI";
+pub const UPDATE_SIGNING_PUBLIC_KEY: &str =
+    "RWTZqQ0ZDCn+PHTpqgI8NwjtgtkJk5QyJ0FYHWZlCZtABsXBcdPDv9WI";
 
 /// Name des Prüfsummen-Assets eines Releases.
 pub const CHECKSUMS_ASSET_NAME: &str = "SHA256SUMS.txt";

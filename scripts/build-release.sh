@@ -33,7 +33,8 @@ sha256sum "${DEB_NAME}" "${APPIMAGE_NAME}" > "${CHECKSUM_FILE}"
 # 4. Prüfsummen mit Minisign signieren (Pflicht für In-App-Updates)
 SIGNATURE_FILE="${CHECKSUM_FILE}.minisig"
 rm -f "${SIGNATURE_FILE}"
-EMBEDDED_PUBKEY=$(grep -m1 'pub const UPDATE_SIGNING_PUBLIC_KEY' "${ROOT_DIR}/src/updater.rs" | cut -d '"' -f2)
+# Schlüssel kann von rustfmt in die Folgezeile umgebrochen sein
+EMBEDDED_PUBKEY=$(grep -m1 -A1 'pub const UPDATE_SIGNING_PUBLIC_KEY' "${ROOT_DIR}/src/updater.rs" | grep -o '"[^"]*"' | head -n1 | tr -d '"')
 if [ -n "${MINISIGN_SECRET_KEY:-}" ]; then
     if [ -z "${EMBEDDED_PUBKEY}" ]; then
         echo "FEHLER: UPDATE_SIGNING_PUBLIC_KEY in src/updater.rs ist leer – diese Version könnte keine Updates prüfen."

@@ -1522,12 +1522,6 @@ mod tests {
     #[cfg(unix)]
     fn test_io_error_does_not_quarantine_and_does_not_overwrite() {
         use crate::document::PersistState;
-        use std::os::unix::fs::PermissionsExt;
-
-        // Skip test if running as root
-        if std::env::var("USER").unwrap_or_default() == "root" {
-            return;
-        }
 
         let temp_dir = tempfile::tempdir().expect("tempdir");
         let path = temp_dir.path();
@@ -1535,18 +1529,16 @@ mod tests {
         let manifest = NotebookManifest::new("nb_io", "Test IO");
         save_manifest(path, &manifest).unwrap();
 
+        // I/O-Fehler simulieren, der auch als root auftritt (CI-Runner laufen oft als root,
+        // dort greift ein chmod 000 nicht): page_1.json ist ein Verzeichnis -> EISDIR beim Lesen
         let original_content = br#"{"id": 1, "background": "Grid5mm", "strokes": []}"#;
-        let page_file = path.join("page_1.json");
-        fs::write(&page_file, original_content).unwrap();
-
-        // Make file unreadable
-        fs::set_permissions(&page_file, fs::Permissions::from_mode(0o000)).unwrap();
+        let page_path = path.join("page_1.json");
+        fs::create_dir(&page_path).unwrap();
+        let marker = page_path.join("original");
+        fs::write(&marker, original_content).unwrap();
 
         let (nb, mut m) =
             load_notebook(path).expect("load_notebook should succeed with fallback page");
-
-        // Restore permissions for inspection
-        fs::set_permissions(&page_file, fs::Permissions::from_mode(0o600)).unwrap();
 
         let dir_entries: Vec<String> = fs::read_dir(path)
             .unwrap()
@@ -1566,10 +1558,15 @@ mod tests {
         );
 
         save_notebook(path, &nb, &mut m).unwrap();
+
+        assert!(
+            page_path.is_dir(),
+            "Original page path must not be replaced"
+        );
         assert_eq!(
-            fs::read(&page_file).unwrap(),
+            fs::read(&marker).unwrap(),
             original_content,
-            "Original file content must not be overwritten"
+            "Original content must not be overwritten"
         );
     }
 
