@@ -9,6 +9,15 @@
 //!
 //! Generiert daraus Triangle-Strips für das GPU-Rendering mit `wgpu`.
 
+use crate::canvas::InkVertex;
+use crate::document::{point_to_segment_distance, Stroke, StylusSample};
+
+/// Standardtoleranz für Ramer-Douglas-Peucker (ca. 0.075 mm in DIN-A4-Einheiten).
+pub const RDP_TOLERANCE_UNITS: f32 = 0.75;
+
+/// Schwellenwert für Ecken-Erkennung (Richtungsänderung > 65 Grad).
+pub const CORNER_ANGLE_THRESHOLD_DEG: f32 = 65.0;
+
 /// GPU-Vertex für Triangle-Strips (Memory-Layout kompatibel mit GPU-Buffern).
 #[repr(C)]
 #[derive(Copy, Clone, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
@@ -321,6 +330,330 @@ pub fn generate_triangle_strip(
     }
 }
 
+/// Glättet den Druckwertverlauf p über ein einfaches gewichtetes 3-Punkt-Fenster [0.25, 0.5, 0.25].
+pub fn smooth_pressure(samples: &[StylusSample]) -> Vec<StylusSample> {
+    if samples.len() < 3 {
+        return samples.to_vec();
+    }
+    let mut smoothed = samples.to_vec();
+    for i in 1..samples.len() - 1 {
+        let p = 0.25 * samples[i - 1].pressure
+            + 0.50 * samples[i].pressure
+            + 0.25 * samples[i + 1].pressure;
+        smoothed[i].pressure = p.clamp(0.0, 1.0);
+    }
+    smoothed
+}
+
+/// Rekursives RDP-Markieren zur Ausdünnung kollinearer Zwischenpunkte.
+fn rdp_mark(positions: &[glam::Vec2], start: usize, end: usize, epsilon: f32, keep: &mut [bool]) {
+    if end <= start + 1 {
+        return;
+    }
+    let a = positions[start];
+    let b = positions[end];
+    let mut max_dist = 0.0_f32;
+    let mut max_idx = start;
+
+    for i in (start + 1)..end {
+        let dist = point_to_segment_distance(positions[i], a, b);
+        if dist > max_dist {
+            max_dist = dist;
+            max_idx = i;
+        }
+    }
+
+    if max_dist > epsilon {
+        keep[max_idx] = true;
+        rdp_mark(positions, start, max_idx, epsilon, keep);
+        rdp_mark(positions, max_idx, end, epsilon, keep);
+    }
+}
+
+/// Dezimiert kollineare Zwischenpunkte mit Ramer-Douglas-Peucker (Toleranz ca. 0.05 bis 0.1 mm).
+pub fn rdp_filter_samples(samples: &[StylusSample], epsilon: f32) -> Vec<StylusSample> {
+    if samples.len() <= 2 {
+        return samples.to_vec();
+    }
+    let positions: Vec<glam::Vec2> = samples.iter().map(|s| s.position).collect();
+    let mut keep = vec![false; samples.len()];
+    keep[0] = true;
+    keep[samples.len() - 1] = true;
+
+    rdp_mark(&positions, 0, samples.len() - 1, epsilon, &mut keep);
+
+    samples
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| keep[*i])
+        .map(|(_, s)| *s)
+        .collect()
+}
+
+/// Berechnet die Richtungsänderung zwischen benachbarten Segmenten und findet Ecken mit Winkel > `threshold_deg`.
+pub fn detect_corners(samples: &[StylusSample], threshold_deg: f32) -> Vec<usize> {
+    if samples.len() < 3 {
+        return Vec::new();
+    }
+    let mut corners = Vec::new();
+
+    for i in 1..samples.len() - 1 {
+        let v_in = samples[i].position - samples[i - 1].position;
+        let v_out = samples[i + 1].position - samples[i].position;
+        let l_in = v_in.length();
+        let l_out = v_out.length();
+
+        if l_in > 1e-4 && l_out > 1e-4 {
+            let d_in = v_in / l_in;
+            let d_out = v_out / l_out;
+            let dot = d_in.dot(d_out).clamp(-1.0, 1.0);
+            let angle_deg = dot.acos() * (180.0 / std::f32::consts::PI);
+            if angle_deg > threshold_deg {
+                corners.push(i);
+            }
+        }
+    }
+
+    corners
+}
+
+/// Tastet einen zusammenhängenden, glatten Teilabschnitt (Run) zwischen Ecken ab.
+fn sample_smooth_run(
+    control_points: &[ControlPoint],
+    config: &SplineConfig,
+) -> Vec<SplineSample> {
+    match control_points.len() {
+        0 => Vec::new(),
+        1 => {
+            let pt = control_points[0];
+            let radius = calculate_radius(pt.pressure, config.min_radius, config.max_radius);
+            vec![SplineSample {
+                position: pt.position,
+                tangent: glam::Vec2::new(1.0, 0.0),
+                normal: glam::Vec2::new(0.0, 1.0),
+                pressure: pt.pressure,
+                radius,
+                left: pt.position + glam::Vec2::new(0.0, radius),
+                right: pt.position - glam::Vec2::new(0.0, radius),
+            }]
+        }
+        2 => {
+            let p0 = control_points[0];
+            let p1 = control_points[1];
+            let dir = p1.position - p0.position;
+            let len = dir.length();
+            let tangent = if len > 1e-5 {
+                dir / len
+            } else {
+                glam::Vec2::new(1.0, 0.0)
+            };
+            let normal = glam::Vec2::new(-tangent.y, tangent.x);
+
+            let steps = (len / 10.0).clamp(2.0, 8.0) as usize;
+            let mut samples = Vec::with_capacity(steps + 1);
+
+            for s in 0..=steps {
+                let u = s as f32 / steps as f32;
+                let pos = p0.position.lerp(p1.position, u);
+                let pressure = p0.pressure + u * (p1.pressure - p0.pressure);
+                let radius = calculate_radius(pressure, config.min_radius, config.max_radius);
+                samples.push(SplineSample {
+                    position: pos,
+                    tangent,
+                    normal,
+                    pressure,
+                    radius,
+                    left: pos + normal * radius,
+                    right: pos - normal * radius,
+                });
+            }
+
+            samples
+        }
+        n => {
+            let steps = config.samples_per_segment.max(1);
+            let mut samples = Vec::new();
+
+            for i in 0..n - 1 {
+                let p_curr = control_points[i];
+                let p_next = control_points[i + 1];
+
+                // C0-Enden für den Run: Extrapolierte Geisterpunkte verhindern Ausbeulen an Ecken
+                let p_prev = if i == 0 {
+                    ControlPoint {
+                        position: 2.0 * p_curr.position - p_next.position,
+                        pressure: p_curr.pressure,
+                    }
+                } else {
+                    control_points[i - 1]
+                };
+
+                let p_after = if i + 2 < n {
+                    control_points[i + 2]
+                } else {
+                    ControlPoint {
+                        position: 2.0 * p_next.position - p_curr.position,
+                        pressure: p_next.pressure,
+                    }
+                };
+
+                let start_step = if i == 0 { 0 } else { 1 };
+                for s in start_step..=steps {
+                    let u = s as f32 / steps as f32;
+                    samples.push(evaluate_catmull_rom_segment(
+                        p_prev, p_curr, p_next, p_after, u, config,
+                    ));
+                }
+            }
+
+            samples
+        }
+    }
+}
+
+/// Generiert das finale Triangle-Mesh aus den bereinigten Punkten unter Beachtung
+/// von Ecken-Unterbrechungen (C0) sowie runden Kappen an Start und Ende.
+pub fn generate_finalized_triangle_strip(
+    samples: &[StylusSample],
+    corners: &[usize],
+    config: &SplineConfig,
+) -> Vec<Vertex> {
+    if samples.is_empty() {
+        return Vec::new();
+    }
+    if samples.len() == 1 {
+        let pt = ControlPoint::from_vec2(samples[0].position, samples[0].pressure);
+        return generate_triangle_strip(&[pt], config);
+    }
+
+    // 1. Teile die Punkte an erkannten Ecken in glatte Runs auf
+    let mut run_ranges = Vec::new();
+    let mut current_start = 0;
+
+    for &corner_idx in corners {
+        if corner_idx > current_start && corner_idx < samples.len() {
+            run_ranges.push(current_start..=corner_idx);
+            current_start = corner_idx;
+        }
+    }
+    if current_start < samples.len() {
+        run_ranges.push(current_start..=(samples.len() - 1));
+    }
+
+    // 2. Taste alle Runs einzeln ab
+    let mut runs: Vec<Vec<SplineSample>> = Vec::with_capacity(run_ranges.len());
+    for range in run_ranges {
+        let pts: Vec<ControlPoint> = samples[range]
+            .iter()
+            .map(|s| ControlPoint::from_vec2(s.position, s.pressure))
+            .collect();
+        let run_samples = sample_smooth_run(&pts, config);
+        if !run_samples.is_empty() {
+            runs.push(run_samples);
+        }
+    }
+
+    if runs.is_empty() {
+        return Vec::new();
+    }
+
+    const CAP_STEPS: usize = 4;
+    let mut vertices = Vec::new();
+
+    // 3. Runde Start-Kappe vor dem ersten Run
+    let s_first = &runs[0][0];
+    let p_start = s_first.position;
+    let t_start = s_first.tangent;
+    let n_start = s_first.normal;
+    let r_start = s_first.radius;
+    let pr_start = s_first.pressure;
+
+    for k in 0..CAP_STEPS {
+        let alpha = (k as f32 / CAP_STEPS as f32) * (std::f32::consts::PI * 0.5);
+        let left = p_start - t_start * (r_start * alpha.cos()) + n_start * (r_start * alpha.sin());
+        let right = p_start - t_start * (r_start * alpha.cos()) - n_start * (r_start * alpha.sin());
+        vertices.push(Vertex::new(left.x, left.y, pr_start, -1.0));
+        vertices.push(Vertex::new(right.x, right.y, pr_start, 1.0));
+    }
+
+    // 4. Runs und Ecken-Übergänge verbinden
+    for (run_idx, run) in runs.iter().enumerate() {
+        if run_idx > 0 {
+            // Ecken-Verbindung: Nahtlose C0-Verbindung am Knick
+            let s_corner = &run[0];
+            let p_c = s_corner.position;
+            let pr_c = s_corner.pressure;
+            vertices.push(Vertex::new(p_c.x, p_c.y, pr_c, 0.0));
+            vertices.push(Vertex::new(p_c.x, p_c.y, pr_c, 0.0));
+            vertices.push(Vertex::new(s_corner.left.x, s_corner.left.y, pr_c, -1.0));
+            vertices.push(Vertex::new(s_corner.right.x, s_corner.right.y, pr_c, 1.0));
+        }
+
+        let start_sample_idx = if run_idx > 0 { 1 } else { 0 };
+        for s in &run[start_sample_idx..] {
+            vertices.push(Vertex::new(s.left.x, s.left.y, s.pressure, -1.0));
+            vertices.push(Vertex::new(s.right.x, s.right.y, s.pressure, 1.0));
+        }
+    }
+
+    // 5. Runde End-Kappe nach dem letzten Run
+    let s_last = runs.last().unwrap().last().unwrap();
+    let p_end = s_last.position;
+    let t_end = s_last.tangent;
+    let n_end = s_last.normal;
+    let r_end = s_last.radius;
+    let pr_end = s_last.pressure;
+
+    for k in 1..=CAP_STEPS {
+        let beta = (std::f32::consts::PI * 0.5) * (1.0 - k as f32 / CAP_STEPS as f32);
+        let left = p_end + t_end * (r_end * beta.cos()) + n_end * (r_end * beta.sin());
+        let right = p_end + t_end * (r_end * beta.cos()) - n_end * (r_end * beta.sin());
+        vertices.push(Vertex::new(left.x, left.y, pr_end, -1.0));
+        vertices.push(Vertex::new(right.x, right.y, pr_end, 1.0));
+    }
+
+    vertices
+}
+
+/// Finalisiert einen Strich nach dem Zwei-Stufen-Modell:
+/// 1. Ecken-Erkennung (Corner Preservation bei Richtungsänderung > 65°)
+/// 2. Druckglättung über gewichtetes 3-Punkt-Fenster [0.25, 0.5, 0.25]
+/// 3. Ramer-Douglas-Peucker (RDP) Dezimierung (Toleranz ca. 0.05 bis 0.1 mm)
+/// 4. Generierung der finalen Triangle-Strips mit runden Kappen an Start und Ende.
+pub fn finalize_stroke(raw_samples: &[StylusSample]) -> Stroke {
+    finalize_stroke_with_config(0, raw_samples, [0.0, 0.0, 0.0, 1.0], &SplineConfig::default())
+}
+
+/// Vollständige Finalisierung mit konfigurierbarer Stroke-ID, Farbe und SplineConfig.
+pub fn finalize_stroke_with_config(
+    stroke_id: u64,
+    raw_samples: &[StylusSample],
+    color: [f32; 4],
+    config: &SplineConfig,
+) -> Stroke {
+    if raw_samples.is_empty() {
+        return Stroke::new(stroke_id, Vec::new(), Vec::new(), color);
+    }
+
+    // 1. Druckglättung über 3-Punkt-Fenster [0.25, 0.5, 0.25]
+    let smoothed = smooth_pressure(raw_samples);
+
+    // 2. RDP-Dezimierung (ca. 0.075 mm = 0.75 Einheiten)
+    let decimated = rdp_filter_samples(&smoothed, RDP_TOLERANCE_UNITS);
+
+    // 3. Ecken-Erkennung (Winkel > 65 Grad)
+    let corners = detect_corners(&decimated, CORNER_ANGLE_THRESHOLD_DEG);
+
+    // 4. Finale Triangle-Strips mit C0-Ecken und runden Kappen generieren
+    let strip_vertices = generate_finalized_triangle_strip(&decimated, &corners, config);
+    let ink_vertices: Vec<InkVertex> = strip_vertices
+        .into_iter()
+        .map(|v| InkVertex::new(v.position[0], v.position[1], color))
+        .collect();
+
+    Stroke::new(stroke_id, decimated, ink_vertices, color)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -446,5 +779,100 @@ mod tests {
             assert!(v.pressure.is_finite());
             assert!(v.side.is_finite());
         }
+    }
+
+    #[test]
+    fn test_corner_preservation() {
+        let mut raw_samples = Vec::new();
+        // Horizontaler Schenkel von (0, 0) bis (100, 0)
+        for i in 0..=20 {
+            raw_samples.push(StylusSample {
+                position: glam::Vec2::new(i as f32 * 5.0, 0.0),
+                pressure: 0.5,
+                timestamp: i as f64 * 0.01,
+            });
+        }
+        // Vertikaler Schenkel von (100, 0) bis (100, 100) (90°-Knick / L-Form)
+        for i in 1..=20 {
+            raw_samples.push(StylusSample {
+                position: glam::Vec2::new(100.0, i as f32 * 5.0),
+                pressure: 0.5,
+                timestamp: (20 + i) as f64 * 0.01,
+            });
+        }
+
+        let stroke = finalize_stroke(&raw_samples);
+
+        // 1. Strich und Meshes müssen sauber aufgebaut sein
+        assert!(!stroke.points.is_empty());
+        assert!(!stroke.vertices.is_empty());
+
+        // 2. Der Eckpunkt (100.0, 0.0) muss in den Strichpunkten erhalten bleiben
+        let corner_found = stroke.points.iter().any(|s| {
+            (s.position.x - 100.0).abs() < 1e-3 && (s.position.y - 0.0).abs() < 1e-3
+        });
+        assert!(
+            corner_found,
+            "Eckpunkt (100.0, 0.0) muss in den finalen Strichpunkten erhalten bleiben!"
+        );
+
+        // 3. Ecken-Erhaltung: Entlang des horizontalen Schenkels vor der Ecke (x < 99)
+        // darf kein Rundungsausweichen in y-Richtung stattfinden
+        for pt in &stroke.points {
+            if pt.position.x < 99.0 {
+                assert!(
+                    pt.position.y.abs() < 1e-3,
+                    "Horizontaler Schenkel darf vor der Ecke nicht abgerundet werden (y = {})",
+                    pt.position.y
+                );
+            }
+            if pt.position.y > 1.0 {
+                assert!(
+                    (pt.position.x - 100.0).abs() < 1e-3,
+                    "Vertikaler Schenkel darf nach der Ecke nicht abgerundet werden (x = {})",
+                    pt.position.x
+                );
+            }
+        }
+
+        // 4. Ecken-Erkennung prüft den 90°-Winkel (> 65 Grad)
+        let corners = detect_corners(&stroke.points, CORNER_ANGLE_THRESHOLD_DEG);
+        assert_eq!(corners.len(), 1, "Exakt eine 90-Grad-Ecke muss erkannt werden");
+        let corner_idx = corners[0];
+        let corner_pt = stroke.points[corner_idx];
+        assert!((corner_pt.position.x - 100.0).abs() < 1e-3);
+        assert!((corner_pt.position.y - 0.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn test_pressure_smoothing() {
+        let samples = vec![
+            StylusSample { position: glam::Vec2::new(0.0, 0.0), pressure: 0.2, timestamp: 0.0 },
+            StylusSample { position: glam::Vec2::new(1.0, 0.0), pressure: 0.8, timestamp: 0.1 },
+            StylusSample { position: glam::Vec2::new(2.0, 0.0), pressure: 0.2, timestamp: 0.2 },
+        ];
+
+        let smoothed = smooth_pressure(&samples);
+        // Fenster: 0.25 * 0.2 + 0.5 * 0.8 + 0.25 * 0.2 = 0.05 + 0.40 + 0.05 = 0.50
+        assert!((smoothed[1].pressure - 0.50).abs() < 1e-4);
+    }
+
+    #[test]
+    fn test_rdp_decimation() {
+        let mut samples = Vec::new();
+        // 10 Punkte exakt auf einer Linie
+        for i in 0..=10 {
+            samples.push(StylusSample {
+                position: glam::Vec2::new(i as f32 * 10.0, 0.0),
+                pressure: 0.5,
+                timestamp: i as f64 * 0.01,
+            });
+        }
+
+        let decimated = rdp_filter_samples(&samples, RDP_TOLERANCE_UNITS);
+        // Kollineare Zwischenpunkte müssen entfernt werden -> nur Start und Ende bleiben
+        assert_eq!(decimated.len(), 2);
+        assert_eq!(decimated[0].position, glam::Vec2::new(0.0, 0.0));
+        assert_eq!(decimated[1].position, glam::Vec2::new(100.0, 0.0));
     }
 }

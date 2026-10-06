@@ -617,9 +617,9 @@ impl CanvasState {
         self.filter.reset();
     }
 
-    /// Schließt den aktuellen Live-Strich ab und erzeugt das fertige `Stroke`-Objekt.
+    /// Schließt den aktuellen Live-Strich ab und erzeugt das fertige `Stroke`-Objekt nach dem Zwei-Stufen-Modell.
     pub fn finish_stroke(&mut self, stroke_id: u64) -> Option<Stroke> {
-        if self.live_vertex_count == 0 || self.live_vertices.is_empty() {
+        if self.live_samples.is_empty() {
             self.live_samples.clear();
             self.live_control_points.clear();
             self.live_vertices.clear();
@@ -628,13 +628,15 @@ impl CanvasState {
             return None;
         }
 
-        let stroke = Stroke::new(
+        // Post-Stroke Finalisierung (Corner Preservation, Druckglättung, RDP, runde Kappen)
+        let stroke = spline::finalize_stroke_with_config(
             stroke_id,
-            self.live_samples.clone(),
-            self.live_vertices.clone(),
+            &self.live_samples,
             self.current_ink_color,
+            &self.spline_config,
         );
 
+        // Temporären GPU-Live-Buffer vollständig leeren
         self.live_samples.clear();
         self.live_control_points.clear();
         self.live_vertices.clear();

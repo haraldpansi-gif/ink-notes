@@ -52,6 +52,20 @@ Aus den interpolierten Spline-Punkten mit Radius $r_i = f(\text{pressure}_i)$ wi
 4. Eckpunkte des Dreiecksstreifens:
    $$V_{i,\text{left}} = P_i + N_i \cdot r_i, \quad V_{i,\text{right}} = P_i - N_i \cdot r_i$$
 
+### 1.4. Zwei-Stufen-Modell (Live-Glättung vs. akausale Post-Stroke-Finalisierung)
+Um minimale Latenz beim Zeichnen mit maximaler Präzision und Ecken-Erhaltung zu verbinden, arbeitet `ink-notes` mit einem strikten Zwei-Stufen-Modell:
+
+1. **Live-Phase (Kausal, Zero-Latency):**
+   - Eingehende Punkte durchlaufen in Echtzeit den 1€-Filter (`filter.rs`).
+   - `spline.rs` tesselliert inkrementell temporäre Triangle-Strips für die unverzögerte Bildschirmdarstellung im GPU-Live-Buffer.
+2. **Commit-Phase (Akausal, `finalize_stroke`):**
+   - Beim Absetzen des Stifts wird der gesamte Strich akausal analysiert:
+     - **Druckglättung:** Glättung des Druckverlaufs $p$ über ein gewichtetes 3-Punkt-Fenster $[0.25, 0.5, 0.25]$ zur Ausblendung von Digitalisierer-Stufen.
+     - **RDP-Dezimierung:** Ausdünnung kollinearer Zwischenpunkte mit Ramer-Douglas-Peucker ($\epsilon \approx 0.075\text{ mm} = 0.75\text{ Einheiten}$).
+     - **Ecken-Erkennung (Corner Preservation):** Bei Richtungsänderungen $> 65^\circ$ wird die $C^1$-Spline-Kontinuität zu $C^0$ aufgebrochen, sodass Ecken (z. B. 90°-L-Knicke oder Zickzack-Linien) gestochen scharf bleiben und nicht rundgeschliffen werden.
+     - **Runde Kappen & Miter-Joins:** Generierung sauberer runder Kappen an Start und Ende des Triangle-Strips.
+   - Der temporäre Live-Buffer wird vollständig entleert und der bereinigte `Stroke` in den persistenten Puffer der Seite überführt.
+
 ---
 
 ## 2. Rendering & Kamera-Pipeline (`wgpu`)

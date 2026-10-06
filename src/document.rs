@@ -4,6 +4,7 @@ use std::ops::Range;
 
 use crate::canvas::InkVertex;
 use crate::history::{HistoryAction, HistoryStack};
+pub use crate::spline::{finalize_stroke, finalize_stroke_with_config};
 
 /// Standardmaße DIN A4 in Millimetern.
 pub const A4_WIDTH_MM: f32 = 210.0;
@@ -133,6 +134,16 @@ impl Stroke {
             color,
             shape: None,
         }
+    }
+
+    /// Finalisiert rohe Stylus-Samples mit akausalem Post-Processing (Zwei-Stufen-Modell).
+    pub fn finalize(
+        id: u64,
+        raw_samples: &[StylusSample],
+        color: [f32; 4],
+        config: &crate::spline::SplineConfig,
+    ) -> Self {
+        crate::spline::finalize_stroke_with_config(id, raw_samples, color, config)
     }
 
     /// Verknüpft diesen Strich mit einer mathematisch erkannten Form.
