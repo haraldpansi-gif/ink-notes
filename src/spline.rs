@@ -355,11 +355,11 @@ fn rdp_mark(positions: &[glam::Vec2], start: usize, end: usize, epsilon: f32, ke
     let mut max_dist = 0.0_f32;
     let mut max_idx = start;
 
-    for i in (start + 1)..end {
-        let dist = point_to_segment_distance(positions[i], a, b);
+    for (offset, &pos) in positions[(start + 1)..end].iter().enumerate() {
+        let dist = point_to_segment_distance(pos, a, b);
         if dist > max_dist {
             max_dist = dist;
-            max_idx = i;
+            max_idx = start + 1 + offset;
         }
     }
 
@@ -418,10 +418,7 @@ pub fn detect_corners(samples: &[StylusSample], threshold_deg: f32) -> Vec<usize
 }
 
 /// Tastet einen zusammenhängenden, glatten Teilabschnitt (Run) zwischen Ecken ab.
-fn sample_smooth_run(
-    control_points: &[ControlPoint],
-    config: &SplineConfig,
-) -> Vec<SplineSample> {
+fn sample_smooth_run(control_points: &[ControlPoint], config: &SplineConfig) -> Vec<SplineSample> {
     match control_points.len() {
         0 => Vec::new(),
         1 => {
@@ -621,7 +618,12 @@ pub fn generate_finalized_triangle_strip(
 /// 3. Ramer-Douglas-Peucker (RDP) Dezimierung (Toleranz ca. 0.05 bis 0.1 mm)
 /// 4. Generierung der finalen Triangle-Strips mit runden Kappen an Start und Ende.
 pub fn finalize_stroke(raw_samples: &[StylusSample]) -> Stroke {
-    finalize_stroke_with_config(0, raw_samples, [0.0, 0.0, 0.0, 1.0], &SplineConfig::default())
+    finalize_stroke_with_config(
+        0,
+        raw_samples,
+        [0.0, 0.0, 0.0, 1.0],
+        &SplineConfig::default(),
+    )
 }
 
 /// Vollständige Finalisierung mit konfigurierbarer Stroke-ID, Farbe und SplineConfig.
@@ -808,9 +810,10 @@ mod tests {
         assert!(!stroke.vertices.is_empty());
 
         // 2. Der Eckpunkt (100.0, 0.0) muss in den Strichpunkten erhalten bleiben
-        let corner_found = stroke.points.iter().any(|s| {
-            (s.position.x - 100.0).abs() < 1e-3 && (s.position.y - 0.0).abs() < 1e-3
-        });
+        let corner_found = stroke
+            .points
+            .iter()
+            .any(|s| (s.position.x - 100.0).abs() < 1e-3 && (s.position.y - 0.0).abs() < 1e-3);
         assert!(
             corner_found,
             "Eckpunkt (100.0, 0.0) muss in den finalen Strichpunkten erhalten bleiben!"
@@ -837,7 +840,11 @@ mod tests {
 
         // 4. Ecken-Erkennung prüft den 90°-Winkel (> 65 Grad)
         let corners = detect_corners(&stroke.points, CORNER_ANGLE_THRESHOLD_DEG);
-        assert_eq!(corners.len(), 1, "Exakt eine 90-Grad-Ecke muss erkannt werden");
+        assert_eq!(
+            corners.len(),
+            1,
+            "Exakt eine 90-Grad-Ecke muss erkannt werden"
+        );
         let corner_idx = corners[0];
         let corner_pt = stroke.points[corner_idx];
         assert!((corner_pt.position.x - 100.0).abs() < 1e-3);
@@ -847,9 +854,21 @@ mod tests {
     #[test]
     fn test_pressure_smoothing() {
         let samples = vec![
-            StylusSample { position: glam::Vec2::new(0.0, 0.0), pressure: 0.2, timestamp: 0.0 },
-            StylusSample { position: glam::Vec2::new(1.0, 0.0), pressure: 0.8, timestamp: 0.1 },
-            StylusSample { position: glam::Vec2::new(2.0, 0.0), pressure: 0.2, timestamp: 0.2 },
+            StylusSample {
+                position: glam::Vec2::new(0.0, 0.0),
+                pressure: 0.2,
+                timestamp: 0.0,
+            },
+            StylusSample {
+                position: glam::Vec2::new(1.0, 0.0),
+                pressure: 0.8,
+                timestamp: 0.1,
+            },
+            StylusSample {
+                position: glam::Vec2::new(2.0, 0.0),
+                pressure: 0.2,
+                timestamp: 0.2,
+            },
         ];
 
         let smoothed = smooth_pressure(&samples);

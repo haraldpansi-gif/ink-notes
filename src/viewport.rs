@@ -3,8 +3,8 @@
 //! Berechnet die affine Transformation zwischen Bildschirmkoordinaten (Window-Pixel),
 //! virtuellen DIN-A4-Seitenkoordinaten ([0, 2100] x [0, 2970]) und dem GPU-NDC-Raum ([-1, 1]).
 
-use glam::{Mat4, Vec2, Vec4};
 use crate::document::{PageViewport, PAGE_HEIGHT, PAGE_WIDTH};
+use glam::{Mat4, Vec2, Vec4};
 
 /// Minimaler und maximaler Zoomfaktor.
 pub const MIN_ZOOM: f32 = 0.25;
@@ -40,7 +40,12 @@ impl ViewportState {
     }
 
     /// Passt den Pan-Offset um eine Bildschirmverschiebung (in Fensterpixeln) an.
-    pub fn pan_by_screen_delta(&mut self, delta_x: f32, delta_y: f32, page_viewport: &PageViewport) {
+    pub fn pan_by_screen_delta(
+        &mut self,
+        delta_x: f32,
+        delta_y: f32,
+        page_viewport: &PageViewport,
+    ) {
         let base_scale = page_viewport.page_width / PAGE_WIDTH;
         if base_scale * self.zoom > 1e-6 {
             self.pan_offset[0] += delta_x / (base_scale * self.zoom);
@@ -122,10 +127,7 @@ impl ViewportState {
         page_viewport: &PageViewport,
     ) -> Vec2 {
         let pt = self.screen_to_page_unclamped(screen_x, screen_y, page_viewport);
-        Vec2::new(
-            pt.x.clamp(0.0, PAGE_WIDTH),
-            pt.y.clamp(0.0, PAGE_HEIGHT),
-        )
+        Vec2::new(pt.x.clamp(0.0, PAGE_WIDTH), pt.y.clamp(0.0, PAGE_HEIGHT))
     }
 
     /// Transformiert einen DIN-A4-Seitenpunkt in Fenster-Pixelkoordinaten.

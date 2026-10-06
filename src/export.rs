@@ -78,12 +78,8 @@ pub fn generate_pdf_document(
 
     // 1. Erstes Dokument mit Seite 1 erstellen
     let title = "ink-notes Notebook";
-    let (doc, page1_idx, layer1_bg) = PdfDocument::new(
-        title,
-        Mm(A4_WIDTH_MM),
-        Mm(A4_HEIGHT_MM),
-        "Background",
-    );
+    let (doc, page1_idx, layer1_bg) =
+        PdfDocument::new(title, Mm(A4_WIDTH_MM), Mm(A4_HEIGHT_MM), "Background");
 
     // Seite 1 befüllen
     let page1_ref = doc.get_page(page1_idx);
@@ -95,11 +91,7 @@ pub fn generate_pdf_document(
 
     // 2. Alle nachfolgenden Seiten hinzufügen
     for page in &notebook.pages[1..] {
-        let (page_idx, layer_bg) = doc.add_page(
-            Mm(A4_WIDTH_MM),
-            Mm(A4_HEIGHT_MM),
-            "Background",
-        );
+        let (page_idx, layer_bg) = doc.add_page(Mm(A4_WIDTH_MM), Mm(A4_HEIGHT_MM), "Background");
         let page_ref = doc.get_page(page_idx);
         let layer_bg_ref = page_ref.get_layer(layer_bg);
         render_background_layer(&layer_bg_ref, page.background);
@@ -112,10 +104,7 @@ pub fn generate_pdf_document(
 }
 
 /// Rendert das Vektorraster auf Layer 1 ("Background").
-fn render_background_layer(
-    layer: &printpdf::PdfLayerReference,
-    background: PageBackground,
-) {
+fn render_background_layer(layer: &printpdf::PdfLayerReference, background: PageBackground) {
     let grid_color = Color::Rgb(Rgb::new(0.88, 0.88, 0.88, None));
     layer.set_outline_color(grid_color.clone());
     layer.set_outline_thickness(0.4); // Feine 0.15 mm Haarlinie (ca. 0.4 pt)
@@ -203,11 +192,7 @@ fn render_background_layer(
 }
 
 /// Rendert alle Striche einer Seite auf Layer 2 ("Ink").
-fn render_ink_layer(
-    layer: &printpdf::PdfLayerReference,
-    page: &Page,
-    strategy: ExportStrategy,
-) {
+fn render_ink_layer(layer: &printpdf::PdfLayerReference, page: &Page, strategy: ExportStrategy) {
     for stroke in &page.strokes {
         if let Some(ref shape) = stroke.shape {
             render_recognized_shape(layer, shape, stroke.color);
@@ -326,7 +311,12 @@ fn render_recognized_shape(
             layer.add_polygon(poly);
         }
 
-        RecognizedShape::Octahedron { center, radius_x, radius_y, depth } => {
+        RecognizedShape::Octahedron {
+            center,
+            radius_x,
+            radius_y,
+            depth,
+        } => {
             let edges = crate::geometry::octahedron_edges(*center, *radius_x, *radius_y, *depth);
             for (p1, p2) in edges {
                 let (x1, y1) = page_to_pdf_mm(p1.x, p1.y);
@@ -514,7 +504,8 @@ fn render_stroke_bezier(layer: &printpdf::PdfLayerReference, stroke: &Stroke) {
     layer.set_line_join_style(printpdf::LineJoinStyle::Round);
 
     // Durchschnittliche Linienstärke aus dem Druck berechnen
-    let avg_pressure = stroke.points.iter().map(|p| p.pressure).sum::<f32>() / stroke.points.len() as f32;
+    let avg_pressure =
+        stroke.points.iter().map(|p| p.pressure).sum::<f32>() / stroke.points.len() as f32;
     let radius_mm = (avg_pressure * 0.75 + 0.25).max(0.25);
     let thickness_pt = radius_mm * 2.0 * (72.0 / 25.4); // mm in DTP-Punkte
     layer.set_outline_thickness(thickness_pt);
@@ -693,11 +684,18 @@ mod tests {
         let temp_dir = std::env::temp_dir();
         let pdf_path = temp_dir.join("ink_notes_test_export.pdf");
 
-        let export_res = export_notebook_to_pdf(&notebook, &pdf_path, ExportStrategy::FilledPolygon);
-        assert!(export_res.is_ok(), "PDF-Export zu Datei muss erfolgreich sein");
+        let export_res =
+            export_notebook_to_pdf(&notebook, &pdf_path, ExportStrategy::FilledPolygon);
+        assert!(
+            export_res.is_ok(),
+            "PDF-Export zu Datei muss erfolgreich sein"
+        );
 
         // Datei-Existenz und Größe prüfen
-        assert!(pdf_path.exists(), "Die generierte PDF-Datei muss existieren");
+        assert!(
+            pdf_path.exists(),
+            "Die generierte PDF-Datei muss existieren"
+        );
         let metadata = std::fs::metadata(&pdf_path).unwrap();
         assert!(
             metadata.len() > 1024,

@@ -265,9 +265,18 @@ mod tests {
         // 4. dt > 1.0 s (großer Zeitsprung z.B. auf t = 5.0 s): Muss reset() auslösen
         let (x4, y4, p4) = filter.filter(50.0, 100.0, 0.9, 5.0);
         // Nach dem Reset muss der Filter sofort exakt den neuen Punkt als Startpunkt annehmen
-        assert_eq!(x4, 50.0, "Nach Reset muss der neue X-Wert übernommen werden");
-        assert_eq!(y4, 100.0, "Nach Reset muss der neue Y-Wert übernommen werden");
-        assert_eq!(p4, 0.9, "Nach Reset muss der neue Druckwert übernommen werden");
+        assert_eq!(
+            x4, 50.0,
+            "Nach Reset muss der neue X-Wert übernommen werden"
+        );
+        assert_eq!(
+            y4, 100.0,
+            "Nach Reset muss der neue Y-Wert übernommen werden"
+        );
+        assert_eq!(
+            p4, 0.9,
+            "Nach Reset muss der neue Druckwert übernommen werden"
+        );
     }
 
     #[test]
@@ -344,9 +353,18 @@ mod tests {
 
         // 2. Vergiftungsversuch mit NaN und Infinity
         let (x_nan, y_nan, p_nan) = filter.filter(f32::NAN, f32::INFINITY, f32::NEG_INFINITY, 0.02);
-        assert!(x_nan.is_finite(), "Filter darf kein NaN bei Vergiftung ausgeben");
-        assert!(y_nan.is_finite(), "Filter darf kein Inf bei Vergiftung ausgeben");
-        assert!(p_nan.is_finite(), "Filter darf kein -Inf bei Vergiftung ausgeben");
+        assert!(
+            x_nan.is_finite(),
+            "Filter darf kein NaN bei Vergiftung ausgeben"
+        );
+        assert!(
+            y_nan.is_finite(),
+            "Filter darf kein Inf bei Vergiftung ausgeben"
+        );
+        assert!(
+            p_nan.is_finite(),
+            "Filter darf kein -Inf bei Vergiftung ausgeben"
+        );
 
         let (x_nan2, y_nan2, p_nan2) = filter.filter(12.0, 22.0, 0.6, f64::NAN);
         assert!(x_nan2.is_finite());
@@ -364,6 +382,9 @@ mod tests {
         assert!(x3.is_finite());
         assert!(y3.is_finite());
         assert!(p3.is_finite());
-        assert!(x3 > x2, "Filter muss sich nach Vergiftung weiter normal anpassen");
+        assert!(
+            x3 > x2,
+            "Filter muss sich nach Vergiftung weiter normal anpassen"
+        );
     }
 }

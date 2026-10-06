@@ -115,12 +115,20 @@ pub struct Stroke {
 }
 
 impl Stroke {
-    pub fn new(id: u64, points: Vec<StylusSample>, vertices: Vec<InkVertex>, color: [f32; 4]) -> Self {
+    pub fn new(
+        id: u64,
+        points: Vec<StylusSample>,
+        vertices: Vec<InkVertex>,
+        color: [f32; 4],
+    ) -> Self {
         let aabb = if !points.is_empty() {
             let pts: Vec<glam::Vec2> = points.iter().map(|s| s.position).collect();
             Aabb::from_points(&pts)
         } else if !vertices.is_empty() {
-            let pts: Vec<glam::Vec2> = vertices.iter().map(|v| glam::Vec2::new(v.position[0], v.position[1])).collect();
+            let pts: Vec<glam::Vec2> = vertices
+                .iter()
+                .map(|v| glam::Vec2::new(v.position[0], v.position[1]))
+                .collect();
             Aabb::from_points(&pts)
         } else {
             Aabb::new(glam::Vec2::ZERO, glam::Vec2::ZERO)
@@ -171,7 +179,12 @@ impl Stroke {
     }
 
     /// Prüft, ob dieser Strich von einem Radierer an Position `eraser_pos` mit Radius `eraser_radius` getroffen wird.
-    pub fn intersects_eraser(&self, eraser_pos: glam::Vec2, eraser_radius: f32, max_stroke_radius: f32) -> bool {
+    pub fn intersects_eraser(
+        &self,
+        eraser_pos: glam::Vec2,
+        eraser_radius: f32,
+        max_stroke_radius: f32,
+    ) -> bool {
         // 1. Vorabtest: Schneidet der Radierer die vergrößerte AABB?
         let total_margin = eraser_radius + max_stroke_radius;
         if !self.aabb.expanded(total_margin).contains_point(eraser_pos) {
@@ -254,9 +267,7 @@ impl Stroke {
 
     /// Skaliert den Strich bezüglich `origin` um die Faktoren `factors`.
     pub fn scale(&mut self, origin: glam::Vec2, factors: glam::Vec2) {
-        let sc = |pos: glam::Vec2| -> glam::Vec2 {
-            origin + (pos - origin) * factors
-        };
+        let sc = |pos: glam::Vec2| -> glam::Vec2 { origin + (pos - origin) * factors };
 
         for pt in &mut self.points {
             pt.position = sc(pt.position);
@@ -402,7 +413,12 @@ impl Page {
     /// Radiert alle Striche an der Position `eraser_pos` mit Radius `eraser_radius`.
     ///
     /// Gibt die gelöschten Striche zurück (falls welche getroffen wurden).
-    pub fn erase_at(&mut self, eraser_pos: glam::Vec2, eraser_radius: f32, max_stroke_radius: f32) -> Vec<Stroke> {
+    pub fn erase_at(
+        &mut self,
+        eraser_pos: glam::Vec2,
+        eraser_radius: f32,
+        max_stroke_radius: f32,
+    ) -> Vec<Stroke> {
         let mut hit_indices = Vec::new();
 
         for (i, stroke) in self.strokes.iter().enumerate() {
@@ -422,7 +438,8 @@ impl Page {
         }
 
         removed.reverse();
-        self.history.push(HistoryAction::RemoveStrokes(removed.clone()));
+        self.history
+            .push(HistoryAction::RemoveStrokes(removed.clone()));
         self.is_dirty = true;
 
         removed
@@ -473,7 +490,11 @@ impl Page {
 
     /// Liefert Klone der Striche mit den angegebenen IDs.
     pub fn get_strokes(&self, ids: &[u64]) -> Vec<Stroke> {
-        self.strokes.iter().filter(|s| ids.contains(&s.id)).cloned().collect()
+        self.strokes
+            .iter()
+            .filter(|s| ids.contains(&s.id))
+            .cloned()
+            .collect()
     }
 
     /// Aktualisiert eine Menge geänderter Striche transaktional im History-Stack.
@@ -482,7 +503,12 @@ impl Page {
             return;
         }
         let ids: Vec<u64> = modified.iter().map(|s| s.id).collect();
-        let before: Vec<Stroke> = self.strokes.iter().filter(|s| ids.contains(&s.id)).cloned().collect();
+        let before: Vec<Stroke> = self
+            .strokes
+            .iter()
+            .filter(|s| ids.contains(&s.id))
+            .cloned()
+            .collect();
 
         for m in modified.iter() {
             if let Some(pos) = self.strokes.iter().position(|s| s.id == m.id) {
@@ -517,7 +543,8 @@ impl Page {
                 self.strokes[pos] = m.clone();
             }
         }
-        self.history.push(HistoryAction::ModifyStrokes { before, after });
+        self.history
+            .push(HistoryAction::ModifyStrokes { before, after });
         self.is_dirty = true;
     }
 
@@ -534,7 +561,8 @@ impl Page {
         });
 
         if !removed.is_empty() {
-            self.history.push(HistoryAction::RemoveStrokes(removed.clone()));
+            self.history
+                .push(HistoryAction::RemoveStrokes(removed.clone()));
             self.is_dirty = true;
         }
         removed
@@ -545,7 +573,8 @@ impl Page {
         if new_strokes.is_empty() {
             return;
         }
-        self.history.push(HistoryAction::AddStrokes(new_strokes.clone()));
+        self.history
+            .push(HistoryAction::AddStrokes(new_strokes.clone()));
         self.strokes.extend(new_strokes);
         self.is_dirty = true;
     }
@@ -653,7 +682,11 @@ impl Notebook {
 
     /// Text für das On-Screen-Display (OSD), z. B. "Seite 3 / 12".
     pub fn osd_text(&self) -> String {
-        format!("Seite {} / {}", self.current_page_index + 1, self.pages.len())
+        format!(
+            "Seite {} / {}",
+            self.current_page_index + 1,
+            self.pages.len()
+        )
     }
 }
 
@@ -787,13 +820,25 @@ mod tests {
         let stroke_radius = 2.0;
 
         // Treffer: Radierer bei (150, 105) (Abstand 5 <= 12)
-        assert!(stroke.intersects_eraser(glam::Vec2::new(150.0, 105.0), eraser_radius, stroke_radius));
+        assert!(stroke.intersects_eraser(
+            glam::Vec2::new(150.0, 105.0),
+            eraser_radius,
+            stroke_radius
+        ));
 
         // Kein Treffer: Radierer bei (150, 150) (Abstand 50 > 12)
-        assert!(!stroke.intersects_eraser(glam::Vec2::new(150.0, 150.0), eraser_radius, stroke_radius));
+        assert!(!stroke.intersects_eraser(
+            glam::Vec2::new(150.0, 150.0),
+            eraser_radius,
+            stroke_radius
+        ));
 
         // Kein Treffer: Weit außerhalb der AABB
-        assert!(!stroke.intersects_eraser(glam::Vec2::new(500.0, 500.0), eraser_radius, stroke_radius));
+        assert!(!stroke.intersects_eraser(
+            glam::Vec2::new(500.0, 500.0),
+            eraser_radius,
+            stroke_radius
+        ));
     }
 
     #[test]
@@ -966,9 +1011,12 @@ mod tests {
         let mut moved = s.clone();
         moved.translate(glam::Vec2::new(20.0, 30.0));
         page.update_strokes_ephemeral(&[moved.clone()]);
-        assert_eq!(page.strokes[0].points[0].position, glam::Vec2::new(30.0, 40.0));
+        assert_eq!(
+            page.strokes[0].points[0].position,
+            glam::Vec2::new(30.0, 40.0)
+        );
         // History should not have been updated yet
-        assert_eq!(page.history.can_redo(), false);
+        assert!(!page.history.can_redo());
 
         // Transactional commit (mouse release)
         let before = vec![s.clone()];
@@ -977,10 +1025,16 @@ mod tests {
 
         // Verify Undo restores original position
         assert!(page.undo());
-        assert_eq!(page.strokes[0].points[0].position, glam::Vec2::new(10.0, 10.0));
+        assert_eq!(
+            page.strokes[0].points[0].position,
+            glam::Vec2::new(10.0, 10.0)
+        );
 
         // Verify Redo applies modified position
         assert!(page.redo());
-        assert_eq!(page.strokes[0].points[0].position, glam::Vec2::new(30.0, 40.0));
+        assert_eq!(
+            page.strokes[0].points[0].position,
+            glam::Vec2::new(30.0, 40.0)
+        );
     }
 }

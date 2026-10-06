@@ -39,13 +39,7 @@ pub fn generate_paper_quad() -> Vec<InkVertex> {
 
 /// Fügt ein Quad (2 Dreiecke) zur Vertexliste hinzu.
 #[inline]
-fn push_quad(
-    vertices: &mut Vec<InkVertex>,
-    x_min: f32,
-    y_min: f32,
-    x_max: f32,
-    y_max: f32,
-) {
+fn push_quad(vertices: &mut Vec<InkVertex>, x_min: f32, y_min: f32, x_max: f32, y_max: f32) {
     vertices.push(InkVertex::new(x_min, y_min, BACKGROUND_PATTERN_COLOR));
     vertices.push(InkVertex::new(x_max, y_min, BACKGROUND_PATTERN_COLOR));
     vertices.push(InkVertex::new(x_min, y_max, BACKGROUND_PATTERN_COLOR));
@@ -102,7 +96,13 @@ pub fn generate_background_mesh(background: PageBackground) -> Vec<InkVertex> {
             while y < PAGE_HEIGHT {
                 let mut x = GRID_5MM_SPACING;
                 while x < PAGE_WIDTH {
-                    push_quad(&mut vertices, x - half_d, y - half_d, x + half_d, y + half_d);
+                    push_quad(
+                        &mut vertices,
+                        x - half_d,
+                        y - half_d,
+                        x + half_d,
+                        y + half_d,
+                    );
                     x += GRID_5MM_SPACING;
                 }
                 y += GRID_5MM_SPACING;
@@ -132,7 +132,11 @@ mod tests {
 
         let grid = generate_background_mesh(PageBackground::Grid5mm);
         assert!(!grid.is_empty());
-        assert_eq!(grid.len() % 6, 0, "Muss ein Vielfaches von 6 Vertizes sein (Dreiecke)");
+        assert_eq!(
+            grid.len() % 6,
+            0,
+            "Muss ein Vielfaches von 6 Vertizes sein (Dreiecke)"
+        );
 
         let lined = generate_background_mesh(PageBackground::Lined);
         assert!(!lined.is_empty());

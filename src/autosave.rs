@@ -165,13 +165,18 @@ impl AutosaveController {
                 }
                 AutosaveResponse::ManifestSaved { result } => {
                     if let Err(e) = result {
-                        eprintln!("[Autosave-Fehler] Manifest konnte nicht gespeichert werden: {e}");
+                        eprintln!(
+                            "[Autosave-Fehler] Manifest konnte nicht gespeichert werden: {e}"
+                        );
                         self.status = AutosaveStatus::Error;
                     }
                 }
             }
 
-            if self.in_flight_count == 0 && self.pending_pages.is_empty() && self.status != AutosaveStatus::Error {
+            if self.in_flight_count == 0
+                && self.pending_pages.is_empty()
+                && self.status != AutosaveStatus::Error
+            {
                 self.status = AutosaveStatus::Saved;
             }
         }

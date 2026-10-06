@@ -81,11 +81,8 @@ pub const PEN_WIDTH_PRESETS: [(f32, &str); 4] = [
 ];
 
 /// Dicken-Presets für den Textmarker:
-pub const HIGHLIGHTER_WIDTH_PRESETS: [(f32, &str); 3] = [
-    (4.0, "4.0 mm"),
-    (6.0, "6.0 mm"),
-    (8.0, "8.0 mm"),
-];
+pub const HIGHLIGHTER_WIDTH_PRESETS: [(f32, &str); 3] =
+    [(4.0, "4.0 mm"), (6.0, "6.0 mm"), (8.0, "8.0 mm")];
 
 /// Aktionen, die von der UI an die Anwendungslogik signalisiert werden.
 #[derive(Debug, Clone, PartialEq)]
@@ -111,7 +108,10 @@ pub enum UiAction {
     // Dokumenten- & Notizbuch-Verwaltung
     OpenNotebook(String),
     CreateNotebook(String),
-    RenameNotebook { id: String, new_title: String },
+    RenameNotebook {
+        id: String,
+        new_title: String,
+    },
     DeleteNotebook(String),
     RefreshNotebooks,
     // Gitea Release & Updater
@@ -119,7 +119,10 @@ pub enum UiAction {
     DownloadUpdateAsset(crate::updater::GiteaAsset),
     InstallOrOpenUpdate(std::path::PathBuf),
     OpenUrlInBrowser(String),
-    SaveUpdaterConfig { server_url: String, auth_token: Option<String> },
+    SaveUpdaterConfig {
+        server_url: String,
+        auth_token: Option<String>,
+    },
 }
 
 /// Zustand der grafischen Benutzeroberfläche.
@@ -312,25 +315,36 @@ fn tool_pill_button_with_indicator(
             (
                 egui::Color32::from_rgba_premultiplied(45, 80, 145, 230),
                 egui::Color32::WHITE,
-                egui::Stroke::new(1.0_f32, egui::Color32::from_rgba_premultiplied(110, 165, 255, 190)),
+                egui::Stroke::new(
+                    1.0_f32,
+                    egui::Color32::from_rgba_premultiplied(110, 165, 255, 190),
+                ),
             )
         } else if response.hovered() {
             (
                 egui::Color32::from_rgba_premultiplied(255, 255, 255, 16),
                 egui::Color32::WHITE,
-                egui::Stroke::new(1.0_f32, egui::Color32::from_rgba_premultiplied(255, 255, 255, 25)),
+                egui::Stroke::new(
+                    1.0_f32,
+                    egui::Color32::from_rgba_premultiplied(255, 255, 255, 25),
+                ),
             )
         } else {
             (
                 egui::Color32::from_rgba_premultiplied(255, 255, 255, 8),
                 egui::Color32::from_gray(215),
-                egui::Stroke::new(1.0_f32, egui::Color32::from_rgba_premultiplied(255, 255, 255, 15)),
+                egui::Stroke::new(
+                    1.0_f32,
+                    egui::Color32::from_rgba_premultiplied(255, 255, 255, 15),
+                ),
             )
         };
 
         // Button-Hintergrund
-        ui.painter().rect_filled(rect, egui::Rounding::same(8.0), bg);
-        ui.painter().rect_stroke(rect, egui::Rounding::same(8.0), stroke);
+        ui.painter()
+            .rect_filled(rect, egui::Rounding::same(8.0), bg);
+        ui.painter()
+            .rect_stroke(rect, egui::Rounding::same(8.0), stroke);
 
         // Text & Caret
         let label = if is_menu_open {
@@ -359,7 +373,8 @@ fn tool_pill_button_with_indicator(
             (indicator_color[2] * 255.0) as u8,
             ((indicator_color[3] * 255.0) as u8).max(180),
         );
-        ui.painter().rect_filled(bar_rect, egui::Rounding::same(1.5), bar_color);
+        ui.painter()
+            .rect_filled(bar_rect, egui::Rounding::same(1.5), bar_color);
     }
 
     response.on_hover_text(tooltip)
@@ -376,13 +391,19 @@ fn tool_pill_button(
         (
             egui::Color32::from_rgba_premultiplied(45, 80, 145, 230),
             egui::Color32::WHITE,
-            egui::Stroke::new(1.0_f32, egui::Color32::from_rgba_premultiplied(110, 165, 255, 190)),
+            egui::Stroke::new(
+                1.0_f32,
+                egui::Color32::from_rgba_premultiplied(110, 165, 255, 190),
+            ),
         )
     } else {
         (
             egui::Color32::from_rgba_premultiplied(255, 255, 255, 8),
             egui::Color32::from_gray(215),
-            egui::Stroke::new(1.0_f32, egui::Color32::from_rgba_premultiplied(255, 255, 255, 15)),
+            egui::Stroke::new(
+                1.0_f32,
+                egui::Color32::from_rgba_premultiplied(255, 255, 255, 15),
+            ),
         )
     };
 
@@ -415,22 +436,33 @@ fn stroke_preview_button(
         let (bg, border) = if is_active {
             (
                 egui::Color32::from_rgba_premultiplied(50, 85, 150, 220),
-                egui::Stroke::new(1.0_f32, egui::Color32::from_rgba_premultiplied(120, 175, 255, 200)),
+                egui::Stroke::new(
+                    1.0_f32,
+                    egui::Color32::from_rgba_premultiplied(120, 175, 255, 200),
+                ),
             )
         } else if response.hovered() {
             (
                 egui::Color32::from_rgba_premultiplied(255, 255, 255, 16),
-                egui::Stroke::new(1.0_f32, egui::Color32::from_rgba_premultiplied(255, 255, 255, 25)),
+                egui::Stroke::new(
+                    1.0_f32,
+                    egui::Color32::from_rgba_premultiplied(255, 255, 255, 25),
+                ),
             )
         } else {
             (
                 egui::Color32::from_rgba_premultiplied(255, 255, 255, 8),
-                egui::Stroke::new(1.0_f32, egui::Color32::from_rgba_premultiplied(255, 255, 255, 14)),
+                egui::Stroke::new(
+                    1.0_f32,
+                    egui::Color32::from_rgba_premultiplied(255, 255, 255, 14),
+                ),
             )
         };
 
-        ui.painter().rect_filled(rect, egui::Rounding::same(6.0), bg);
-        ui.painter().rect_stroke(rect, egui::Rounding::same(6.0), border);
+        ui.painter()
+            .rect_filled(rect, egui::Rounding::same(6.0), bg);
+        ui.painter()
+            .rect_stroke(rect, egui::Rounding::same(6.0), border);
 
         // Horizontale Vorschau-Linie zeichnen
         let line_thickness = (stroke_width_mm * 2.5).clamp(1.0, 9.0);
@@ -456,7 +488,11 @@ fn stroke_preview_button(
             egui::Align2::CENTER_CENTER,
             label_text,
             egui::FontId::proportional(10.0),
-            if is_active { egui::Color32::WHITE } else { egui::Color32::from_gray(190) },
+            if is_active {
+                egui::Color32::WHITE
+            } else {
+                egui::Color32::from_gray(190)
+            },
         );
     }
 
@@ -464,34 +500,32 @@ fn stroke_preview_button(
 }
 
 /// Kompakter Strichbreiten-Preset-Button für die Haupt-Toolbar.
-fn preset_width_button(
-    ui: &mut egui::Ui,
-    is_active: bool,
-    text: &str,
-) -> egui::Response {
+fn preset_width_button(ui: &mut egui::Ui, is_active: bool, text: &str) -> egui::Response {
     let (bg, text_color, stroke) = if is_active {
         (
             egui::Color32::from_rgba_premultiplied(50, 85, 150, 230),
             egui::Color32::WHITE,
-            egui::Stroke::new(1.0_f32, egui::Color32::from_rgba_premultiplied(120, 175, 255, 190)),
+            egui::Stroke::new(
+                1.0_f32,
+                egui::Color32::from_rgba_premultiplied(120, 175, 255, 190),
+            ),
         )
     } else {
         (
             egui::Color32::from_rgba_premultiplied(255, 255, 255, 6),
             egui::Color32::from_gray(190),
-            egui::Stroke::new(1.0_f32, egui::Color32::from_rgba_premultiplied(255, 255, 255, 12)),
+            egui::Stroke::new(
+                1.0_f32,
+                egui::Color32::from_rgba_premultiplied(255, 255, 255, 12),
+            ),
         )
     };
 
-    let button = egui::Button::new(
-        egui::RichText::new(text)
-            .color(text_color)
-            .size(11.5),
-    )
-    .fill(bg)
-    .stroke(stroke)
-    .rounding(egui::Rounding::same(6.0))
-    .min_size(egui::vec2(0.0, 24.0));
+    let button = egui::Button::new(egui::RichText::new(text).color(text_color).size(11.5))
+        .fill(bg)
+        .stroke(stroke)
+        .rounding(egui::Rounding::same(6.0))
+        .min_size(egui::vec2(0.0, 24.0));
 
     ui.add(button)
 }
@@ -512,24 +546,26 @@ fn action_pill_button(
     let (bg, stroke) = if enabled {
         (
             egui::Color32::from_rgba_premultiplied(255, 255, 255, 10),
-            egui::Stroke::new(1.0_f32, egui::Color32::from_rgba_premultiplied(255, 255, 255, 22)),
+            egui::Stroke::new(
+                1.0_f32,
+                egui::Color32::from_rgba_premultiplied(255, 255, 255, 22),
+            ),
         )
     } else {
         (
             egui::Color32::from_rgba_premultiplied(255, 255, 255, 3),
-            egui::Stroke::new(1.0_f32, egui::Color32::from_rgba_premultiplied(255, 255, 255, 8)),
+            egui::Stroke::new(
+                1.0_f32,
+                egui::Color32::from_rgba_premultiplied(255, 255, 255, 8),
+            ),
         )
     };
 
-    let button = egui::Button::new(
-        egui::RichText::new(text)
-            .color(text_color)
-            .size(12.5),
-    )
-    .fill(bg)
-    .stroke(stroke)
-    .rounding(egui::Rounding::same(7.0))
-    .min_size(egui::vec2(0.0, 26.0));
+    let button = egui::Button::new(egui::RichText::new(text).color(text_color).size(12.5))
+        .fill(bg)
+        .stroke(stroke)
+        .rounding(egui::Rounding::same(7.0))
+        .min_size(egui::vec2(0.0, 26.0));
 
     ui.add_enabled(enabled, button).on_hover_text(tooltip)
 }
@@ -541,7 +577,10 @@ fn toolbar_divider(ui: &mut egui::Ui) {
     ui.painter().vline(
         rect.center().x,
         rect.y_range(),
-        egui::Stroke::new(1.0_f32, egui::Color32::from_rgba_premultiplied(255, 255, 255, 25)),
+        egui::Stroke::new(
+            1.0_f32,
+            egui::Color32::from_rgba_premultiplied(255, 255, 255, 25),
+        ),
     );
     ui.add_space(2.0);
 }
@@ -1014,14 +1053,22 @@ pub fn render_ui(
                                         .color(egui::Color32::WHITE)
                                         .size(12.5),
                                 );
-                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                    if ui
-                                        .add(egui::Button::new(egui::RichText::new("✕").size(11.0)).frame(false))
-                                        .clicked()
-                                    {
-                                        state.is_pen_menu_open = false;
-                                    }
-                                });
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        if ui
+                                            .add(
+                                                egui::Button::new(
+                                                    egui::RichText::new("✕").size(11.0),
+                                                )
+                                                .frame(false),
+                                            )
+                                            .clicked()
+                                        {
+                                            state.is_pen_menu_open = false;
+                                        }
+                                    },
+                                );
                             });
 
                             ui.add_space(8.0);
@@ -1040,7 +1087,8 @@ pub fn render_ui(
                                     let is_sel = (state.pen_color[0] - color[0]).abs() < 0.05
                                         && (state.pen_color[1] - color[1]).abs() < 0.05
                                         && (state.pen_color[2] - color[2]).abs() < 0.05;
-                                    if color_circle_swatch(ui, color, is_sel, label, 22.0).clicked() {
+                                    if color_circle_swatch(ui, color, is_sel, label, 22.0).clicked()
+                                    {
                                         state.pen_color = color;
                                         actions.push(UiAction::SetColor(color));
                                     }
@@ -1079,7 +1127,14 @@ pub fn render_ui(
                                 ui.spacing_mut().item_spacing = egui::vec2(6.0, 0.0);
                                 for (preset, label) in PEN_WIDTH_PRESETS {
                                     let is_sel = (state.pen_stroke_width_mm - preset).abs() < 0.05;
-                                    if stroke_preview_button(ui, is_sel, preset, label, state.pen_color).clicked()
+                                    if stroke_preview_button(
+                                        ui,
+                                        is_sel,
+                                        preset,
+                                        label,
+                                        state.pen_color,
+                                    )
+                                    .clicked()
                                     {
                                         state.pen_stroke_width_mm = preset;
                                         actions.push(UiAction::SetStrokeWidthMm(preset));
@@ -1145,14 +1200,22 @@ pub fn render_ui(
                                         .color(egui::Color32::WHITE)
                                         .size(12.5),
                                 );
-                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                    if ui
-                                        .add(egui::Button::new(egui::RichText::new("✕").size(11.0)).frame(false))
-                                        .clicked()
-                                    {
-                                        state.is_highlighter_menu_open = false;
-                                    }
-                                });
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        if ui
+                                            .add(
+                                                egui::Button::new(
+                                                    egui::RichText::new("✕").size(11.0),
+                                                )
+                                                .frame(false),
+                                            )
+                                            .clicked()
+                                        {
+                                            state.is_highlighter_menu_open = false;
+                                        }
+                                    },
+                                );
                             });
 
                             ui.add_space(8.0);
@@ -1168,10 +1231,12 @@ pub fn render_ui(
                             ui.horizontal(|ui| {
                                 ui.spacing_mut().item_spacing = egui::vec2(8.0, 0.0);
                                 for (color, label) in HIGHLIGHTER_COLOR_PRESETS {
-                                    let is_sel = (state.highlighter_color[0] - color[0]).abs() < 0.05
+                                    let is_sel = (state.highlighter_color[0] - color[0]).abs()
+                                        < 0.05
                                         && (state.highlighter_color[1] - color[1]).abs() < 0.05
                                         && (state.highlighter_color[2] - color[2]).abs() < 0.05;
-                                    if color_circle_swatch(ui, color, is_sel, label, 22.0).clicked() {
+                                    if color_circle_swatch(ui, color, is_sel, label, 22.0).clicked()
+                                    {
                                         state.highlighter_color = color;
                                         actions.push(UiAction::SetColor(color));
                                     }
@@ -1208,7 +1273,8 @@ pub fn render_ui(
                             ui.horizontal(|ui| {
                                 ui.spacing_mut().item_spacing = egui::vec2(6.0, 0.0);
                                 for (preset, label) in HIGHLIGHTER_WIDTH_PRESETS {
-                                    let is_sel = (state.highlighter_stroke_width_mm - preset).abs() < 0.1;
+                                    let is_sel =
+                                        (state.highlighter_stroke_width_mm - preset).abs() < 0.1;
                                     if stroke_preview_button(
                                         ui,
                                         is_sel,
@@ -1236,13 +1302,18 @@ pub fn render_ui(
                             ui.add_space(2.0);
                             if ui
                                 .add(
-                                    egui::Slider::new(&mut state.highlighter_stroke_width_mm, 2.0..=16.0)
-                                        .suffix(" mm")
-                                        .step_by(0.5),
+                                    egui::Slider::new(
+                                        &mut state.highlighter_stroke_width_mm,
+                                        2.0..=16.0,
+                                    )
+                                    .suffix(" mm")
+                                    .step_by(0.5),
                                 )
                                 .changed()
                             {
-                                actions.push(UiAction::SetStrokeWidthMm(state.highlighter_stroke_width_mm));
+                                actions.push(UiAction::SetStrokeWidthMm(
+                                    state.highlighter_stroke_width_mm,
+                                ));
                             }
                         });
 
@@ -1299,16 +1370,18 @@ pub fn render_ui(
                 );
                 ui.separator();
 
-                egui::ScrollArea::vertical().max_height(220.0).show(ui, |ui| {
-                    for idx in 0..notebook.pages.len() {
-                        let is_current = idx == notebook.current_page_index;
-                        let text = format!("Seite {}", idx + 1);
-                        if tool_pill_button(ui, is_current, &text, "").clicked() {
-                            actions.push(UiAction::GoToPage(idx));
-                            state.show_page_jump_popup = false;
+                egui::ScrollArea::vertical()
+                    .max_height(220.0)
+                    .show(ui, |ui| {
+                        for idx in 0..notebook.pages.len() {
+                            let is_current = idx == notebook.current_page_index;
+                            let text = format!("Seite {}", idx + 1);
+                            if tool_pill_button(ui, is_current, &text, "").clicked() {
+                                actions.push(UiAction::GoToPage(idx));
+                                state.show_page_jump_popup = false;
+                            }
                         }
-                    }
-                });
+                    });
 
                 ui.separator();
                 if action_pill_button(ui, true, "Schließen", "Fenster schließen").clicked() {
@@ -1471,13 +1544,13 @@ pub fn render_ui(
                                             });
 
                                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                                if state.available_notebooks.len() > 1 {
-                                                    if ui.button(egui::RichText::new("🗑").size(11.0).color(egui::Color32::from_rgb(255, 120, 120)))
+                                                if state.available_notebooks.len() > 1
+                                                    && ui
+                                                        .button(egui::RichText::new("🗑").size(11.0).color(egui::Color32::from_rgb(255, 120, 120)))
                                                         .on_hover_text("Notizbuch unwiderruflich löschen")
                                                         .clicked()
-                                                    {
-                                                        actions.push(UiAction::DeleteNotebook(summary.id.clone()));
-                                                    }
+                                                {
+                                                    actions.push(UiAction::DeleteNotebook(summary.id.clone()));
                                                 }
 
                                                 if ui.button(egui::RichText::new("✏").size(11.0))
@@ -1701,10 +1774,10 @@ pub fn render_ui(
                             }
 
                             ui.add_space(8.0);
-                            if !release.html_url.is_empty() {
-                                if ui.button(egui::RichText::new("🌐 Release auf Gitea öffnen").size(12.0)).clicked() {
-                                    actions.push(UiAction::OpenUrlInBrowser(release.html_url.clone()));
-                                }
+                            if !release.html_url.is_empty()
+                                && ui.button(egui::RichText::new("🌐 Release auf Gitea öffnen").size(12.0)).clicked()
+                            {
+                                actions.push(UiAction::OpenUrlInBrowser(release.html_url.clone()));
                             }
                         });
                     }
@@ -1810,7 +1883,12 @@ pub fn render_ui(
                 .order(egui::Order::Tooltip)
                 .show(ctx, |ui| {
                     egui::Frame::none()
-                        .fill(egui::Color32::from_rgba_unmultiplied(20, 25, 30, alpha.min(235)))
+                        .fill(egui::Color32::from_rgba_unmultiplied(
+                            20,
+                            25,
+                            30,
+                            alpha.min(235),
+                        ))
                         .rounding(egui::Rounding::same(10.0))
                         .stroke(egui::Stroke::new(
                             1.0_f32,
@@ -1826,7 +1904,9 @@ pub fn render_ui(
                         .show(ui, |ui| {
                             ui.label(
                                 egui::RichText::new(format!("✓ {}", msg))
-                                    .color(egui::Color32::from_rgba_unmultiplied(220, 255, 230, alpha))
+                                    .color(egui::Color32::from_rgba_unmultiplied(
+                                        220, 255, 230, alpha,
+                                    ))
                                     .size(13.0)
                                     .strong(),
                             );

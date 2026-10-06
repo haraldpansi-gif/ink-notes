@@ -83,7 +83,8 @@ impl HistoryStack {
                 if let Some(pos) = strokes.iter().position(|s| s.id == new.id) {
                     strokes[pos] = old.clone();
                 }
-                self.redo_stack.push(HistoryAction::ReplaceStroke { old, new });
+                self.redo_stack
+                    .push(HistoryAction::ReplaceStroke { old, new });
             }
             HistoryAction::ModifyStrokes { before, after } => {
                 for b in &before {
@@ -91,7 +92,8 @@ impl HistoryStack {
                         strokes[pos] = b.clone();
                     }
                 }
-                self.redo_stack.push(HistoryAction::ModifyStrokes { before, after });
+                self.redo_stack
+                    .push(HistoryAction::ModifyStrokes { before, after });
             }
         }
 
@@ -126,7 +128,8 @@ impl HistoryStack {
                 if let Some(pos) = strokes.iter().position(|s| s.id == old.id) {
                     strokes[pos] = new.clone();
                 }
-                self.undo_stack.push(HistoryAction::ReplaceStroke { old, new });
+                self.undo_stack
+                    .push(HistoryAction::ReplaceStroke { old, new });
             }
             HistoryAction::ModifyStrokes { before, after } => {
                 for a in &after {
@@ -134,7 +137,8 @@ impl HistoryStack {
                         strokes[pos] = a.clone();
                     }
                 }
-                self.undo_stack.push(HistoryAction::ModifyStrokes { before, after });
+                self.undo_stack
+                    .push(HistoryAction::ModifyStrokes { before, after });
             }
         }
 

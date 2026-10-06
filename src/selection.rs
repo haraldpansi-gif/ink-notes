@@ -2,8 +2,8 @@
 //!
 //! Stellt transaktionale Manipulationen für einzelne oder mehrere Striche und geometrische Formen bereit.
 
-use std::f32::consts::FRAC_PI_2;
 use glam::Vec2;
+use std::f32::consts::FRAC_PI_2;
 
 use crate::canvas::CanvasState;
 use crate::document::{Aabb, Page, Stroke};
@@ -144,16 +144,16 @@ impl SelectionState {
 
         // 2. 4 Eck-Skalierungsgriffe testen
         let corners_page = [
-            aabb.min,                              // 0: oben-links
-            Vec2::new(aabb.max.x, aabb.min.y),     // 1: oben-rechts
-            aabb.max,                              // 2: unten-rechts
-            Vec2::new(aabb.min.x, aabb.max.y),     // 3: unten-links
+            aabb.min,                          // 0: oben-links
+            Vec2::new(aabb.max.x, aabb.min.y), // 1: oben-rechts
+            aabb.max,                          // 2: unten-rechts
+            Vec2::new(aabb.min.x, aabb.max.y), // 3: unten-links
         ];
         let fixed_corners_page = [
-            aabb.max,                              // gegenüber 0 -> unten-rechts
-            Vec2::new(aabb.min.x, aabb.max.y),     // gegenüber 1 -> unten-links
-            aabb.min,                              // gegenüber 2 -> oben-links
-            Vec2::new(aabb.max.x, aabb.min.y),     // gegenüber 3 -> oben-rechts
+            aabb.max,                          // gegenüber 0 -> unten-rechts
+            Vec2::new(aabb.min.x, aabb.max.y), // gegenüber 1 -> unten-links
+            aabb.min,                          // gegenüber 2 -> oben-links
+            Vec2::new(aabb.max.x, aabb.min.y), // gegenüber 3 -> oben-rechts
         ];
 
         let corners_screen = [
@@ -285,7 +285,11 @@ pub fn render_selection_overlay(
     ));
 
     // 1. Wenn aktuell ein Auswahlrahmen gezogen wird (Marquee Box)
-    if let DragMode::BoxSelect { start_page, current_page } = selection.drag_mode {
+    if let DragMode::BoxSelect {
+        start_page,
+        current_page,
+    } = selection.drag_mode
+    {
         let p1 = canvas.page_to_screen(start_page);
         let p2 = canvas.page_to_screen(current_page);
         let min_x = p1[0].min(p2[0]);
@@ -304,7 +308,10 @@ pub fn render_selection_overlay(
         painter.rect_stroke(
             rect,
             egui::Rounding::same(4.0_f32),
-            egui::Stroke::new(1.5_f32, egui::Color32::from_rgba_premultiplied(80, 160, 255, 220)),
+            egui::Stroke::new(
+                1.5_f32,
+                egui::Color32::from_rgba_premultiplied(80, 160, 255, 220),
+            ),
         );
         return;
     }
@@ -357,7 +364,11 @@ pub fn render_selection_overlay(
 
     for c in corners {
         let handle_rect = egui::Rect::from_center_size(c, egui::vec2(handle_size, handle_size));
-        painter.rect_filled(handle_rect, egui::Rounding::same(1.5_f32), egui::Color32::WHITE);
+        painter.rect_filled(
+            handle_rect,
+            egui::Rounding::same(1.5_f32),
+            egui::Color32::WHITE,
+        );
         painter.rect_stroke(
             handle_rect,
             egui::Rounding::same(1.5_f32),
@@ -369,7 +380,11 @@ pub fn render_selection_overlay(
     let badge_text = format!(
         "{} {} | [R] Drehen [Entf] Löschen",
         selection.count(),
-        if selection.count() == 1 { "Objekt" } else { "Objekte" }
+        if selection.count() == 1 {
+            "Objekt"
+        } else {
+            "Objekte"
+        }
     );
     let badge_pos = egui::pos2(rect.center().x, rect.max.y + 16.0);
     painter.text(
@@ -459,7 +474,9 @@ mod tests {
         let orig_pos = page.strokes[0].points[0].position;
         assert!(sel.rotate_selected_90_deg(&mut page));
         let rotated_pos = page.strokes[0].points[0].position;
-        assert!((orig_pos.x - rotated_pos.x).abs() > 0.1 || (orig_pos.y - rotated_pos.y).abs() > 0.1);
+        assert!(
+            (orig_pos.x - rotated_pos.x).abs() > 0.1 || (orig_pos.y - rotated_pos.y).abs() > 0.1
+        );
 
         // Undo rotate
         assert!(page.undo());

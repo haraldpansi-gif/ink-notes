@@ -4,7 +4,9 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use winit::{
-    event::{ElementState, Event, KeyEvent, MouseButton, MouseScrollDelta, TouchPhase, WindowEvent},
+    event::{
+        ElementState, Event, KeyEvent, MouseButton, MouseScrollDelta, TouchPhase, WindowEvent,
+    },
     event_loop::{ControlFlow, EventLoop},
     keyboard::{Key, ModifiersState, NamedKey},
     window::{Window, WindowBuilder},
@@ -16,7 +18,9 @@ use ink_notes::canvas::CanvasState;
 use ink_notes::document::{Notebook, PageBackground};
 use ink_notes::export::{export_notebook_to_pdf, ExportStrategy};
 use ink_notes::geometry::{self, RecognizedShape};
-use ink_notes::selection::{render_selection_overlay, DragMode, SelectionHandleHit, SelectionState};
+use ink_notes::selection::{
+    render_selection_overlay, DragMode, SelectionHandleHit, SelectionState,
+};
 use ink_notes::storage::{self, NotebookManifest};
 use ink_notes::ui::{self, ActiveTool, UiAction, UiState};
 use ink_notes::updater::UpdaterController;
@@ -76,12 +80,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Ok((nb, m)) => (nb, m),
             Err(err) => {
                 eprintln!("[Storage-Fehler] Konnte Notizbuch nicht laden ({err}). Erstelle neues Notizbuch.");
-                (Notebook::new(), NotebookManifest::new(&initial_id, &initial_title))
+                (
+                    Notebook::new(),
+                    NotebookManifest::new(&initial_id, &initial_title),
+                )
             }
         }
     } else {
-        println!("[Storage] Erstelle neues Notizbuch in: {}", storage_dir.display());
-        (Notebook::new(), NotebookManifest::new(&initial_id, &initial_title))
+        println!(
+            "[Storage] Erstelle neues Notizbuch in: {}",
+            storage_dir.display()
+        );
+        (
+            Notebook::new(),
+            NotebookManifest::new(&initial_id, &initial_title),
+        )
     };
 
     // 2. Asynchronen Autosave-Controller mit 1.5s Debounce starten
@@ -139,7 +152,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let eraser_radius = 30.0_f32; // 3 mm in DIN-A4-Einheiten
     let stroke_max_radius = 12.0_f32;
 
-    update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
+    update_window_title(
+        &window,
+        &notebook,
+        &manifest,
+        ui_state.active_tool,
+        autosave.status(),
+    );
 
     println!("=== ink-notes (Multi-Color & Objektauswahl/Transformation) bereit ===");
     println!("Toolbar:");

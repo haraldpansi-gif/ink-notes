@@ -11,9 +11,7 @@ use std::sync::Arc;
 use winit::dpi::PhysicalSize;
 use winit::window::Window;
 
-use crate::background::{
-    generate_background_mesh, generate_paper_quad, DESK_COLOR,
-};
+use crate::background::{generate_background_mesh, generate_paper_quad, DESK_COLOR};
 use crate::document::{Page, PageBackground, PageViewport, Stroke, StylusSample};
 use crate::filter::OneEuroFilter;
 use crate::spline::{self, ControlPoint, SplineConfig};
@@ -143,7 +141,8 @@ impl CanvasState {
     /// Initialisiert den CanvasState für das übergebene Winit-Fenster.
     pub async fn new(window: Arc<Window>) -> Result<Self, Box<dyn std::error::Error>> {
         let size = window.inner_size();
-        let viewport = PageViewport::calculate(size.width as f32, size.height as f32, Self::VIEWPORT_MARGIN);
+        let viewport =
+            PageViewport::calculate(size.width as f32, size.height as f32, Self::VIEWPORT_MARGIN);
 
         // 1. WGPU Instance & Surface
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
@@ -187,7 +186,10 @@ impl CanvasState {
         let present_mode = if std::env::var("INK_FORCE_FIFO").is_ok() {
             eprintln!("Erzwinge PresentMode::Fifo (via INK_FORCE_FIFO)");
             wgpu::PresentMode::Fifo
-        } else if surface_caps.present_modes.contains(&wgpu::PresentMode::Mailbox) {
+        } else if surface_caps
+            .present_modes
+            .contains(&wgpu::PresentMode::Mailbox)
+        {
             eprintln!("Verwende Zero-Latency PresentMode::Mailbox");
             wgpu::PresentMode::Mailbox
         } else {
@@ -358,12 +360,7 @@ impl CanvasState {
         });
 
         // 8. egui Renderer für das schwebende UI initialisieren
-        let egui_renderer = egui_wgpu::Renderer::new(
-            &device,
-            config.format,
-            None,
-            1,
-        );
+        let egui_renderer = egui_wgpu::Renderer::new(&device, config.format, None, 1);
 
         Ok(Self {
             surface,
@@ -410,7 +407,11 @@ impl CanvasState {
             transform_scale: scale,
             transform_offset: offset,
         };
-        self.queue.write_buffer(&self.camera_buffer, 0, bytemuck::cast_slice(&[camera_uniforms]));
+        self.queue.write_buffer(
+            &self.camera_buffer,
+            0,
+            bytemuck::cast_slice(&[camera_uniforms]),
+        );
     }
 
     /// Passt die Surface und Projektionsmatrizen an eine neue Fenstergröße an.
@@ -433,13 +434,15 @@ impl CanvasState {
 
     /// Verschiebt den Bildausschnitt um Bildschirm-Pixel delta.
     pub fn pan(&mut self, delta_x: f32, delta_y: f32) {
-        self.camera.pan_by_screen_delta(delta_x, delta_y, &self.viewport);
+        self.camera
+            .pan_by_screen_delta(delta_x, delta_y, &self.viewport);
         self.update_uniforms();
     }
 
     /// Zoomt zentriert auf eine Cursor-Bildschirmposition.
     pub fn zoom_at(&mut self, cursor_x: f32, cursor_y: f32, factor: f32) {
-        self.camera.zoom_at_cursor([cursor_x, cursor_y], factor, &self.viewport);
+        self.camera
+            .zoom_at_cursor([cursor_x, cursor_y], factor, &self.viewport);
         self.update_uniforms();
     }
 
@@ -451,12 +454,14 @@ impl CanvasState {
 
     /// Transformiert Fenster-Pixel in Seitenkoordinaten.
     pub fn screen_to_page(&self, screen_x: f32, screen_y: f32) -> Option<glam::Vec2> {
-        self.camera.screen_to_page(screen_x, screen_y, &self.viewport)
+        self.camera
+            .screen_to_page(screen_x, screen_y, &self.viewport)
     }
 
     /// Transformiert Fenster-Pixel in Seitenkoordinaten und klemmt auf die Seite.
     pub fn screen_to_page_clamped(&self, screen_x: f32, screen_y: f32) -> glam::Vec2 {
-        self.camera.screen_to_page_clamped(screen_x, screen_y, &self.viewport)
+        self.camera
+            .screen_to_page_clamped(screen_x, screen_y, &self.viewport)
     }
 
     /// Transformiert einen Punkt aus DIN-A4-Seitenkoordinaten in Fenster-Bildschirmkoordinaten.
@@ -471,7 +476,8 @@ impl CanvasState {
         self.live_vertex_count = self.live_vertices.len() as u32;
 
         if self.live_vertices.len() > self.live_vertex_capacity {
-            self.live_vertex_capacity = (self.live_vertices.len() * 2).max(Self::INITIAL_LIVE_CAPACITY);
+            self.live_vertex_capacity =
+                (self.live_vertices.len() * 2).max(Self::INITIAL_LIVE_CAPACITY);
             self.live_vertex_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("Live Stroke Vertex Buffer (Reallocated)"),
                 size: (self.live_vertex_capacity * std::mem::size_of::<InkVertex>()) as u64,
@@ -522,7 +528,8 @@ impl CanvasState {
         }
 
         if !mesh.is_empty() {
-            self.queue.write_buffer(&self.background_buffer, 0, bytemuck::cast_slice(&mesh));
+            self.queue
+                .write_buffer(&self.background_buffer, 0, bytemuck::cast_slice(&mesh));
         }
     }
 
@@ -539,7 +546,8 @@ impl CanvasState {
         }
 
         if page.vertex_cache.len() > self.committed_vertex_capacity {
-            self.committed_vertex_capacity = (page.vertex_cache.len() * 2).max(Self::INITIAL_COMMITTED_CAPACITY);
+            self.committed_vertex_capacity =
+                (page.vertex_cache.len() * 2).max(Self::INITIAL_COMMITTED_CAPACITY);
             self.committed_vertex_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("Committed Strokes Vertex Buffer (Reallocated)"),
                 size: (self.committed_vertex_capacity * std::mem::size_of::<InkVertex>()) as u64,
@@ -655,7 +663,8 @@ impl CanvasState {
         }
 
         let color = self.current_ink_color;
-        let raw_strip = spline::generate_triangle_strip(&self.live_control_points, &self.spline_config);
+        let raw_strip =
+            spline::generate_triangle_strip(&self.live_control_points, &self.spline_config);
         self.live_vertices = raw_strip
             .into_iter()
             .map(|v| InkVertex::new(v.position[0], v.position[1], color))
@@ -667,7 +676,8 @@ impl CanvasState {
         }
 
         if self.live_vertices.len() > self.live_vertex_capacity {
-            self.live_vertex_capacity = (self.live_vertices.len() * 2).max(Self::INITIAL_LIVE_CAPACITY);
+            self.live_vertex_capacity =
+                (self.live_vertices.len() * 2).max(Self::INITIAL_LIVE_CAPACITY);
             self.live_vertex_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("Live Stroke Vertex Buffer (Reallocated)"),
                 size: (self.live_vertex_capacity * std::mem::size_of::<InkVertex>()) as u64,
@@ -694,7 +704,8 @@ impl CanvasState {
     ) -> Result<(), wgpu::SurfaceError> {
         // Vor dem Renderpass: egui-Texturen aktualisieren
         for (id, image_delta) in &textures_delta.set {
-            self.egui_renderer.update_texture(&self.device, &self.queue, *id, image_delta);
+            self.egui_renderer
+                .update_texture(&self.device, &self.queue, *id, image_delta);
         }
 
         let output = self.surface.get_current_texture()?;
@@ -784,7 +795,8 @@ impl CanvasState {
                 occlusion_query_set: None,
             });
 
-            self.egui_renderer.render(&mut egui_pass, clipped_primitives, screen_descriptor);
+            self.egui_renderer
+                .render(&mut egui_pass, clipped_primitives, screen_descriptor);
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));

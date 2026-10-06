@@ -3,9 +3,9 @@
 //! Erkennt Geraden, Rechtecke, Kreise und Koordinatensysteme (Achsen)
 //! und erzeugt saubere Vektor-Primitiven und GPU-Triangle-Meshes.
 
-use std::f32::consts::PI;
 use glam::Vec2;
 use serde::{Deserialize, Serialize};
+use std::f32::consts::PI;
 
 use crate::canvas::InkVertex;
 use crate::document::{Aabb, Stroke, StylusSample};
@@ -117,7 +117,12 @@ impl RecognizedShape {
                     *c += delta;
                 }
             }
-            Self::CoordinateSystem { origin, x_axis_end, y_axis_end, .. } => {
+            Self::CoordinateSystem {
+                origin,
+                x_axis_end,
+                y_axis_end,
+                ..
+            } => {
                 *origin += delta;
                 *x_axis_end += delta;
                 *y_axis_end += delta;
@@ -159,7 +164,12 @@ impl RecognizedShape {
                     *c = rot(*c);
                 }
             }
-            Self::CoordinateSystem { origin: o, x_axis_end, y_axis_end, .. } => {
+            Self::CoordinateSystem {
+                origin: o,
+                x_axis_end,
+                y_axis_end,
+                ..
+            } => {
                 *o = rot(*o);
                 *x_axis_end = rot(*x_axis_end);
                 *y_axis_end = rot(*y_axis_end);
@@ -177,9 +187,7 @@ impl RecognizedShape {
 
     /// Skaliert die geometrische Form bezüglich `origin` um den Faktor `factors`.
     pub fn scale(&mut self, origin: Vec2, factors: Vec2) {
-        let sc = |pt: Vec2| -> Vec2 {
-            origin + (pt - origin) * factors
-        };
+        let sc = |pt: Vec2| -> Vec2 { origin + (pt - origin) * factors };
 
         match self {
             Self::Line { start, end } => {
@@ -200,7 +208,12 @@ impl RecognizedShape {
                     *c = sc(*c);
                 }
             }
-            Self::CoordinateSystem { origin: o, x_axis_end, y_axis_end, .. } => {
+            Self::CoordinateSystem {
+                origin: o,
+                x_axis_end,
+                y_axis_end,
+                ..
+            } => {
                 *o = sc(*o);
                 *x_axis_end = sc(*x_axis_end);
                 *y_axis_end = sc(*y_axis_end);
@@ -210,7 +223,12 @@ impl RecognizedShape {
                     *v = sc(*v);
                 }
             }
-            Self::Octahedron { center, radius_x, radius_y, depth } => {
+            Self::Octahedron {
+                center,
+                radius_x,
+                radius_y,
+                depth,
+            } => {
                 *center = sc(*center);
                 *radius_x *= factors.x.abs();
                 *radius_y *= factors.y.abs();
@@ -415,18 +433,17 @@ pub fn detect_rectangle(points: &[Vec2]) -> Option<RecognizedShape> {
     let epsilon = (total_len * 0.05).clamp(8.0, 45.0);
     let simplified = ramer_douglas_peucker(points, epsilon);
 
-    let corners: Vec<Vec2> = if simplified.len() == 5
-        && (simplified[0] - simplified[4]).length() < epsilon * 2.5
-    {
-        simplified[0..4].to_vec()
-    } else if simplified.len() == 4 {
-        simplified
-    } else if simplified.len() > 4 {
-        // Suche die 4 markantesten Ecken (stärkste Richtungsänderung)
-        extract_k_corners(&simplified, 4)?
-    } else {
-        return None;
-    };
+    let corners: Vec<Vec2> =
+        if simplified.len() == 5 && (simplified[0] - simplified[4]).length() < epsilon * 2.5 {
+            simplified[0..4].to_vec()
+        } else if simplified.len() == 4 {
+            simplified
+        } else if simplified.len() > 4 {
+            // Suche die 4 markantesten Ecken (stärkste Richtungsänderung)
+            extract_k_corners(&simplified, 4)?
+        } else {
+            return None;
+        };
 
     if corners.len() != 4 {
         return None;
@@ -535,7 +552,12 @@ pub fn extract_k_corners(points: &[Vec2], k: usize) -> Option<Vec<Vec2>> {
     let mut selected_indices: Vec<usize> = scored.iter().take(k).map(|&(idx, _)| idx).collect();
     selected_indices.sort_unstable();
 
-    Some(selected_indices.into_iter().map(|idx| points[idx]).collect())
+    Some(
+        selected_indices
+            .into_iter()
+            .map(|idx| points[idx])
+            .collect(),
+    )
 }
 
 /// 4. Dreieck-Erkennung: Geschlossener Pfad mit 3 dominanten Ecken.
@@ -561,7 +583,8 @@ pub fn detect_triangle(points: &[Vec2]) -> Option<RecognizedShape> {
     let epsilon = (total_len * 0.07).clamp(8.0, 50.0);
     let simplified = ramer_douglas_peucker(points, epsilon);
 
-    let corners: Vec<Vec2> = if (simplified.len() == 4 && (simplified[0] - simplified[3]).length() < epsilon * 2.5)
+    let corners: Vec<Vec2> = if (simplified.len() == 4
+        && (simplified[0] - simplified[3]).length() < epsilon * 2.5)
         || simplified.len() == 3
     {
         simplified[0..3].to_vec()
@@ -617,9 +640,19 @@ pub fn detect_triangle(points: &[Vec2]) -> Option<RecognizedShape> {
         let snapped_angle = snap_angle(base_angle, 15.0);
 
         let c0 = center + Vec2::new(snapped_angle.cos(), snapped_angle.sin()) * r;
-        let c1 = center + Vec2::new((snapped_angle + 2.0 * PI / 3.0).cos(), (snapped_angle + 2.0 * PI / 3.0).sin()) * r;
-        let c2 = center + Vec2::new((snapped_angle + 4.0 * PI / 3.0).cos(), (snapped_angle + 4.0 * PI / 3.0).sin()) * r;
-        return Some(RecognizedShape::Triangle { corners: [c0, c1, c2] });
+        let c1 = center
+            + Vec2::new(
+                (snapped_angle + 2.0 * PI / 3.0).cos(),
+                (snapped_angle + 2.0 * PI / 3.0).sin(),
+            ) * r;
+        let c2 = center
+            + Vec2::new(
+                (snapped_angle + 4.0 * PI / 3.0).cos(),
+                (snapped_angle + 4.0 * PI / 3.0).sin(),
+            ) * r;
+        return Some(RecognizedShape::Triangle {
+            corners: [c0, c1, c2],
+        });
     }
 
     // 2. Rechtwinklig? (Ein Winkel nahe 90°)
@@ -639,7 +672,11 @@ pub fn detect_triangle(points: &[Vec2]) -> Option<RecognizedShape> {
         let len2 = v2.length();
 
         v1 = Vec2::new(a1_snapped.cos(), a1_snapped.sin()) * len1;
-        let sign = if (v1.x * v2.y - v1.y * v2.x) >= 0.0 { 1.0 } else { -1.0 };
+        let sign = if (v1.x * v2.y - v1.y * v2.x) >= 0.0 {
+            1.0
+        } else {
+            -1.0
+        };
         v2 = Vec2::new(-v1.y * sign, v1.x * sign).normalize_or_zero() * len2;
 
         let new_p1 = corner_v + v1;
@@ -667,7 +704,9 @@ pub fn detect_triangle(points: &[Vec2]) -> Option<RecognizedShape> {
         let half_base = ((a - mid_ac).length() + (c - mid_ac).length()) * 0.5;
         let new_a = mid_ac + perp * half_base;
         c = mid_ac - perp * half_base;
-        return Some(RecognizedShape::Triangle { corners: [new_a, b, c] });
+        return Some(RecognizedShape::Triangle {
+            corners: [new_a, b, c],
+        });
     } else if (l_bc - l_ca).abs() / l_bc.max(l_ca) < 0.12 {
         let mid_ab = (a + b) * 0.5;
         let axis = (c - mid_ab).normalize_or_zero();
@@ -675,7 +714,9 @@ pub fn detect_triangle(points: &[Vec2]) -> Option<RecognizedShape> {
         let half_base = ((a - mid_ab).length() + (b - mid_ab).length()) * 0.5;
         let new_a = mid_ab + perp * half_base;
         b = mid_ab - perp * half_base;
-        return Some(RecognizedShape::Triangle { corners: [new_a, b, c] });
+        return Some(RecognizedShape::Triangle {
+            corners: [new_a, b, c],
+        });
     }
 
     Some(RecognizedShape::Triangle { corners: [a, b, c] })
@@ -701,15 +742,16 @@ pub fn detect_rhombus(points: &[Vec2]) -> Option<RecognizedShape> {
     let epsilon = (total_len * 0.05).clamp(8.0, 45.0);
     let simplified = ramer_douglas_peucker(points, epsilon);
 
-    let corners: Vec<Vec2> = if simplified.len() == 5 && (simplified[0] - simplified[4]).length() < epsilon * 2.5 {
-        simplified[0..4].to_vec()
-    } else if simplified.len() == 4 {
-        simplified
-    } else if simplified.len() > 4 {
-        extract_k_corners(&simplified, 4)?
-    } else {
-        return None;
-    };
+    let corners: Vec<Vec2> =
+        if simplified.len() == 5 && (simplified[0] - simplified[4]).length() < epsilon * 2.5 {
+            simplified[0..4].to_vec()
+        } else if simplified.len() == 4 {
+            simplified
+        } else if simplified.len() > 4 {
+            extract_k_corners(&simplified, 4)?
+        } else {
+            return None;
+        };
 
     if corners.len() != 4 {
         return None;
@@ -756,7 +798,11 @@ pub fn detect_rhombus(points: &[Vec2]) -> Option<RecognizedShape> {
     let snapped_a1 = snap_angle(angle1, 15.0);
     dir1 = Vec2::new(snapped_a1.cos(), snapped_a1.sin());
 
-    let sign = if (dir1.x * d2.y - dir1.y * d2.x) >= 0.0 { 1.0 } else { -1.0 };
+    let sign = if (dir1.x * d2.y - dir1.y * d2.x) >= 0.0 {
+        1.0
+    } else {
+        -1.0
+    };
     let dir2 = Vec2::new(-dir1.y * sign, dir1.x * sign);
 
     let h1 = len1 * 0.5;
@@ -806,7 +852,10 @@ pub fn detect_polygon(points: &[Vec2]) -> Option<RecognizedShape> {
         return None;
     }
 
-    let max_r_diff = radii.iter().map(|r| (r - mean_r).abs()).fold(0.0f32, f32::max);
+    let max_r_diff = radii
+        .iter()
+        .map(|r| (r - mean_r).abs())
+        .fold(0.0f32, f32::max);
 
     let snapped_vertices = if max_r_diff / mean_r < 0.25 {
         let base_dir = (corners[0] - center).normalize_or_zero();
@@ -830,7 +879,9 @@ pub fn detect_polygon(points: &[Vec2]) -> Option<RecognizedShape> {
 
 fn ramer_douucker_closed(points: &[Vec2], epsilon: f32) -> Vec<Vec2> {
     let simplified = ramer_douglas_peucker(points, epsilon);
-    if simplified.len() >= 2 && (simplified[0] - *simplified.last().unwrap()).length() < epsilon * 2.0 {
+    if simplified.len() >= 2
+        && (simplified[0] - *simplified.last().unwrap()).length() < epsilon * 2.0
+    {
         simplified[0..simplified.len() - 1].to_vec()
     } else {
         simplified
@@ -1043,8 +1094,16 @@ pub fn closed_polygon_to_mesh(
         let n_next = Vec2::new(-d_next.y, d_next.x);
         let corner_norm = (n_prev + n_next).normalize_or_zero() * half_w;
 
-        vertices.push(InkVertex::new(curr.x + corner_norm.x, curr.y + corner_norm.y, color));
-        vertices.push(InkVertex::new(curr.x - corner_norm.x, curr.y - corner_norm.y, color));
+        vertices.push(InkVertex::new(
+            curr.x + corner_norm.x,
+            curr.y + corner_norm.y,
+            color,
+        ));
+        vertices.push(InkVertex::new(
+            curr.x - corner_norm.x,
+            curr.y - corner_norm.y,
+            color,
+        ));
 
         let edge_len = (next - curr).length();
         let steps = ((edge_len / 10.0).ceil() as usize).max(2);
@@ -1069,7 +1128,12 @@ pub fn closed_polygon_to_mesh(
 }
 
 /// Berechnet die 12 Kanten der 3D-Schrägbild-Projektion eines Oktaeders (Doppelpyramide).
-pub fn octahedron_edges(center: Vec2, radius_x: f32, radius_y: f32, depth: f32) -> Vec<(Vec2, Vec2)> {
+pub fn octahedron_edges(
+    center: Vec2,
+    radius_x: f32,
+    radius_y: f32,
+    depth: f32,
+) -> Vec<(Vec2, Vec2)> {
     let top = center + Vec2::new(0.0, -radius_y);
     let bottom = center + Vec2::new(0.0, radius_y);
     let left = center + Vec2::new(-radius_x, 0.0);
@@ -1143,8 +1207,16 @@ pub fn shape_to_mesh(
                 let angle = (i as f32 / segments as f32) * 2.0 * PI;
                 let (sin, cos) = angle.sin_cos();
 
-                vertices.push(InkVertex::new(center.x + cos * r_out, center.y + sin * r_out, color));
-                vertices.push(InkVertex::new(center.x + cos * r_in, center.y + sin * r_in, color));
+                vertices.push(InkVertex::new(
+                    center.x + cos * r_out,
+                    center.y + sin * r_out,
+                    color,
+                ));
+                vertices.push(InkVertex::new(
+                    center.x + cos * r_in,
+                    center.y + sin * r_in,
+                    color,
+                ));
 
                 if i < segments {
                     samples.push(StylusSample {
@@ -1158,23 +1230,20 @@ pub fn shape_to_mesh(
             (samples, vertices)
         }
 
-        RecognizedShape::Rectangle { corners } => {
-            closed_polygon_to_mesh(corners, half_w, color)
-        }
+        RecognizedShape::Rectangle { corners } => closed_polygon_to_mesh(corners, half_w, color),
 
-        RecognizedShape::Triangle { corners } => {
-            closed_polygon_to_mesh(corners, half_w, color)
-        }
+        RecognizedShape::Triangle { corners } => closed_polygon_to_mesh(corners, half_w, color),
 
-        RecognizedShape::Rhombus { corners } => {
-            closed_polygon_to_mesh(corners, half_w, color)
-        }
+        RecognizedShape::Rhombus { corners } => closed_polygon_to_mesh(corners, half_w, color),
 
-        RecognizedShape::Polygon { vertices } => {
-            closed_polygon_to_mesh(vertices, half_w, color)
-        }
+        RecognizedShape::Polygon { vertices } => closed_polygon_to_mesh(vertices, half_w, color),
 
-        RecognizedShape::Octahedron { center, radius_x, radius_y, depth } => {
+        RecognizedShape::Octahedron {
+            center,
+            radius_x,
+            radius_y,
+            depth,
+        } => {
             let edges = octahedron_edges(*center, *radius_x, *radius_y, *depth);
             let mut vertices = Vec::new();
             let mut samples = Vec::new();
@@ -1228,10 +1297,26 @@ pub fn shape_to_mesh(
             let y_norm = Vec2::new(-y_dir.y, y_dir.x) * half_w;
 
             // Y-Linienband
-            vertices.push(InkVertex::new(origin.x + y_norm.x, origin.y + y_norm.y, color));
-            vertices.push(InkVertex::new(origin.x - y_norm.x, origin.y - y_norm.y, color));
-            vertices.push(InkVertex::new(y_axis_end.x + y_norm.x, y_axis_end.y + y_norm.y, color));
-            vertices.push(InkVertex::new(y_axis_end.x - y_norm.x, y_axis_end.y - y_norm.y, color));
+            vertices.push(InkVertex::new(
+                origin.x + y_norm.x,
+                origin.y + y_norm.y,
+                color,
+            ));
+            vertices.push(InkVertex::new(
+                origin.x - y_norm.x,
+                origin.y - y_norm.y,
+                color,
+            ));
+            vertices.push(InkVertex::new(
+                y_axis_end.x + y_norm.x,
+                y_axis_end.y + y_norm.y,
+                color,
+            ));
+            vertices.push(InkVertex::new(
+                y_axis_end.x - y_norm.x,
+                y_axis_end.y - y_norm.y,
+                color,
+            ));
 
             // Degenerate Dreiecke für Übergang zur X-Achse
             let x_dir = (*x_axis_end - *origin).normalize_or_zero();
@@ -1244,9 +1329,21 @@ pub fn shape_to_mesh(
 
             // 2. X-Linienband
             vertices.push(next_v);
-            vertices.push(InkVertex::new(origin.x - x_norm.x, origin.y - x_norm.y, color));
-            vertices.push(InkVertex::new(x_axis_end.x + x_norm.x, x_axis_end.y + x_norm.y, color));
-            vertices.push(InkVertex::new(x_axis_end.x - x_norm.x, x_axis_end.y - x_norm.y, color));
+            vertices.push(InkVertex::new(
+                origin.x - x_norm.x,
+                origin.y - x_norm.y,
+                color,
+            ));
+            vertices.push(InkVertex::new(
+                x_axis_end.x + x_norm.x,
+                x_axis_end.y + x_norm.y,
+                color,
+            ));
+            vertices.push(InkVertex::new(
+                x_axis_end.x - x_norm.x,
+                x_axis_end.y - x_norm.y,
+                color,
+            ));
 
             // 3. Optionale Pfeilspitzen
             if *with_arrows {
@@ -1328,7 +1425,10 @@ mod tests {
         for i in 0..=50 {
             let t = i as f32 / 50.0;
             let jitter = (i as f32 * 0.7).sin() * 1.5;
-            points.push(Vec2::new(100.0 + t * 400.0 + jitter, 100.0 + t * 300.0 - jitter));
+            points.push(Vec2::new(
+                100.0 + t * 400.0 + jitter,
+                100.0 + t * 300.0 - jitter,
+            ));
         }
 
         let detected = detect_line(&points);
@@ -1380,7 +1480,12 @@ mod tests {
                 let v1 = (prev - curr).normalize();
                 let v2 = (next - curr).normalize();
                 let dot = v1.dot(v2).abs();
-                assert!(dot < 1e-4, "Winkel an Ecke {} ist nicht rechtwinklig: dot={}", i, dot);
+                assert!(
+                    dot < 1e-4,
+                    "Winkel an Ecke {} ist nicht rechtwinklig: dot={}",
+                    i,
+                    dot
+                );
             }
         } else {
             panic!("Falscher Formtyp erkannt");
@@ -1402,7 +1507,11 @@ mod tests {
         let detected = detect_circle(&points);
         assert!(detected.is_some(), "Kreis sollte erkannt werden");
 
-        if let Some(RecognizedShape::Circle { center: c, radius: r }) = detected {
+        if let Some(RecognizedShape::Circle {
+            center: c,
+            radius: r,
+        }) = detected
+        {
             assert!((c - center).length() < 5.0, "Zentrum weicht ab: {:?}", c);
             assert!((r - 54.0).abs() < 5.0, "Radius weicht ab: {}", r);
         } else {
@@ -1431,14 +1540,27 @@ mod tests {
         }
 
         let detected = detect_coordinate_system(&points);
-        assert!(detected.is_some(), "Koordinatensystem sollte erkannt werden");
+        assert!(
+            detected.is_some(),
+            "Koordinatensystem sollte erkannt werden"
+        );
 
-        if let Some(RecognizedShape::CoordinateSystem { origin: o, x_axis_end, y_axis_end, .. }) = detected {
+        if let Some(RecognizedShape::CoordinateSystem {
+            origin: o,
+            x_axis_end,
+            y_axis_end,
+            ..
+        }) = detected
+        {
             assert!((o - origin).length() < 2.0, "Ursprung weicht ab");
             let v_x = (x_axis_end - o).normalize();
             let v_y = (y_axis_end - o).normalize();
             let dot = v_x.dot(v_y).abs();
-            assert!(dot < 1e-4, "Achsen sind nach Orthogonalitäts-Snap nicht exakt 90°: dot={}", dot);
+            assert!(
+                dot < 1e-4,
+                "Achsen sind nach Orthogonalitäts-Snap nicht exakt 90°: dot={}",
+                dot
+            );
         } else {
             panic!("Falscher Formtyp erkannt");
         }
@@ -1476,7 +1598,10 @@ mod tests {
             let ab = (corners[1] - corners[0]).length();
             let bc = (corners[2] - corners[1]).length();
             let ca = (corners[0] - corners[2]).length();
-            assert!((ab - bc).abs() < 5.0, "Gleichseitiges Dreieck sollte gesnappt sein");
+            assert!(
+                (ab - bc).abs() < 5.0,
+                "Gleichseitiges Dreieck sollte gesnappt sein"
+            );
             assert!((bc - ca).abs() < 5.0);
         } else {
             panic!("Falscher Formtyp erkannt");
@@ -1490,7 +1615,7 @@ mod tests {
         let c0 = Vec2::new(200.0, 100.0); // Oben
         let c1 = Vec2::new(320.0, 250.0); // Rechts
         let c2 = Vec2::new(200.0, 400.0); // Unten
-        let c3 = Vec2::new(80.0, 250.0);  // Links
+        let c3 = Vec2::new(80.0, 250.0); // Links
 
         for i in 0..20 {
             let t = i as f32 / 20.0;
@@ -1520,7 +1645,10 @@ mod tests {
             let l1 = (corners[2] - corners[1]).length();
             let l2 = (corners[3] - corners[2]).length();
             let l3 = (corners[0] - corners[3]).length();
-            assert!((l0 - l1).abs() < 1e-3, "Alle 4 Seiten einer Raute müssen exakt gleich lang sein");
+            assert!(
+                (l0 - l1).abs() < 1e-3,
+                "Alle 4 Seiten einer Raute müssen exakt gleich lang sein"
+            );
             assert!((l1 - l2).abs() < 1e-3);
             assert!((l2 - l3).abs() < 1e-3);
         } else {
@@ -1549,7 +1677,10 @@ mod tests {
         points.push(points[0]);
 
         let detected = detect_polygon(&points);
-        assert!(detected.is_some(), "Oktagon / Achteck sollte erkannt werden");
+        assert!(
+            detected.is_some(),
+            "Oktagon / Achteck sollte erkannt werden"
+        );
 
         if let Some(RecognizedShape::Polygon { vertices }) = detected {
             assert_eq!(vertices.len(), 8, "Achteck muss 8 Vertizes haben");
@@ -1587,7 +1718,13 @@ mod tests {
         let detected = detect_octahedron(&points);
         assert!(detected.is_some(), "Oktaeder sollte erkannt werden");
 
-        if let Some(RecognizedShape::Octahedron { center, radius_x, radius_y, depth }) = detected {
+        if let Some(RecognizedShape::Octahedron {
+            center,
+            radius_x,
+            radius_y,
+            depth,
+        }) = detected
+        {
             assert!((center.x - 200.0).abs() < 5.0);
             assert!((center.y - 200.0).abs() < 5.0);
             assert!(radius_x > 100.0);

@@ -69,7 +69,12 @@ impl StrokeData {
     /// Wandelt die semantischen Daten deterministisch zurück in einen `Stroke` um,
     /// inklusive Wiederherstellung des Triangle-Strip-Vertexpuffers und der AABB.
     pub fn to_stroke(&self) -> Stroke {
-        let stylus_samples: Vec<StylusSample> = self.samples.iter().copied().map(StylusSample::from).collect();
+        let stylus_samples: Vec<StylusSample> = self
+            .samples
+            .iter()
+            .copied()
+            .map(StylusSample::from)
+            .collect();
         let vertices = if let Some(ref shape) = self.shape {
             let (_, shape_verts) = crate::geometry::shape_to_mesh(shape, 20.0, self.color);
             shape_verts
@@ -207,7 +212,11 @@ pub fn reconstruct_stroke_vertices(samples: &[StylusSample], color: [f32; 4]) ->
             let angle = (i as f32 / segments as f32) * std::f32::consts::TAU;
             let offset = glam::Vec2::new(angle.cos() * radius, angle.sin() * radius);
             vertices.push(InkVertex::new(pt.position.x, pt.position.y, color));
-            vertices.push(InkVertex::new(pt.position.x + offset.x, pt.position.y + offset.y, color));
+            vertices.push(InkVertex::new(
+                pt.position.x + offset.x,
+                pt.position.y + offset.y,
+                color,
+            ));
         }
         return vertices;
     }
@@ -241,7 +250,10 @@ pub fn reconstruct_stroke_vertices(samples: &[StylusSample], color: [f32; 4]) ->
 /// Schreibt Inhalt atomar auf die Festplatte (über temporäre Datei + `std::fs::rename`).
 pub fn atomic_write_file(path: &Path, content: &[u8]) -> Result<(), io::Error> {
     let dir = path.parent().ok_or_else(|| {
-        io::Error::new(io::ErrorKind::NotFound, "Übergeordnetes Verzeichnis nicht gefunden")
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            "Übergeordnetes Verzeichnis nicht gefunden",
+        )
     })?;
     fs::create_dir_all(dir)?;
 
@@ -475,7 +487,7 @@ pub fn list_notebooks(base_dir: &Path) -> Vec<NotebookSummary> {
     }
 
     // Nach letztem Änderungsdatum absteigend sortieren (neueste zuerst)
-    list.sort_by(|a, b| b.modified_at.cmp(&a.modified_at));
+    list.sort_by_key(|a| std::cmp::Reverse(a.modified_at));
     list
 }
 
@@ -613,7 +625,11 @@ mod tests {
         assert_eq!(loaded_stroke.color, [0.1, 0.2, 0.8, 1.0]);
         assert_eq!(loaded_stroke.points.len(), 3);
 
-        for (orig, loaded) in page.strokes[0].points.iter().zip(loaded_stroke.points.iter()) {
+        for (orig, loaded) in page.strokes[0]
+            .points
+            .iter()
+            .zip(loaded_stroke.points.iter())
+        {
             assert!((orig.position.x - loaded.position.x).abs() < 1e-4);
             assert!((orig.position.y - loaded.position.y).abs() < 1e-4);
             assert!((orig.pressure - loaded.pressure).abs() < 1e-4);
@@ -633,12 +649,16 @@ mod tests {
 
         // Beschädigtes, unvollständiges JSON manuell schreiben
         let corrupted_file = path.join("page_99.json");
-        let truncated_json = br#"{"id": 99, "background": "Grid5mm", "strokes": [{"id": 1, "color": [0.1, 0.2"#;
+        let truncated_json =
+            br#"{"id": 99, "background": "Grid5mm", "strokes": [{"id": 1, "color": [0.1, 0.2"#;
         fs::write(&corrupted_file, truncated_json).expect("Konnte Datei nicht schreiben");
 
         // Laden muss einen abgefangenen CorruptedPage-Fehler liefern und darf nicht panicken
         let load_res = load_page(path, 99);
-        assert!(load_res.is_err(), "Laden beschädigter Daten muss fehlschlagen");
+        assert!(
+            load_res.is_err(),
+            "Laden beschädigter Daten muss fehlschlagen"
+        );
 
         match load_res.unwrap_err() {
             StorageError::CorruptedPage(id, msg) => {
@@ -729,16 +749,21 @@ mod tests {
         // 3. Auflisten
         let summaries = list_notebooks(base_dir);
         assert_eq!(summaries.len(), 2);
-        assert!(summaries.iter().any(|s| s.id == m1.id && s.title == "Mathe Vorlesung"));
-        assert!(summaries.iter().any(|s| s.id == m2.id && s.title == "Skizzen & Entwürfe"));
+        assert!(summaries
+            .iter()
+            .any(|s| s.id == m1.id && s.title == "Mathe Vorlesung"));
+        assert!(summaries
+            .iter()
+            .any(|s| s.id == m2.id && s.title == "Skizzen & Entwürfe"));
 
         // 4. Umbenennen
-        rename_notebook(&dir1, &mut m1, "Höhere Mathematik")
-            .expect("Umbenennen muss klappen");
+        rename_notebook(&dir1, &mut m1, "Höhere Mathematik").expect("Umbenennen muss klappen");
         assert_eq!(m1.title, "Höhere Mathematik");
 
         let updated_summaries = list_notebooks(base_dir);
-        assert!(updated_summaries.iter().any(|s| s.id == m1.id && s.title == "Höhere Mathematik"));
+        assert!(updated_summaries
+            .iter()
+            .any(|s| s.id == m1.id && s.title == "Höhere Mathematik"));
 
         // 5. Löschen
         delete_notebook(&dir2).expect("Löschen muss klappen");
