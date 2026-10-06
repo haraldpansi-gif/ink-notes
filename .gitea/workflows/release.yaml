@@ -45,6 +45,9 @@ jobs:
         uses: actions-rust-lang/setup-rust-toolchain@v1.11.0
         with:
           toolchain: stable
+          # Die Action installiert mit --profile minimal; ohne diese Komponenten
+          # schlagen cargo fmt und cargo clippy in den Quality Gates sofort fehl
+          components: rustfmt, clippy
           cache: true
 
       - name: Code Quality & Testing (Quality Gates)
