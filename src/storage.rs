@@ -46,6 +46,16 @@ impl From<SampleData> for StylusSample {
     }
 }
 
+/// Standardwert für die Strichbreite bei Migration älterer Dateien (0.5 mm in Einheiten).
+pub fn default_stroke_width() -> f32 {
+    5.0
+}
+
+/// Standardwert für den Finalisierungsstatus bei Migration älterer Dateien.
+pub fn default_finalized() -> bool {
+    true
+}
+
 /// Serialisierbare semantische Strichdaten (ohne GPU-Vertizes).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StrokeData {
@@ -54,6 +64,12 @@ pub struct StrokeData {
     pub samples: Vec<SampleData>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shape: Option<crate::geometry::RecognizedShape>,
+    #[serde(default)]
+    pub tool: crate::document::StrokeTool,
+    #[serde(default = "default_stroke_width")]
+    pub width: f32,
+    #[serde(default = "default_finalized")]
+    pub finalized: bool,
 }
 
 impl From<&Stroke> for StrokeData {
@@ -63,6 +79,9 @@ impl From<&Stroke> for StrokeData {
             color: stroke.color,
             samples: stroke.points.iter().map(SampleData::from).collect(),
             shape: stroke.shape.clone(),
+            tool: stroke.tool,
+            width: stroke.width,
+            finalized: stroke.finalized,
         }
     }
 }
@@ -77,20 +96,36 @@ impl StrokeData {
             .copied()
             .map(StylusSample::from)
             .collect();
+        let width = if self.width > 0.0 {
+            self.width
+        } else if self.shape.is_some() {
+            20.0
+        } else {
+            5.0
+        };
         let vertices = if let Some(ref shape) = self.shape {
-            let (_, shape_verts) = crate::geometry::shape_to_mesh(shape, 20.0, self.color);
+            let (_, shape_verts) = crate::geometry::shape_to_mesh(shape, width, self.color);
             shape_verts
         } else {
-            reconstruct_stroke_vertices(&stylus_samples, self.color)
+            reconstruct_stroke_vertices(
+                &stylus_samples,
+                self.color,
+                width,
+                self.tool,
+                self.finalized,
+            )
         };
         let mut stroke = Stroke::new(self.id, stylus_samples, vertices, self.color);
         stroke.shape = self.shape.clone();
+        stroke.tool = self.tool;
+        stroke.width = width;
+        stroke.finalized = self.finalized;
         stroke
     }
 }
 
-/// Aktuelle Dateiformat-Version von ink-notes.
-pub const CURRENT_FORMAT_VERSION: u32 = 1;
+/// Aktuelle Dateiformat-Version von ink-notes (Version 2: Stroke-Treue mit tool, width, finalized).
+pub const CURRENT_FORMAT_VERSION: u32 = 2;
 
 /// Standardwert für ältere Dateien ohne explizite Formatversion (Legacy v0).
 pub fn legacy_format_version() -> u32 {
@@ -276,53 +311,66 @@ impl From<serde_json::Error> for StorageError {
 }
 
 /// Rekonstruiert deterministisch die GPU-Triangle-Strip-Vertizes aus Stylus-Samples.
-pub fn reconstruct_stroke_vertices(samples: &[StylusSample], color: [f32; 4]) -> Vec<InkVertex> {
+pub fn reconstruct_stroke_vertices(
+    samples: &[StylusSample],
+    color: [f32; 4],
+    width: f32,
+    _tool: crate::document::StrokeTool,
+    finalized: bool,
+) -> Vec<InkVertex> {
     if samples.is_empty() {
         return Vec::new();
     }
 
-    if samples.len() == 1 {
-        let pt = samples[0];
-        let radius = spline::calculate_radius(pt.pressure, 2.5, 10.0);
-        let segments = 8;
-        let mut vertices = Vec::with_capacity((segments + 1) * 2);
-        for i in 0..=segments {
-            let angle = (i as f32 / segments as f32) * std::f32::consts::TAU;
-            let offset = glam::Vec2::new(angle.cos() * radius, angle.sin() * radius);
-            vertices.push(InkVertex::new(pt.position.x, pt.position.y, color));
-            vertices.push(InkVertex::new(
-                pt.position.x + offset.x,
-                pt.position.y + offset.y,
-                color,
-            ));
-        }
-        return vertices;
-    }
+    let config = SplineConfig::from_width_units(width);
 
-    let mut filter = OneEuroFilter::default();
-    let mut control_points: Vec<ControlPoint> = Vec::with_capacity(samples.len());
-
-    for s in samples {
-        let (fx, fy, fp) = filter.filter(s.position.x, s.position.y, s.pressure, s.timestamp);
-        let pt = ControlPoint::new(fx, fy, fp);
-        if let Some(last) = control_points.last() {
-            if (pt.position - last.position).length_squared() < 1.0 {
-                continue;
+    if finalized {
+        let corners = spline::detect_corners(samples, spline::CORNER_ANGLE_THRESHOLD_DEG);
+        let strip = spline::generate_finalized_triangle_strip(samples, &corners, &config);
+        strip
+            .into_iter()
+            .map(|v| InkVertex::new(v.position[0], v.position[1], color))
+            .collect()
+    } else {
+        if samples.len() == 1 {
+            let pt = samples[0];
+            let radius =
+                spline::calculate_radius(pt.pressure, config.min_radius, config.max_radius);
+            let segments = 8;
+            let mut vertices = Vec::with_capacity((segments + 1) * 2);
+            for i in 0..=segments {
+                let angle = (i as f32 / segments as f32) * std::f32::consts::TAU;
+                let offset = glam::Vec2::new(angle.cos() * radius, angle.sin() * radius);
+                vertices.push(InkVertex::new(pt.position.x, pt.position.y, color));
+                vertices.push(InkVertex::new(
+                    pt.position.x + offset.x,
+                    pt.position.y + offset.y,
+                    color,
+                ));
             }
+            return vertices;
         }
-        control_points.push(pt);
-    }
 
-    let config = SplineConfig {
-        min_radius: 2.5,
-        max_radius: 10.0,
-        samples_per_segment: 16,
-    };
-    let raw_strip = spline::generate_triangle_strip(&control_points, &config);
-    raw_strip
-        .into_iter()
-        .map(|v| InkVertex::new(v.position[0], v.position[1], color))
-        .collect()
+        let mut filter = OneEuroFilter::default();
+        let mut control_points: Vec<ControlPoint> = Vec::with_capacity(samples.len());
+
+        for s in samples {
+            let (fx, fy, fp) = filter.filter(s.position.x, s.position.y, s.pressure, s.timestamp);
+            let pt = ControlPoint::new(fx, fy, fp);
+            if let Some(last) = control_points.last() {
+                if (pt.position - last.position).length_squared() < 1.0 {
+                    continue;
+                }
+            }
+            control_points.push(pt);
+        }
+
+        let raw_strip = spline::generate_triangle_strip(&control_points, &config);
+        raw_strip
+            .into_iter()
+            .map(|v| InkVertex::new(v.position[0], v.position[1], color))
+            .collect()
+    }
 }
 
 /// Erstellt ein Verzeichnis mit gesicherten Rechten (0700 unter Unix).
@@ -385,9 +433,9 @@ pub fn atomic_write_file(path: &Path, content: &[u8]) -> Result<(), io::Error> {
     Ok(())
 }
 
-/// Serialisiert einen Wert als formatiertes JSON und schreibt ihn atomar.
+/// Serialisiert einen Wert als kompaktes JSON (`serde_json::to_vec`) und schreibt ihn atomar.
 pub fn atomic_write_json<T: Serialize>(path: &Path, value: &T) -> Result<(), StorageError> {
-    let bytes = serde_json::to_vec_pretty(value)?;
+    let bytes = serde_json::to_vec(value)?;
     atomic_write_file(path, &bytes)?;
     Ok(())
 }
@@ -1570,11 +1618,11 @@ mod tests {
             "page_1.json.v0.bak must be created before upgrading legacy format"
         );
 
-        // Reload to verify format_version is now 1
+        // Reload to verify format_version is now CURRENT_FORMAT_VERSION (2)
         let (_nb_upgraded, m_upgraded) = load_notebook(path).expect("Upgraded notebook must load");
-        assert_eq!(m_upgraded.format_version, 1);
+        assert_eq!(m_upgraded.format_version, CURRENT_FORMAT_VERSION);
         let p1_upgraded = load_page(path, 1).expect("Upgraded page must load");
-        assert_eq!(p1_upgraded.format_version, 1);
+        assert_eq!(p1_upgraded.format_version, CURRENT_FORMAT_VERSION);
     }
 
     #[test]
@@ -1858,6 +1906,177 @@ mod tests {
         assert!(
             lock3.is_ok(),
             "Nach Drop muss Lock wieder erworben werden können"
+        );
+    }
+
+    #[test]
+    fn test_round_trip_fidelity() {
+        use crate::geometry::RecognizedShape;
+        use crate::spline::{finalize_stroke_with_config, SplineConfig};
+
+        let mut page = Page::new(1, PageBackground::Blank);
+
+        // 1. Dünner Stift (0.3 mm = 3.0 Einheiten)
+        let samples1 = vec![
+            StylusSample {
+                position: glam::Vec2::new(100.0, 100.0),
+                pressure: 0.5,
+                timestamp: 0.0,
+            },
+            StylusSample {
+                position: glam::Vec2::new(150.0, 100.0),
+                pressure: 0.6,
+                timestamp: 0.1,
+            },
+            StylusSample {
+                position: glam::Vec2::new(200.0, 150.0),
+                pressure: 0.7,
+                timestamp: 0.2,
+            },
+        ];
+        let cfg_thin = SplineConfig {
+            min_radius: 0.75,
+            max_radius: 2.25,
+            samples_per_segment: 16,
+        };
+        let stroke_thin =
+            finalize_stroke_with_config(1, &samples1, [0.0, 0.0, 0.0, 1.0], &cfg_thin);
+        page.add_stroke(stroke_thin);
+
+        // 2. Breiter Stift (1.5 mm = 15.0 Einheiten)
+        let samples2 = vec![
+            StylusSample {
+                position: glam::Vec2::new(200.0, 200.0),
+                pressure: 0.5,
+                timestamp: 0.0,
+            },
+            StylusSample {
+                position: glam::Vec2::new(250.0, 200.0),
+                pressure: 0.5,
+                timestamp: 0.1,
+            },
+            StylusSample {
+                position: glam::Vec2::new(300.0, 250.0),
+                pressure: 0.5,
+                timestamp: 0.2,
+            },
+        ];
+        let cfg_thick = SplineConfig {
+            min_radius: 3.75,
+            max_radius: 11.25,
+            samples_per_segment: 16,
+        };
+        let stroke_thick =
+            finalize_stroke_with_config(2, &samples2, [0.1, 0.2, 0.8, 1.0], &cfg_thick);
+        page.add_stroke(stroke_thick);
+
+        // 3. Textmarker (6.0 mm = 60.0 Einheiten)
+        let samples3 = vec![
+            StylusSample {
+                position: glam::Vec2::new(100.0, 300.0),
+                pressure: 0.5,
+                timestamp: 0.0,
+            },
+            StylusSample {
+                position: glam::Vec2::new(200.0, 300.0),
+                pressure: 0.5,
+                timestamp: 0.1,
+            },
+            StylusSample {
+                position: glam::Vec2::new(300.0, 300.0),
+                pressure: 0.5,
+                timestamp: 0.2,
+            },
+        ];
+        let cfg_highlighter = SplineConfig {
+            min_radius: 15.0,
+            max_radius: 45.0,
+            samples_per_segment: 16,
+        };
+        let stroke_highlighter =
+            finalize_stroke_with_config(3, &samples3, [1.0, 1.0, 0.0, 0.4], &cfg_highlighter);
+        page.add_stroke(stroke_highlighter);
+
+        // 4. Erkannte Form (Kreis mit Breite 10.0 Einheiten)
+        let circle = RecognizedShape::Circle {
+            center: glam::Vec2::new(500.0, 500.0),
+            radius: 50.0,
+        };
+        let circle_stroke = crate::geometry::shape_to_stroke(circle, 4, [0.0, 0.5, 0.0, 1.0], 10.0);
+        page.add_stroke(circle_stroke);
+
+        // Serialisieren & Deserialisieren
+        let page_data = PageData::from(&page);
+        let restored_page = page_data.to_page();
+
+        assert_eq!(page.strokes.len(), restored_page.strokes.len());
+        for (i, (orig, restored)) in page
+            .strokes
+            .iter()
+            .zip(restored_page.strokes.iter())
+            .enumerate()
+        {
+            assert_eq!(
+                orig.vertices.len(),
+                restored.vertices.len(),
+                "Strich {i} Vertices-Anzahl weicht ab: orig {}, restored {}",
+                orig.vertices.len(),
+                restored.vertices.len()
+            );
+            for (v_idx, (v1, v2)) in orig
+                .vertices
+                .iter()
+                .zip(restored.vertices.iter())
+                .enumerate()
+            {
+                assert!(
+                    (v1.position[0] - v2.position[0]).abs() < 1e-3
+                        && (v1.position[1] - v2.position[1]).abs() < 1e-3,
+                    "Strich {i} Vertex {v_idx} Position weicht ab: orig {:?}, restored {:?}",
+                    v1.position,
+                    v2.position
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_compact_json_size_reduction() {
+        use crate::spline::{finalize_stroke_with_config, SplineConfig};
+        let mut page = Page::new(1, PageBackground::Blank);
+        let samples: Vec<StylusSample> = (0..500)
+            .map(|i| StylusSample {
+                position: glam::Vec2::new(i as f32, (i * 2) as f32),
+                pressure: 0.5,
+                timestamp: i as f64 * 0.01,
+            })
+            .collect();
+        let stroke = finalize_stroke_with_config(
+            1,
+            &samples,
+            [0.0, 0.0, 0.0, 1.0],
+            &SplineConfig::default(),
+        );
+        page.add_stroke(stroke);
+
+        let page_data = PageData::from(&page);
+        let pretty_bytes = serde_json::to_vec_pretty(&page_data).unwrap();
+        let compact_bytes = serde_json::to_vec(&page_data).unwrap();
+
+        println!(
+            "\n[Dateigrößen-Vergleich] Pretty: {} Bytes | Kompakt: {} Bytes | Ersparnis: {:.1}%",
+            pretty_bytes.len(),
+            compact_bytes.len(),
+            (1.0 - compact_bytes.len() as f64 / pretty_bytes.len() as f64) * 100.0
+        );
+
+        assert!(
+            compact_bytes.len() < pretty_bytes.len(),
+            "Kompaktes JSON muss kleiner sein"
+        );
+        assert!(
+            compact_bytes.len() * 2 <= pretty_bytes.len(),
+            "Kompaktes JSON spart mind. 50% Whitespace"
         );
     }
 }

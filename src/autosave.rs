@@ -1017,4 +1017,65 @@ pub mod tests {
         // Aufräumen
         let _ = std::fs::remove_dir_all(&temp_recovery_dir);
     }
+
+    #[test]
+    fn test_snapshot_performance() {
+        let store = Arc::new(FakePageStore::new());
+        let clock = Arc::new(MockClock::new(Instant::now()));
+        let mut controller = AutosaveController::with_options(
+            PathBuf::from("/tmp/test_perf"),
+            Duration::from_millis(1500),
+            Duration::from_secs(10),
+            store,
+            Arc::clone(&clock) as Arc<dyn Clock>,
+        );
+
+        let manifest = NotebookManifest::new("perf_nb", "Perf Test");
+
+        fn make_page(num_samples: usize) -> Page {
+            let mut page = Page::new(1, PageBackground::Blank);
+            let samples_per_stroke = 100;
+            let num_strokes = num_samples / samples_per_stroke;
+            for s in 0..num_strokes {
+                let mut samples = Vec::with_capacity(samples_per_stroke);
+                for i in 0..samples_per_stroke {
+                    samples.push(StylusSample {
+                        position: glam::Vec2::new(s as f32 * 10.0 + i as f32, i as f32),
+                        pressure: 0.5,
+                        timestamp: i as f64 * 0.01,
+                    });
+                }
+                page.add_stroke(Stroke::new(
+                    (s + 1) as u64,
+                    samples,
+                    Vec::new(),
+                    [0.0, 0.0, 0.0, 1.0],
+                ));
+            }
+            page
+        }
+
+        // 1. 1 000 Samples
+        let p_1k = make_page(1_000);
+        let start = Instant::now();
+        controller.mark_page_dirty(&p_1k, &manifest);
+        let dur_1k = start.elapsed();
+
+        // 2. 10 000 Samples
+        let p_10k = make_page(10_000);
+        let start = Instant::now();
+        controller.mark_page_dirty(&p_10k, &manifest);
+        let dur_10k = start.elapsed();
+
+        // 3. 50 000 Samples
+        let p_50k = make_page(50_000);
+        let start = Instant::now();
+        controller.mark_page_dirty(&p_50k, &manifest);
+        let dur_50k = start.elapsed();
+
+        println!(
+            "\n[Benchmark Snapshot] 1k Samples: {:?} | 10k Samples: {:?} | 50k Samples: {:?}",
+            dur_1k, dur_10k, dur_50k
+        );
+    }
 }

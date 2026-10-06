@@ -1411,6 +1411,9 @@ pub fn shape_to_stroke(
     let (samples, vertices) = shape_to_mesh(&shape, width_units, color);
     let mut stroke = Stroke::new(stroke_id, samples, vertices, color);
     stroke.shape = Some(shape);
+    stroke.width = width_units;
+    stroke.tool = crate::document::StrokeTool::Shape;
+    stroke.finalized = true;
     stroke
 }
 

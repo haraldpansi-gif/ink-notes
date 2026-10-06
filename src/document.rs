@@ -103,6 +103,16 @@ pub fn point_to_segment_distance(p: glam::Vec2, a: glam::Vec2, b: glam::Vec2) ->
     (p - projection).length()
 }
 
+/// Das Werkzeug, mit dem ein Strich gezeichnet wurde.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum StrokeTool {
+    #[default]
+    Pen,
+    Highlighter,
+    Shape,
+}
+
 /// Ein einzelner Vektor-Strich auf einer Seite.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Stroke {
@@ -112,6 +122,9 @@ pub struct Stroke {
     pub aabb: Aabb,
     pub color: [f32; 4],
     pub shape: Option<crate::geometry::RecognizedShape>,
+    pub tool: StrokeTool,
+    pub width: f32,
+    pub finalized: bool,
 }
 
 impl Stroke {
@@ -141,6 +154,9 @@ impl Stroke {
             aabb,
             color,
             shape: None,
+            tool: StrokeTool::Pen,
+            width: 5.0,
+            finalized: true,
         }
     }
 
@@ -157,6 +173,22 @@ impl Stroke {
     /// Verknüpft diesen Strich mit einer mathematisch erkannten Form.
     pub fn with_shape(mut self, shape: crate::geometry::RecognizedShape) -> Self {
         self.shape = Some(shape);
+        self.tool = StrokeTool::Shape;
+        self
+    }
+
+    pub fn with_tool(mut self, tool: StrokeTool) -> Self {
+        self.tool = tool;
+        self
+    }
+
+    pub fn with_width(mut self, width: f32) -> Self {
+        self.width = width;
+        self
+    }
+
+    pub fn with_finalized(mut self, finalized: bool) -> Self {
+        self.finalized = finalized;
         self
     }
 
