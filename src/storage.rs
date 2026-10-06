@@ -149,6 +149,19 @@ impl NotebookManifest {
             next_page_id: 2,
         }
     }
+
+    /// Übernimmt Seitenliste, aktuelle Seite und ID-Zähler aus dem Notizbuch,
+    /// damit neu angelegte Seiten im Manifest referenziert werden.
+    pub fn sync_from_notebook(&mut self, notebook: &Notebook) {
+        self.page_ids = notebook.pages.iter().map(|p| p.id).collect();
+        self.current_page_index = notebook.current_page_index;
+        self.next_stroke_id = notebook.next_stroke_id;
+        self.next_page_id = notebook.next_page_id;
+        self.modified_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+    }
 }
 
 /// Mögliche Fehler bei Speicher- und Ladeoperationen.
@@ -347,18 +360,11 @@ pub fn save_notebook(
 ) -> Result<(), StorageError> {
     fs::create_dir_all(notebook_dir)?;
 
-    manifest.page_ids = notebook.pages.iter().map(|p| p.id).collect();
-    manifest.current_page_index = notebook.current_page_index;
-    manifest.next_stroke_id = notebook.next_stroke_id;
-    manifest.next_page_id = notebook.next_page_id;
-    manifest.modified_at = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
+    manifest.sync_from_notebook(notebook);
 
-    // Alle bereits geladenen Seiten speichern
+    // Alle bereits geladenen Seiten speichern (fehlgeschlagene Ersatzseiten niemals)
     for page in &notebook.pages {
-        if page.is_loaded {
+        if page.is_loaded && !page.load_failed {
             let page_data = PageData::from(page);
             save_page(notebook_dir, &page_data)?;
         }
@@ -383,8 +389,8 @@ pub fn load_notebook(notebook_dir: &Path) -> Result<(Notebook, NotebookManifest)
     let first_page = match load_page(notebook_dir, first_id) {
         Ok(data) => data.to_page(),
         Err(e) => {
-            eprintln!("[Storage] Konnte erste Seite {first_id} nicht laden: {e}. Erstelle leere Ersatzseite.");
-            Page::new(first_id, PageBackground::Grid5mm)
+            eprintln!("[Storage] Konnte erste Seite {first_id} nicht laden: {e}.");
+            replacement_page_after_load_error(notebook_dir, first_id, &e)
         }
     };
     pages.push(first_page);
@@ -426,12 +432,75 @@ pub fn ensure_page_loaded(
         }
         Err(e) => {
             eprintln!("[Storage] Fehler beim Lazy Loading von Seite {page_id}: {e}");
-            // Ersatzseite als geladen markieren, damit die App nicht hängt
-            notebook.pages[page_idx].is_loaded = true;
-            notebook.pages[page_idx].rebuild_cache_if_dirty();
+            // Ersatzseite einsetzen, damit die App nicht hängt
+            let background = notebook.pages[page_idx].background;
+            let mut page = replacement_page_after_load_error(notebook_dir, page_id, &e);
+            page.background = background;
+            page.rebuild_cache_if_dirty();
+            notebook.pages[page_idx] = page;
             Err(e)
         }
     }
+}
+
+/// Erzeugt eine leere Ersatzseite für eine Seite, deren Datei nicht geladen werden konnte.
+///
+/// - Fehlende Datei: normale leere Seite (z. B. neu angelegt, aber noch nie gespeichert).
+/// - Beschädigtes JSON: Die Datei wird als `page_<id>.json.corrupt-<zeit>` beiseite gelegt,
+///   danach ist die leere Seite normal beschreibbar.
+/// - Sonstige Fehler (I/O) oder fehlgeschlagenes Beiseitelegen: Die Ersatzseite wird als
+///   `load_failed` markiert und nie gespeichert, damit die Originaldatei erhalten bleibt.
+fn replacement_page_after_load_error(
+    notebook_dir: &Path,
+    page_id: u64,
+    err: &StorageError,
+) -> Page {
+    let mut page = Page::new(page_id, PageBackground::Grid5mm);
+    match err {
+        StorageError::PageNotFound(_) => {}
+        StorageError::CorruptedPage(..) => {
+            let path = notebook_dir.join(format!("page_{page_id}.json"));
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let backup = notebook_dir.join(format!("page_{page_id}.json.corrupt-{now}"));
+            match fs::rename(&path, &backup) {
+                Ok(()) => eprintln!(
+                    "[Storage] Beschädigte Seite gesichert als '{}'.",
+                    backup.display()
+                ),
+                Err(e) => {
+                    eprintln!("[Storage] Konnte beschädigte Seite nicht sichern ({e}). Seite wird nicht gespeichert.");
+                    page.load_failed = true;
+                }
+            }
+        }
+        _ => page.load_failed = true,
+    }
+    page
+}
+
+/// Lädt alle noch nicht geladenen Seiten ohne Ersatzseiten (z. B. für den PDF-Export).
+/// Schlägt fehl, sobald eine Seite nicht vollständig verfügbar ist.
+pub fn load_all_pages(notebook_dir: &Path, notebook: &mut Notebook) -> Result<(), StorageError> {
+    for page in &mut notebook.pages {
+        if page.load_failed {
+            return Err(StorageError::CorruptedPage(
+                page.id,
+                "Seite konnte nicht geladen werden".to_string(),
+            ));
+        }
+        if !page.is_loaded {
+            *page = match load_page(notebook_dir, page.id) {
+                Ok(data) => data.to_page(),
+                // Wie beim Lazy Loading: nie gespeicherte Seite = leere Seite
+                Err(StorageError::PageNotFound(_)) => Page::new(page.id, page.background),
+                Err(e) => return Err(e),
+            };
+        }
+    }
+    Ok(())
 }
 
 /// Gibt das Standard-Verzeichnis für Notizbücher zurück (gemäß XDG-Spezifikation).
@@ -712,7 +781,7 @@ mod tests {
         controller.update();
 
         // Flush abwarten
-        controller.flush();
+        controller.flush().expect("Flush muss gelingen");
 
         // Es darf genau EIN tatsächlicher Schreibvorgang für die Seite stattgefunden haben
         assert_eq!(
@@ -772,5 +841,191 @@ mod tests {
         let final_summaries = list_notebooks(base_dir);
         assert_eq!(final_summaries.len(), 1);
         assert_eq!(final_summaries[0].id, m1.id);
+    }
+
+    /// Hilfsfunktion: Seite mit einem einzelnen Strich.
+    fn page_with_stroke(page_id: u64, stroke_id: u64) -> Page {
+        let mut page = Page::new(page_id, PageBackground::Lined);
+        let samples = vec![
+            StylusSample {
+                position: glam::Vec2::new(100.0, 100.0),
+                pressure: 0.5,
+                timestamp: 0.0,
+            },
+            StylusSample {
+                position: glam::Vec2::new(200.0, 150.0),
+                pressure: 0.5,
+                timestamp: 0.05,
+            },
+        ];
+        let vertices = reconstruct_stroke_vertices(&samples, [0.0, 0.0, 0.0, 1.0]);
+        page.add_stroke(Stroke::new(
+            stroke_id,
+            samples,
+            vertices,
+            [0.0, 0.0, 0.0, 1.0],
+        ));
+        page
+    }
+
+    #[test]
+    fn test_corrupted_page_is_quarantined_not_overwritten() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let dir = temp_dir.path();
+
+        let mut notebook = Notebook::new();
+        notebook.add_page(PageBackground::Grid5mm);
+        let mut manifest = NotebookManifest::new("nb", "Test");
+        save_notebook(dir, &notebook, &mut manifest).unwrap();
+
+        let corrupted = br#"{"id": 2, "background": "Lined", "strokes": [{"id": 1"#;
+        fs::write(dir.join("page_2.json"), corrupted).unwrap();
+
+        let (mut loaded, loaded_manifest) = load_notebook(dir).unwrap();
+        assert!(ensure_page_loaded(dir, &mut loaded, 1).is_err());
+
+        // Original wurde beiseite gelegt und bleibt Byte für Byte erhalten
+        let backups: Vec<_> = fs::read_dir(dir)
+            .unwrap()
+            .flatten()
+            .filter(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with("page_2.json.corrupt-")
+            })
+            .collect();
+        assert_eq!(backups.len(), 1);
+        assert_eq!(fs::read(backups[0].path()).unwrap(), corrupted);
+
+        // Ersatzseite ist normal beschreibbar
+        assert!(!loaded.pages[1].load_failed);
+        let mut autosave = AutosaveController::new(dir.to_path_buf(), Duration::from_secs(60));
+        loaded.current_page_index = 1;
+        autosave.mark_dirty(&loaded, &loaded_manifest);
+        autosave.flush().unwrap();
+        assert!(load_page(dir, 2).is_ok());
+        autosave.shutdown();
+    }
+
+    #[test]
+    fn test_unreadable_page_is_never_overwritten() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let dir = temp_dir.path();
+
+        let mut notebook = Notebook::new();
+        notebook.add_page(PageBackground::Grid5mm);
+        let mut manifest = NotebookManifest::new("nb", "Test");
+        save_notebook(dir, &notebook, &mut manifest).unwrap();
+
+        // Unlesbare Seite simulieren (I/O-Fehler): Inhalt liegt in einer Datei, die wir
+        // durch ein gleichnamiges Verzeichnis ersetzen
+        fs::remove_file(dir.join("page_2.json")).unwrap();
+        fs::create_dir(dir.join("page_2.json")).unwrap();
+        fs::write(dir.join("page_2.json").join("marker"), b"original").unwrap();
+
+        let (mut loaded, loaded_manifest) = load_notebook(dir).unwrap();
+        assert!(ensure_page_loaded(dir, &mut loaded, 1).is_err());
+        assert!(loaded.pages[1].load_failed);
+
+        // Navigation + Autosave + Strg+S dürfen die Seite nicht anfassen
+        loaded.current_page_index = 1;
+        let mut autosave = AutosaveController::new(dir.to_path_buf(), Duration::from_secs(60));
+        autosave.mark_dirty(&loaded, &loaded_manifest);
+        autosave.save_now(&loaded, &loaded_manifest).unwrap();
+        save_notebook(dir, &loaded, &mut loaded_manifest.clone()).unwrap();
+        autosave.shutdown();
+
+        assert_eq!(
+            fs::read(dir.join("page_2.json").join("marker")).unwrap(),
+            b"original"
+        );
+        // Die Seite bleibt im Manifest referenziert
+        assert_eq!(load_manifest(dir).unwrap().page_ids, vec![1, 2]);
+    }
+
+    #[test]
+    fn test_autosave_records_new_pages_in_manifest() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let dir = temp_dir.path();
+
+        let mut notebook = Notebook::new();
+        let mut manifest = NotebookManifest::new("nb", "Test");
+        save_notebook(dir, &notebook, &mut manifest).unwrap();
+
+        // Wie in main.rs: neue Seite per Navigation, Strich darauf, Autosave
+        notebook.next_page();
+        notebook.pages[1] = page_with_stroke(notebook.pages[1].id, 1);
+        let mut autosave = AutosaveController::new(dir.to_path_buf(), Duration::from_secs(60));
+        autosave.mark_dirty(&notebook, &manifest);
+        autosave.shutdown();
+
+        let (mut reloaded, reloaded_manifest) = load_notebook(dir).unwrap();
+        assert_eq!(reloaded_manifest.page_ids, vec![1, 2]);
+        assert_eq!(reloaded.pages.len(), 2);
+        ensure_page_loaded(dir, &mut reloaded, 1).unwrap();
+        assert_eq!(reloaded.pages[1].strokes.len(), 1);
+    }
+
+    #[test]
+    fn test_flush_and_save_now_report_write_errors() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        // Zielpfad ist eine Datei -> Schreiben ins "Notizbuch-Verzeichnis" muss fehlschlagen
+        let blocked = temp_dir.path().join("blocked");
+        fs::write(&blocked, b"").unwrap();
+
+        let notebook = Notebook::new();
+        let manifest = NotebookManifest::new("nb", "Test");
+        let mut autosave = AutosaveController::new(blocked, Duration::from_secs(60));
+
+        autosave.mark_dirty(&notebook, &manifest);
+        assert!(autosave.flush().is_err());
+        assert_eq!(autosave.status(), crate::autosave::AutosaveStatus::Error);
+
+        assert!(autosave.save_now(&notebook, &manifest).is_err());
+        assert_eq!(autosave.status(), crate::autosave::AutosaveStatus::Error);
+        autosave.shutdown();
+    }
+
+    #[test]
+    fn test_deleted_notebook_is_not_recreated_by_pending_autosave() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let base = temp_dir.path();
+        let (notebook, manifest, dir) = create_new_notebook(base, "Weg damit").unwrap();
+        let (_, _, other_dir) = create_new_notebook(base, "Bleibt").unwrap();
+
+        let mut autosave = AutosaveController::new(dir.clone(), Duration::from_secs(60));
+        autosave.mark_dirty(&notebook, &manifest);
+
+        // Ablauf wie in main.rs beim Löschen des aktuellen Notizbuchs
+        autosave.flush().unwrap();
+        delete_notebook(&dir).unwrap();
+        autosave.switch_notebook_dir(other_dir).unwrap();
+        autosave.shutdown();
+
+        assert!(
+            !dir.exists(),
+            "Gelöschtes Notizbuch darf nicht wieder auftauchen"
+        );
+    }
+
+    #[test]
+    fn test_load_all_pages_for_export() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let dir = temp_dir.path();
+
+        let mut notebook = Notebook::new();
+        notebook.add_page(PageBackground::Lined);
+        notebook.pages[1] = page_with_stroke(2, 1);
+        let mut manifest = NotebookManifest::new("nb", "Test");
+        save_notebook(dir, &notebook, &mut manifest).unwrap();
+
+        let (mut loaded, _) = load_notebook(dir).unwrap();
+        assert!(!loaded.pages[1].is_loaded);
+        assert!(crate::export::generate_pdf_document(&loaded, Default::default()).is_err());
+
+        load_all_pages(dir, &mut loaded).unwrap();
+        assert_eq!(loaded.pages[1].strokes.len(), 1);
+        assert_eq!(loaded.pages[1].background, PageBackground::Lined);
+        assert!(crate::export::generate_pdf_document(&loaded, Default::default()).is_ok());
     }
 }

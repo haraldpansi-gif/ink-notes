@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use crate::document::Page;
+use crate::document::{Notebook, Page};
 use crate::storage::{self, NotebookManifest, PageData};
 
 /// Aktueller Status des Autosave-Controllers für OSD und UI.
@@ -138,12 +138,51 @@ impl AutosaveController {
     }
 
     /// Markiert eine Seite als geändert und startet/erneuert das Debounce-Fenster.
+    ///
+    /// Nicht geladene oder fehlgeschlagene Ersatzseiten werden nie gespeichert, damit ihre
+    /// Originaldatei auf der Festplatte nicht überschrieben wird.
     pub fn mark_page_dirty(&mut self, page: &Page, manifest: &NotebookManifest) {
-        let page_data = PageData::from(page);
-        self.pending_pages.insert(page.id, page_data);
+        if page.is_loaded && !page.load_failed {
+            self.pending_pages.insert(page.id, PageData::from(page));
+        }
         self.pending_manifest = Some(manifest.clone());
         self.last_change_time = Some(Instant::now());
         self.status = AutosaveStatus::Pending;
+    }
+
+    /// Markiert die aktuelle Seite als geändert und gleicht das Manifest (Seitenliste,
+    /// aktuelle Seite, ID-Zähler) mit dem Notizbuch ab.
+    pub fn mark_dirty(&mut self, notebook: &Notebook, manifest: &NotebookManifest) {
+        let mut synced = manifest.clone();
+        synced.sync_from_notebook(notebook);
+        self.mark_page_dirty(notebook.current_page(), &synced);
+    }
+
+    /// Sichert sofort alle geladenen Seiten und das Manifest (Strg+S) und meldet,
+    /// ob wirklich alles geschrieben wurde.
+    pub fn save_now(
+        &mut self,
+        notebook: &Notebook,
+        manifest: &NotebookManifest,
+    ) -> Result<(), String> {
+        for page in &notebook.pages {
+            if page.is_loaded && !page.load_failed {
+                self.pending_pages.insert(page.id, PageData::from(page));
+            }
+        }
+        let mut synced = manifest.clone();
+        synced.sync_from_notebook(notebook);
+        self.pending_manifest = Some(synced);
+
+        let errors = self.flush_collect_errors();
+        if errors.is_empty() {
+            // Der komplette Zustand liegt jetzt auf der Festplatte – frühere Fehler sind überholt
+            self.status = AutosaveStatus::Saved;
+            Ok(())
+        } else {
+            self.status = AutosaveStatus::Error;
+            Err(errors.join("; "))
+        }
     }
 
     /// Prüft den Worker-Kanal und stößt fällige Schreibvorgänge nach Ablauf des Debounce-Timers an.
@@ -220,40 +259,72 @@ impl AutosaveController {
     }
 
     /// Führt einen synchronen Flush aller noch ausstehenden Änderungen durch (z. B. vor Beenden).
-    pub fn flush(&mut self) {
+    pub fn flush(&mut self) -> Result<(), String> {
+        let errors = self.flush_collect_errors();
+        if errors.is_empty() {
+            if self.status != AutosaveStatus::Error {
+                self.status = AutosaveStatus::Saved;
+            }
+            Ok(())
+        } else {
+            self.status = AutosaveStatus::Error;
+            Err(errors.join("; "))
+        }
+    }
+
+    /// Schickt alle anstehenden Änderungen los, wartet, bis der Worker sie abgearbeitet hat,
+    /// und liefert alle dabei aufgetretenen Schreibfehler.
+    fn flush_collect_errors(&mut self) -> Vec<String> {
         // Falls noch Änderungen im Debounce-Puffer liegen, sofort losschicken
         if !self.pending_pages.is_empty() || self.pending_manifest.is_some() {
             self.dispatch_pending();
         }
 
+        let mut errors = Vec::new();
         let (ack_tx, ack_rx) = mpsc::channel();
-        if self.cmd_tx.send(AutosaveCommand::Flush(ack_tx)).is_ok() {
-            let _ = ack_rx.recv();
+        if self.cmd_tx.send(AutosaveCommand::Flush(ack_tx)).is_err() || ack_rx.recv().is_err() {
+            errors.push("Autosave-Worker ist nicht erreichbar".to_string());
         }
 
-        // Restliche Antworten leeren
+        // Restliche Antworten leeren (der Worker hat alle vor dem Flush-Befehl abgearbeitet)
         while let Ok(response) = self.resp_rx.try_recv() {
             if self.in_flight_count > 0 {
                 self.in_flight_count -= 1;
             }
-            if let AutosaveResponse::PageSaved { result: Err(e), .. } = response {
-                eprintln!("[Autosave-Flush] Fehler: {e}");
+            match response {
+                AutosaveResponse::PageSaved {
+                    page_id,
+                    result: Err(e),
+                } => {
+                    eprintln!("[Autosave-Flush] Seite {page_id}: {e}");
+                    errors.push(format!("Seite {page_id}: {e}"));
+                }
+                AutosaveResponse::ManifestSaved { result: Err(e) } => {
+                    eprintln!("[Autosave-Flush] Manifest: {e}");
+                    errors.push(format!("Manifest: {e}"));
+                }
+                _ => {}
             }
         }
-
-        self.status = AutosaveStatus::Saved;
+        errors
     }
 
     /// Wechselt das Zielverzeichnis für zukünftige Speicheroperationen (z. B. beim Dokumentenwechsel),
     /// nachdem alle noch anstehenden Schreibvorgänge des vorherigen Notizbuchs sicher geflusht wurden.
-    pub fn switch_notebook_dir(&mut self, new_notebook_dir: PathBuf) {
-        self.flush();
+    /// Liefert die Schreibfehler des vorherigen Notizbuchs zurück; der Status gilt danach
+    /// für das neue Notizbuch.
+    pub fn switch_notebook_dir(&mut self, new_notebook_dir: PathBuf) -> Result<(), String> {
+        let result = self.flush();
         self.notebook_dir = new_notebook_dir;
+        self.status = AutosaveStatus::Saved;
+        result
     }
 
     /// Beendet den Hintergrund-Worker ordnungsgemäß nach einem Flush.
     pub fn shutdown(&mut self) {
-        self.flush();
+        if let Err(e) = self.flush() {
+            eprintln!("[Shutdown] Nicht alle Änderungen konnten gespeichert werden: {e}");
+        }
         let _ = self.cmd_tx.send(AutosaveCommand::Shutdown);
         if let Some(handle) = self.worker_handle.take() {
             let _ = handle.join();

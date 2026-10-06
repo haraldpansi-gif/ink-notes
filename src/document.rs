@@ -314,6 +314,9 @@ pub struct Page {
     pub stroke_ranges: Vec<Range<u32>>,
     pub is_dirty: bool,
     pub is_loaded: bool,
+    /// Laden von der Festplatte ist fehlgeschlagen; die Seite ist ein leerer Ersatz und
+    /// darf niemals gespeichert werden, damit die Originaldatei nicht überschrieben wird.
+    pub load_failed: bool,
     pub history: HistoryStack,
 }
 
@@ -327,6 +330,7 @@ impl Page {
             stroke_ranges: Vec::new(),
             is_dirty: false,
             is_loaded: true,
+            load_failed: false,
             history: HistoryStack::new(),
         }
     }
@@ -341,6 +345,7 @@ impl Page {
             stroke_ranges: Vec::new(),
             is_dirty: false,
             is_loaded: false,
+            load_failed: false,
             history: HistoryStack::new(),
         }
     }

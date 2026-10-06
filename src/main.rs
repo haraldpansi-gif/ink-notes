@@ -1,6 +1,8 @@
 //! ink-notes: Latenzoptimierte Linux-Inking-App mit wgpu, winit, egui-Toolbar,
 //! Seitenverwaltung, Undo/Redo, Vektor-PDF-Export und asynchroner Notizbuch-Persistenz (Autosave).
 
+use std::path::{Path, PathBuf};
+use std::sync::mpsc::{self, Sender};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use winit::{
@@ -52,6 +54,44 @@ fn update_window_title(
     window.set_title(&title);
 }
 
+/// Exportiert das Notizbuch im Hintergrund als PDF. Noch nicht geladene Seiten werden vorher
+/// von der Festplatte nachgeladen; das Ergebnis geht über `result_tx` an den Event-Loop zurück.
+fn start_pdf_export(
+    notebook: &Notebook,
+    storage_dir: &Path,
+    title: &str,
+    result_tx: Sender<Result<PathBuf, String>>,
+    window: Arc<Window>,
+) {
+    let mut notebook_clone = notebook.clone();
+    let storage_dir = storage_dir.to_path_buf();
+    let export_path = export::resolve_pdf_export_path(title);
+    println!(
+        "[Export] Starte PDF-Vektorexport nach '{}' (im Hintergrundthread)...",
+        export_path.display()
+    );
+    std::thread::spawn(move || {
+        let start = Instant::now();
+        let result = storage::load_all_pages(&storage_dir, &mut notebook_clone)
+            .map_err(|err| err.to_string())
+            .and_then(|()| {
+                export_notebook_to_pdf(&notebook_clone, &export_path, ExportStrategy::FilledPolygon)
+                    .map_err(|err| err.to_string())
+            });
+        match &result {
+            Ok(()) => println!(
+                "[Export] PDF erfolgreich exportiert: '{}' ({:.1?} für {} Seiten)",
+                export_path.display(),
+                start.elapsed(),
+                notebook_clone.pages.len()
+            ),
+            Err(err) => eprintln!("[Export-Fehler] Konnte PDF nicht exportieren: {err}"),
+        }
+        let _ = result_tx.send(result.map(|()| export_path));
+        window.request_redraw();
+    });
+}
+
 /// Finalisiert einen Strich (mit Spline-Tessellierung, Ecken-Erkennung & RDP oder Auto-Snap)
 /// und fügt ihn in die aktuelle Seite des Notizbuchs ein.
 fn commit_stroke_to_notebook(
@@ -83,7 +123,7 @@ fn commit_stroke_to_notebook(
         page.add_stroke(stroke);
         canvas.sync_page(page);
         manifest.next_stroke_id = notebook.next_stroke_id;
-        autosave.mark_page_dirty(notebook.current_page(), manifest);
+        autosave.mark_dirty(notebook, manifest);
         update_window_title(
             window,
             notebook,
@@ -128,16 +168,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let mut storage_dir = storage_base_dir.join(&initial_id);
+    let mut startup_warning: Option<String> = None;
     let (mut notebook, mut manifest) = if storage_dir.join("manifest.json").exists() {
         println!("[Storage] Lade Notizbuch aus: {}", storage_dir.display());
         match storage::load_notebook(&storage_dir) {
             Ok((nb, m)) => (nb, m),
             Err(err) => {
-                eprintln!("[Storage-Fehler] Konnte Notizbuch nicht laden ({err}). Erstelle neues Notizbuch.");
-                (
-                    Notebook::new(),
-                    NotebookManifest::new(&initial_id, &initial_title),
-                )
+                // Den Ordner des nicht ladbaren Notizbuchs NICHT wiederverwenden, sonst würde
+                // der Autosave dessen Manifest überschreiben und alle Seiten verwaist zurücklassen.
+                eprintln!(
+                    "[Storage-Fehler] Konnte Notizbuch nicht laden ({err}). '{}' bleibt unverändert, erstelle neues Notizbuch.",
+                    storage_dir.display()
+                );
+                startup_warning = Some(format!(
+                    "Notizbuch '{initial_title}' konnte nicht geladen werden – neues Notizbuch angelegt"
+                ));
+                let (nb, m, dir) = storage::create_new_notebook(&storage_base_dir, &initial_title)?;
+                storage_dir = dir;
+                (nb, m)
             }
         }
     } else {
@@ -159,6 +207,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     egui_ctx.set_visuals(egui::Visuals::dark());
 
     // 4. In-App Gitea Updater initialisieren und im Hintergrund nach Releases fragen
+    // Ergebnisse der PDF-Exporte aus dem Hintergrundthread
+    let (export_tx, export_rx) = mpsc::channel::<Result<PathBuf, String>>();
+
     let mut updater = UpdaterController::new();
     updater.check_for_updates();
 
@@ -174,6 +225,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ui_state.current_notebook_id = manifest.id.clone();
     ui_state.document_title = manifest.title.clone();
     ui_state.available_notebooks = available_notebooks;
+    if let Some(warning) = startup_warning {
+        ui_state.available_notebooks = storage::list_notebooks(&storage_base_dir);
+        ui_state.set_export_message(warning);
+    }
     let mut selection_state = SelectionState::new();
 
     // Initiale Seite und Werkzeugeinstellungen mit Canvas synchronisieren
@@ -265,6 +320,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     update_window_title(&window, &notebook, &manifest, ui_state.active_tool, new_status);
                 }
 
+                while let Ok(result) = export_rx.try_recv() {
+                    match result {
+                        Ok(path) => ui_state.set_export_message(format!("PDF gespeichert: {}", path.display())),
+                        Err(err) => ui_state.set_export_message(format!("PDF-Export fehlgeschlagen: {err}")),
+                    }
+                    window.request_redraw();
+                }
+
                 let prev_upd = updater.status().clone();
                 updater.update();
                 if *updater.status() != prev_upd {
@@ -347,10 +410,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 );
                                                 if !removed.is_empty() {
                                                     canvas.sync_page(page);
-                                                    autosave.mark_page_dirty(
-                                                        notebook.current_page(),
-                                                        &manifest,
-                                                    );
+                                                    autosave.mark_dirty(&notebook, &manifest);
                                                     update_window_title(
                                                         &window,
                                                         &notebook,
@@ -427,10 +487,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 );
                                                 if !removed.is_empty() {
                                                     canvas.sync_page(page);
-                                                    autosave.mark_page_dirty(
-                                                        notebook.current_page(),
-                                                        &manifest,
-                                                    );
+                                                    autosave.mark_dirty(&notebook, &manifest);
                                                     update_window_title(
                                                         &window,
                                                         &notebook,
@@ -680,7 +737,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 if notebook.current_page_mut().undo() {
                                     selection_state.clear();
                                     canvas.sync_page(notebook.current_page_mut());
-                                    autosave.mark_page_dirty(notebook.current_page(), &manifest);
+                                    autosave.mark_dirty(&notebook, &manifest);
                                     update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
                                     window.request_redraw();
                                 }
@@ -694,7 +751,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 if notebook.current_page_mut().redo() {
                                     selection_state.clear();
                                     canvas.sync_page(notebook.current_page_mut());
-                                    autosave.mark_page_dirty(notebook.current_page(), &manifest);
+                                    autosave.mark_dirty(&notebook, &manifest);
                                     update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
                                     window.request_redraw();
                                 }
@@ -724,7 +781,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 if !new_ids.is_empty() {
                                     canvas.sync_page(notebook.current_page_mut());
                                     manifest.next_stroke_id = notebook.next_stroke_id;
-                                    autosave.mark_page_dirty(notebook.current_page(), &manifest);
+                                    autosave.mark_dirty(&notebook, &manifest);
                                     ui_state.set_export_message(format!("{} Objekt(e) eingefügt", new_ids.len()));
                                     window.request_redraw();
                                 }
@@ -736,7 +793,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     let removed = selection_state.delete_selected(notebook.current_page_mut());
                                     if !removed.is_empty() {
                                         canvas.sync_page(notebook.current_page_mut());
-                                        autosave.mark_page_dirty(notebook.current_page(), &manifest);
+                                        autosave.mark_dirty(&notebook, &manifest);
                                         ui_state.set_export_message(format!("{} Objekt(e) gelöscht", removed.len()));
                                         window.request_redraw();
                                     }
@@ -745,8 +802,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                             // Jetzt speichern (Disk Flush): Strg + S
                             Key::Character(c) if c.eq_ignore_ascii_case("s") && ctrl => {
-                                autosave.flush();
-                                ui_state.set_export_message("Gespeichert");
+                                match autosave.save_now(&notebook, &manifest) {
+                                    Ok(()) => ui_state.set_export_message("Gespeichert"),
+                                    Err(err) => ui_state.set_export_message(format!("Speichern fehlgeschlagen: {err}")),
+                                }
                                 update_window_title(
                                     &window,
                                     &notebook,
@@ -759,38 +818,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                             // PDF-Export: Strg + E
                             Key::Character(c) if c.eq_ignore_ascii_case("e") && ctrl => {
-                                let notebook_clone = notebook.clone();
-                                let export_path = export::resolve_pdf_export_path(&manifest.title);
-                                let export_path_str = export_path.display().to_string();
-                                let window_ref = window.clone();
-                                println!(
-                                    "[Export] Starte PDF-Vektorexport nach '{}' (im Hintergrundthread)...",
-                                    export_path_str
-                                );
-                                ui_state.set_export_message(format!("PDF gespeichert: {}", export_path.display()));
-                                let export_path_thread = export_path.clone();
-                                std::thread::spawn(move || {
-                                    let start = std::time::Instant::now();
-                                    match export_notebook_to_pdf(
-                                        &notebook_clone,
-                                        &export_path_thread,
-                                        ExportStrategy::FilledPolygon,
-                                    ) {
-                                        Ok(()) => {
-                                            let elapsed = start.elapsed();
-                                            println!(
-                                                "[Export] PDF erfolgreich exportiert: '{}' ({:.1?} für {} Seiten)",
-                                                export_path_thread.display(),
-                                                elapsed,
-                                                notebook_clone.pages.len()
-                                            );
-                                            window_ref.request_redraw();
-                                        }
-                                        Err(err) => {
-                                            eprintln!("[Export-Fehler] Konnte PDF nicht exportieren: {err}");
-                                        }
-                                    }
-                                });
+                                start_pdf_export(&notebook, &storage_dir, &manifest.title, export_tx.clone(), window.clone());
+                                ui_state.set_export_message("PDF-Export läuft…");
                                 window.request_redraw();
                             }
 
@@ -826,7 +855,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     let color = [0.12, 0.12, 0.14, 1.0];
                                     if selection_state.recolor_selected(notebook.current_page_mut(), color) {
                                         canvas.sync_page(notebook.current_page_mut());
-                                        autosave.mark_page_dirty(notebook.current_page(), &manifest);
+                                        autosave.mark_dirty(&notebook, &manifest);
                                         ui_state.set_export_message("Auswahl auf Schwarz umgefärbt".to_string());
                                         window.request_redraw();
                                     }
@@ -846,7 +875,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     let color = [0.15, 0.35, 0.85, 1.0];
                                     if selection_state.recolor_selected(notebook.current_page_mut(), color) {
                                         canvas.sync_page(notebook.current_page_mut());
-                                        autosave.mark_page_dirty(notebook.current_page(), &manifest);
+                                        autosave.mark_dirty(&notebook, &manifest);
                                         ui_state.set_export_message("Auswahl auf Blau umgefärbt".to_string());
                                         window.request_redraw();
                                     }
@@ -865,7 +894,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 if !selection_state.is_empty() {
                                     if selection_state.rotate_selected_90_deg(notebook.current_page_mut()) {
                                         canvas.sync_page(notebook.current_page_mut());
-                                        autosave.mark_page_dirty(notebook.current_page(), &manifest);
+                                        autosave.mark_dirty(&notebook, &manifest);
                                         ui_state.set_export_message("Auswahl um 90° gedreht".to_string());
                                         window.request_redraw();
                                     }
@@ -889,7 +918,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     PageBackground::Blank => PageBackground::Grid5mm,
                                 };
                                 canvas.sync_page(page);
-                                autosave.mark_page_dirty(notebook.current_page(), &manifest);
+                                autosave.mark_dirty(&notebook, &manifest);
                                 update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
                                 window.request_redraw();
                             }
@@ -903,7 +932,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 canvas.sync_page(notebook.current_page_mut());
                                 manifest.current_page_index = notebook.current_page_index;
                                 manifest.next_page_id = notebook.next_page_id;
-                                autosave.mark_page_dirty(notebook.current_page(), &manifest);
+                                autosave.mark_dirty(&notebook, &manifest);
                                 update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
                                 window.request_redraw();
                             }
@@ -915,7 +944,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 canvas.sync_page(notebook.current_page_mut());
                                 manifest.current_page_index = notebook.current_page_index;
                                 manifest.next_page_id = notebook.next_page_id;
-                                autosave.mark_page_dirty(notebook.current_page(), &manifest);
+                                autosave.mark_dirty(&notebook, &manifest);
                                 update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
                                 window.request_redraw();
                             }
@@ -928,7 +957,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 let _ = storage::ensure_page_loaded(&storage_dir, &mut notebook, curr);
                                 canvas.sync_page(notebook.current_page_mut());
                                 manifest.current_page_index = notebook.current_page_index;
-                                autosave.mark_page_dirty(notebook.current_page(), &manifest);
+                                autosave.mark_dirty(&notebook, &manifest);
                                 update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
                                 window.request_redraw();
                             }
@@ -941,7 +970,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 let _ = storage::ensure_page_loaded(&storage_dir, &mut notebook, curr);
                                 canvas.sync_page(notebook.current_page_mut());
                                 manifest.current_page_index = notebook.current_page_index;
-                                autosave.mark_page_dirty(notebook.current_page(), &manifest);
+                                autosave.mark_dirty(&notebook, &manifest);
                                 update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
                                 window.request_redraw();
                             }
@@ -954,7 +983,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 let _ = storage::ensure_page_loaded(&storage_dir, &mut notebook, curr);
                                 canvas.sync_page(notebook.current_page_mut());
                                 manifest.current_page_index = notebook.current_page_index;
-                                autosave.mark_page_dirty(notebook.current_page(), &manifest);
+                                autosave.mark_dirty(&notebook, &manifest);
                                 update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
                                 window.request_redraw();
                             }
@@ -1035,7 +1064,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         let removed = page.erase_at(page_pt, eraser_radius, stroke_max_radius);
                                         if !removed.is_empty() {
                                             canvas.sync_page(page);
-                                            autosave.mark_page_dirty(notebook.current_page(), &manifest);
+                                            autosave.mark_dirty(&notebook, &manifest);
                                             update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
                                             window.request_redraw();
                                         }
@@ -1133,7 +1162,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                     let new_stroke = geometry::shape_to_stroke(shape, old_id, stroke_color, stroke_width);
                                                     notebook.current_page_mut().replace_stroke(old_id, new_stroke);
                                                     canvas.sync_page(notebook.current_page_mut());
-                                                    autosave.mark_page_dirty(notebook.current_page(), &manifest);
+                                                    autosave.mark_dirty(&notebook, &manifest);
                                                     ui_state.set_export_message(format!("{shape_name} ausgerichtet! (Undo mit Strg+Z)"));
                                                     window.request_redraw();
                                                     return;
@@ -1190,7 +1219,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             let final_strokes = notebook.current_page().get_strokes(&selection_state.selected_ids);
                                             if !initial_strokes.is_empty() && !final_strokes.is_empty() && initial_strokes != final_strokes {
                                                 notebook.current_page_mut().commit_modified_strokes(initial_strokes, final_strokes);
-                                                autosave.mark_page_dirty(notebook.current_page(), &manifest);
+                                                autosave.mark_dirty(&notebook, &manifest);
                                             }
                                             window.request_redraw();
                                         }
@@ -1303,7 +1332,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     let removed = page.erase_at(page_pt, eraser_radius, stroke_max_radius);
                                     if !removed.is_empty() {
                                         canvas.sync_page(page);
-                                        autosave.mark_page_dirty(notebook.current_page(), &manifest);
+                                        autosave.mark_dirty(&notebook, &manifest);
                                         update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
                                         window.request_redraw();
                                     }
@@ -1427,7 +1456,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 let removed = page.erase_at(page_pt, eraser_radius, stroke_max_radius);
                                                 if !removed.is_empty() {
                                                     canvas.sync_page(page);
-                                                    autosave.mark_page_dirty(notebook.current_page(), &manifest);
+                                                    autosave.mark_dirty(&notebook, &manifest);
                                                     update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
                                                     window.request_redraw();
                                                 }
@@ -1568,7 +1597,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             let removed = page.erase_at(page_pt, eraser_radius, stroke_max_radius);
                                             if !removed.is_empty() {
                                                 canvas.sync_page(page);
-                                                autosave.mark_page_dirty(notebook.current_page(), &manifest);
+                                                autosave.mark_dirty(&notebook, &manifest);
                                                 update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
                                                 window.request_redraw();
                                             }
@@ -1659,7 +1688,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 let final_strokes = notebook.current_page().get_strokes(&selection_state.selected_ids);
                                                 if !initial_strokes.is_empty() && !final_strokes.is_empty() && initial_strokes != final_strokes {
                                                     notebook.current_page_mut().commit_modified_strokes(initial_strokes, final_strokes);
-                                                    autosave.mark_page_dirty(notebook.current_page(), &manifest);
+                                                    autosave.mark_dirty(&notebook, &manifest);
                                                 }
                                                 window.request_redraw();
                                             }
@@ -1743,7 +1772,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     if !selection_state.is_empty()
                                         && selection_state.recolor_selected(notebook.current_page_mut(), color) {
                                             canvas.sync_page(notebook.current_page_mut());
-                                            autosave.mark_page_dirty(notebook.current_page(), &manifest);
+                                            autosave.mark_dirty(&notebook, &manifest);
                                             ui_state.set_export_message("Auswahl umgefärbt".to_string());
                                         }
                                     match ui_state.active_tool {
@@ -1778,7 +1807,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         let removed = selection_state.delete_selected(notebook.current_page_mut());
                                         if !removed.is_empty() {
                                             canvas.sync_page(notebook.current_page_mut());
-                                            autosave.mark_page_dirty(notebook.current_page(), &manifest);
+                                            autosave.mark_dirty(&notebook, &manifest);
                                             ui_state.set_export_message(format!("{} Objekt(e) gelöscht", removed.len()));
                                             window.request_redraw();
                                         }
@@ -1805,7 +1834,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     if !new_ids.is_empty() {
                                         canvas.sync_page(notebook.current_page_mut());
                                         manifest.next_stroke_id = notebook.next_stroke_id;
-                                        autosave.mark_page_dirty(notebook.current_page(), &manifest);
+                                        autosave.mark_dirty(&notebook, &manifest);
                                         ui_state.set_export_message(format!("{} Objekt(e) eingefügt", new_ids.len()));
                                         window.request_redraw();
                                     }
@@ -1814,7 +1843,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     if !selection_state.is_empty()
                                         && selection_state.rotate_selected_90_deg(notebook.current_page_mut()) {
                                             canvas.sync_page(notebook.current_page_mut());
-                                            autosave.mark_page_dirty(notebook.current_page(), &manifest);
+                                            autosave.mark_dirty(&notebook, &manifest);
                                             ui_state.set_export_message("Auswahl um 90° gedreht".to_string());
                                             window.request_redraw();
                                         }
@@ -1842,7 +1871,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     if notebook.current_page_mut().undo() {
                                         selection_state.clear();
                                         canvas.sync_page(notebook.current_page_mut());
-                                        autosave.mark_page_dirty(notebook.current_page(), &manifest);
+                                        autosave.mark_dirty(&notebook, &manifest);
                                         update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
                                         window.request_redraw();
                                     }
@@ -1851,7 +1880,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     if notebook.current_page_mut().redo() {
                                         selection_state.clear();
                                         canvas.sync_page(notebook.current_page_mut());
-                                        autosave.mark_page_dirty(notebook.current_page(), &manifest);
+                                        autosave.mark_dirty(&notebook, &manifest);
                                         update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
                                         window.request_redraw();
                                     }
@@ -1863,7 +1892,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     let _ = storage::ensure_page_loaded(&storage_dir, &mut notebook, curr);
                                     canvas.sync_page(notebook.current_page_mut());
                                     manifest.current_page_index = notebook.current_page_index;
-                                    autosave.mark_page_dirty(notebook.current_page(), &manifest);
+                                    autosave.mark_dirty(&notebook, &manifest);
                                     update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
                                     window.request_redraw();
                                 }
@@ -1875,7 +1904,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     canvas.sync_page(notebook.current_page_mut());
                                     manifest.current_page_index = notebook.current_page_index;
                                     manifest.next_page_id = notebook.next_page_id;
-                                    autosave.mark_page_dirty(notebook.current_page(), &manifest);
+                                    autosave.mark_dirty(&notebook, &manifest);
                                     update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
                                     window.request_redraw();
                                 }
@@ -1886,7 +1915,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     manifest.current_page_index = notebook.current_page_index;
                                     manifest.next_page_id = notebook.next_page_id;
                                     canvas.sync_page(notebook.current_page_mut());
-                                    autosave.mark_page_dirty(notebook.current_page(), &manifest);
+                                    autosave.mark_dirty(&notebook, &manifest);
                                     update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
                                     window.request_redraw();
                                 }
@@ -1897,7 +1926,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         let _ = storage::ensure_page_loaded(&storage_dir, &mut notebook, idx);
                                         canvas.sync_page(notebook.current_page_mut());
                                         manifest.current_page_index = idx;
-                                        autosave.mark_page_dirty(notebook.current_page(), &manifest);
+                                        autosave.mark_dirty(&notebook, &manifest);
                                         update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
                                         window.request_redraw();
                                     }
@@ -1906,43 +1935,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     let page = notebook.current_page_mut();
                                     page.background = bg;
                                     canvas.sync_page(page);
-                                    autosave.mark_page_dirty(notebook.current_page(), &manifest);
+                                    autosave.mark_dirty(&notebook, &manifest);
                                     update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
                                     window.request_redraw();
                                 }
                                 UiAction::ExportPdf => {
-                                    let notebook_clone = notebook.clone();
-                                    let export_path = export::resolve_pdf_export_path(&manifest.title);
-                                    let export_path_str = export_path.display().to_string();
-                                    let window_ref = window.clone();
-                                    println!(
-                                        "[Export] Starte PDF-Vektorexport nach '{}' (im Hintergrundthread)...",
-                                        export_path_str
-                                    );
-                                    ui_state.set_export_message(format!("PDF gespeichert: {}", export_path.display()));
-                                    let export_path_thread = export_path.clone();
-                                    std::thread::spawn(move || {
-                                        let start = std::time::Instant::now();
-                                        match export_notebook_to_pdf(
-                                            &notebook_clone,
-                                            &export_path_thread,
-                                            ExportStrategy::FilledPolygon,
-                                        ) {
-                                            Ok(()) => {
-                                                let elapsed = start.elapsed();
-                                                println!(
-                                                    "[Export] PDF erfolgreich exportiert: '{}' ({:.1?} für {} Seiten)",
-                                                    export_path_thread.display(),
-                                                    elapsed,
-                                                    notebook_clone.pages.len()
-                                                );
-                                                window_ref.request_redraw();
-                                            }
-                                            Err(err) => {
-                                                eprintln!("[Export-Fehler] Konnte PDF nicht exportieren: {err}");
-                                            }
-                                        }
-                                    });
+                                    start_pdf_export(&notebook, &storage_dir, &manifest.title, export_tx.clone(), window.clone());
+                                    ui_state.set_export_message("PDF-Export läuft…");
                                     window.request_redraw();
                                 }
 
@@ -1958,7 +1957,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         let new_notebook_dir = storage_base_dir.join(&id);
                                         match storage::load_notebook(&new_notebook_dir) {
                                             Ok((loaded_nb, loaded_manifest)) => {
-                                                autosave.switch_notebook_dir(new_notebook_dir.clone());
+                                                if let Err(err) = autosave.switch_notebook_dir(new_notebook_dir.clone()) {
+    eprintln!("[Autosave-Fehler] Vorheriges Notizbuch nicht vollständig gespeichert: {err}");
+}
                                                 notebook = loaded_nb;
                                                 manifest = loaded_manifest;
                                                 storage_dir = new_notebook_dir;
@@ -1980,10 +1981,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     }
                                 }
                                 UiAction::CreateNotebook(title) => {
-                                    autosave.flush();
                                     match storage::create_new_notebook(&storage_base_dir, &title) {
                                         Ok((new_nb, new_manifest, new_dir)) => {
-                                            autosave.switch_notebook_dir(new_dir.clone());
+                                            if let Err(err) = autosave.switch_notebook_dir(new_dir.clone()) {
+    eprintln!("[Autosave-Fehler] Vorheriges Notizbuch nicht vollständig gespeichert: {err}");
+}
                                             notebook = new_nb;
                                             manifest = new_manifest;
                                             storage_dir = new_dir;
@@ -2034,41 +2036,51 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 UiAction::DeleteNotebook(id) => {
                                     let target_dir = storage_base_dir.join(&id);
                                     let is_current = id == manifest.id;
+                                    if is_current {
+                                        // Ausstehende Autosave-Schreibvorgänge VOR dem Löschen abarbeiten,
+                                        // sonst legen sie den gelöschten Ordner danach wieder an.
+                                        let _ = autosave.flush();
+                                    }
                                     match storage::delete_notebook(&target_dir) {
                                         Ok(()) => {
                                             ui_state.available_notebooks = storage::list_notebooks(&storage_base_dir);
                                             if is_current {
-                                                if let Some(first) = ui_state.available_notebooks.first().cloned() {
-                                                    let new_notebook_dir = storage_base_dir.join(&first.id);
-                                                    match storage::load_notebook(&new_notebook_dir) {
-                                                        Ok((loaded_nb, loaded_manifest)) => {
-                                                            autosave.switch_notebook_dir(new_notebook_dir.clone());
-                                                            notebook = loaded_nb;
-                                                            manifest = loaded_manifest;
-                                                            storage_dir = new_notebook_dir;
-                                                            selection_state.clear();
-                                                            ui_state.current_notebook_id = manifest.id.clone();
-                                                            ui_state.document_title = manifest.title.clone();
-                                                            canvas.sync_page(notebook.current_page_mut());
-                                                            update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
-                                                            ui_state.set_export_message(format!("Gewechselt zu '{}'", manifest.title));
+                                                // Erstes ladbares Notizbuch öffnen, sonst ein neues anlegen
+                                                let replacement = ui_state
+                                                    .available_notebooks
+                                                    .iter()
+                                                    .find_map(|summary| {
+                                                        let dir = storage_base_dir.join(&summary.id);
+                                                        match storage::load_notebook(&dir) {
+                                                            Ok((nb, m)) => Some((nb, m, dir)),
+                                                            Err(err) => {
+                                                                eprintln!("[Dokument-Fehler] Konnte Dokument '{}' nicht laden: {err}", summary.id);
+                                                                None
+                                                            }
                                                         }
-                                                        Err(err) => {
-                                                            eprintln!("[Dokument-Fehler] Konnte Dokument '{}' nicht laden: {err}", first.id);
+                                                    })
+                                                    .map(Ok)
+                                                    .unwrap_or_else(|| storage::create_new_notebook(&storage_base_dir, "Standard-Notizbuch"));
+                                                match replacement {
+                                                    Ok((new_nb, new_manifest, new_dir)) => {
+                                                        if let Err(err) = autosave.switch_notebook_dir(new_dir.clone()) {
+                                                            eprintln!("[Autosave-Fehler] Vorheriges Notizbuch nicht vollständig gespeichert: {err}");
                                                         }
+                                                        notebook = new_nb;
+                                                        manifest = new_manifest;
+                                                        storage_dir = new_dir;
+                                                        selection_state.clear();
+                                                        ui_state.current_notebook_id = manifest.id.clone();
+                                                        ui_state.document_title = manifest.title.clone();
+                                                        ui_state.available_notebooks = storage::list_notebooks(&storage_base_dir);
+                                                        canvas.sync_page(notebook.current_page_mut());
+                                                        update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
+                                                        ui_state.set_export_message(format!("Gewechselt zu '{}'", manifest.title));
                                                     }
-                                                } else if let Ok((new_nb, new_manifest, new_dir)) = storage::create_new_notebook(&storage_base_dir, "Standard-Notizbuch") {
-                                                    autosave.switch_notebook_dir(new_dir.clone());
-                                                    notebook = new_nb;
-                                                    manifest = new_manifest;
-                                                    storage_dir = new_dir;
-                                                    selection_state.clear();
-                                                    ui_state.current_notebook_id = manifest.id.clone();
-                                                    ui_state.document_title = manifest.title.clone();
-                                                    ui_state.available_notebooks = storage::list_notebooks(&storage_base_dir);
-                                                    canvas.sync_page(notebook.current_page_mut());
-                                                    update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
-                                                    ui_state.set_export_message("Standard-Notizbuch erstellt".to_string());
+                                                    Err(err) => {
+                                                        eprintln!("[Dokument-Fehler] Konnte kein Ersatz-Notizbuch anlegen: {err}");
+                                                        ui_state.set_export_message(format!("Dokument gelöscht, aber kein Ersatz-Notizbuch: {err}"));
+                                                    }
                                                 }
                                             } else {
                                                 ui_state.set_export_message("Dokument gelöscht".to_string());
