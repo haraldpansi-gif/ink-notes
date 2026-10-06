@@ -177,33 +177,34 @@ upload_asset() {
     local encoded_name
     encoded_name=$(python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1]))' "${filename}")
 
-    # Prüfen, ob bereits ein Asset mit demselben Namen existiert
-    local existing_id=""
+    # Prüfen, ob bereits Assets mit demselben Namen existieren (können mehrere sein)
+    local existing_ids=()
     if [ -f "${ASSETS_LIST_FILE}" ] && [ -s "${ASSETS_LIST_FILE}" ]; then
-        existing_id=$(python3 -c '
+        mapfile -t existing_ids < <(python3 -c '
 import sys, json
 try:
     assets = json.load(open(sys.argv[1]))
     target = sys.argv[2]
     for a in assets:
-        if a.get("name") == target:
-            print(a.get("id", ""))
-            break
+        if a.get("name") == target and a.get("id"):
+            print(a.get("id"))
 except Exception:
     pass
 ' "${ASSETS_LIST_FILE}" "${filename}")
     fi
 
-    if [ -n "${existing_id}" ]; then
-        echo "Lösche bestehendes Asset '${filename}' (ID: ${existing_id}) vor Re-Upload..."
-        local del_status
-        del_status=$(curl -s -S -o /dev/null -w "%{http_code}" \
-            -X DELETE "${API_BASE}/releases/${RELEASE_ID}/assets/${existing_id}" \
-            -H "Authorization: token ${TOKEN}" || echo "000")
-        if [ "${del_status}" != "204" ] && [ "${del_status}" != "200" ]; then
-            echo "Warnung: Löschen von bestehendem Asset '${filename}' ergab HTTP ${del_status}."
+    for eid in "${existing_ids[@]}"; do
+        if [ -n "${eid}" ]; then
+            echo "Lösche bestehendes Asset '${filename}' (ID: ${eid}) vor Re-Upload..."
+            local del_status
+            del_status=$(curl -s -S -o /dev/null -w "%{http_code}" \
+                -X DELETE "${API_BASE}/releases/${RELEASE_ID}/assets/${eid}" \
+                -H "Authorization: token ${TOKEN}" || echo "000")
+            if [ "${del_status}" != "204" ] && [ "${del_status}" != "200" ]; then
+                echo "Warnung: Löschen von bestehendem Asset '${filename}' ergab HTTP ${del_status}."
+            fi
         fi
-    fi
+    done
 
     echo "Lade Asset hoch: ${filename}..."
     local upload_res_file="$(mktemp)"
