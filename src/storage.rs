@@ -785,7 +785,8 @@ pub fn delete_notebook(notebook_dir: &Path) -> Result<(), StorageError> {
 mod tests {
     use super::*;
     use crate::autosave::AutosaveController;
-    use std::time::Duration;
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
 
     #[test]
     fn test_atomic_save_and_reload() {
@@ -895,16 +896,28 @@ mod tests {
 
     #[test]
     fn test_debounce_timing() {
+        use crate::autosave::tests::MockClock;
+
         let temp_dir = tempfile::tempdir().expect("Konnte temporäres Verzeichnis nicht anlegen");
         let notebook_dir = temp_dir.path().to_path_buf();
 
+        let clock = Arc::new(MockClock::new(Instant::now()));
         let debounce_duration = Duration::from_millis(150);
-        let mut controller = AutosaveController::new(notebook_dir.clone(), debounce_duration);
+        let max_wait = Duration::from_secs(10);
+        let store = Arc::new(crate::autosave::DiskPageStore);
+
+        let mut controller = AutosaveController::with_options(
+            notebook_dir.clone(),
+            debounce_duration,
+            max_wait,
+            store,
+            Arc::clone(&clock) as Arc<dyn crate::autosave::Clock>,
+        );
         let manifest = NotebookManifest::new("test_nb", "Test Notizbuch");
 
         let mut page = Page::new(1, PageBackground::Grid5mm);
 
-        // 10 schnelle aufeinanderfolgende Änderungen (alle 5 ms, deutlich kürzer als 150 ms Debounce)
+        // 10 schnelle aufeinanderfolgende Änderungen (alle 5 ms mit MockClock, keine Wartezeit)
         for i in 0..10 {
             let sample = StylusSample {
                 position: glam::Vec2::new(10.0 + i as f32, 20.0 + i as f32),
@@ -920,23 +933,24 @@ mod tests {
             page.add_stroke(stroke);
 
             controller.mark_page_dirty(&page, &manifest);
+            clock.advance(Duration::from_millis(5));
             controller.update();
-            std::thread::sleep(Duration::from_millis(5));
         }
 
-        // Während der schnellen Änderungen (ca. 50 ms vergangen) darf noch KEIN Schreibvorgang erfolgt sein!
+        // Während der schnellen Änderungen darf noch KEIN Schreibvorgang erfolgt sein!
         assert_eq!(
             controller.total_page_writes(),
             0,
             "Vor Ablauf des Debounce-Fensters darf noch kein Disk-Write stattgefunden haben"
         );
 
-        // Jetzt warten wir, bis das Debounce-Fenster abgelaufen ist (> 150 ms)
-        std::thread::sleep(Duration::from_millis(180));
+        // Jetzt drehen wir die Mock-Uhr um 180 ms vor (> 150 ms Debounce)
+        clock.advance(Duration::from_millis(180));
         controller.update();
 
         // Flush abwarten
-        controller.flush();
+        let flush_res = controller.flush();
+        assert!(flush_res.is_ok(), "Flush muss erfolgreich sein");
 
         // Es darf genau EIN tatsächlicher Schreibvorgang für die Seite stattgefunden haben
         assert_eq!(
@@ -949,7 +963,8 @@ mod tests {
         let loaded = load_page(&notebook_dir, 1).expect("Seite muss lesbar sein");
         assert_eq!(loaded.strokes.len(), 10);
 
-        controller.shutdown();
+        let shutdown_res = controller.shutdown();
+        assert!(shutdown_res.is_ok());
     }
 
     #[test]

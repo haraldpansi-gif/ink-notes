@@ -125,6 +125,10 @@ pub enum UiAction {
     },
     // Datenintegrität / Quarantäne
     UnlockCorruptedPage(u64),
+    // Beenden-Sicherheit bei Fehlschlag
+    RetryShutdown,
+    ExportRecoveryAndExit,
+    ForceExit,
 }
 
 /// Zustand der grafischen Benutzeroberfläche.
@@ -164,6 +168,8 @@ pub struct UiState {
     pub update_modal_rect: Option<egui::Rect>,
     /// Steuert, ob Touch-Eingaben mit einem Finger zeichnen oder das Dokument verschieben (Default: false = reine Gesten-Navigation & Zoom)
     pub touch_draw_enabled: bool,
+    /// Fehler beim Flushen vor dem Beenden
+    pub shutdown_error: Option<crate::autosave::AutosaveError>,
 }
 
 impl Default for UiState {
@@ -195,6 +201,7 @@ impl Default for UiState {
             show_updater_config: false,
             update_modal_rect: None,
             touch_draw_enabled: false,
+            shutdown_error: None,
         }
     }
 }
@@ -2020,6 +2027,95 @@ pub fn render_ui(
                     );
                 }
             });
+    }
+
+    // Notfall-/Sicherheits-Dialog bei Fehlschlag des Speicherns vor dem Beenden
+    if let Some(err) = &state.shutdown_error {
+        let mut dismiss = false;
+        egui::Window::new("⚠️ Ungespeicherte Änderungen")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .frame(
+                egui::Frame::none()
+                    .fill(egui::Color32::from_rgba_premultiplied(35, 20, 20, 250))
+                    .rounding(egui::Rounding::same(12.0))
+                    .stroke(egui::Stroke::new(
+                        1.5_f32,
+                        egui::Color32::from_rgb(235, 87, 87),
+                    ))
+                    .inner_margin(egui::Margin::symmetric(24.0, 20.0))
+                    .shadow(egui::epaint::Shadow {
+                        offset: egui::vec2(0.0, 8.0),
+                        blur: 24.0,
+                        spread: 0.0,
+                        color: egui::Color32::from_black_alpha(200),
+                    }),
+            )
+            .show(ctx, |ui| {
+                ui.set_width(460.0);
+                ui.horizontal(|ui| {
+                    ui.colored_label(egui::Color32::from_rgb(255, 80, 80), "⚠️");
+                    ui.label(
+                        egui::RichText::new("Fehler beim Beenden")
+                            .color(egui::Color32::from_rgb(255, 100, 100))
+                            .size(16.0)
+                            .strong(),
+                    );
+                });
+                ui.add_space(8.0);
+                ui.label(
+                    egui::RichText::new(
+                        "Ungespeicherte Änderungen konnten nicht gesichert werden:",
+                    )
+                    .size(13.0)
+                    .color(egui::Color32::WHITE),
+                );
+                ui.add_space(6.0);
+                egui::Frame::none()
+                    .fill(egui::Color32::from_black_alpha(100))
+                    .rounding(egui::Rounding::same(6.0))
+                    .inner_margin(egui::Margin::same(8.0))
+                    .show(ui, |ui| {
+                        for msg in &err.messages {
+                            ui.label(
+                                egui::RichText::new(msg)
+                                    .size(11.5)
+                                    .color(egui::Color32::from_rgb(255, 180, 180)),
+                            );
+                        }
+                    });
+                ui.add_space(8.0);
+                ui.label(
+                    egui::RichText::new("Trotzdem beenden?")
+                        .size(13.0)
+                        .color(egui::Color32::WHITE),
+                );
+                ui.add_space(12.0);
+                ui.horizontal_wrapped(|ui| {
+                    if ui.button("Abbrechen").clicked() {
+                        dismiss = true;
+                    }
+                    if ui.button("Wiederholen").clicked() {
+                        actions.push(UiAction::RetryShutdown);
+                    }
+                    if ui.button("Notfall-Export").clicked() {
+                        actions.push(UiAction::ExportRecoveryAndExit);
+                    }
+                    if ui
+                        .button(
+                            egui::RichText::new("Trotzdem beenden")
+                                .color(egui::Color32::from_rgb(255, 100, 100)),
+                        )
+                        .clicked()
+                    {
+                        actions.push(UiAction::ForceExit);
+                    }
+                });
+            });
+        if dismiss {
+            state.shutdown_error = None;
+        }
     }
 
     actions

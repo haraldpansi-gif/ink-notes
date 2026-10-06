@@ -581,8 +581,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 match event {
                     WindowEvent::CloseRequested => {
                         println!("[Shutdown] Sichere alle ungespeicherten Daten auf Festplatte...");
-                        autosave.shutdown();
-                        target.exit();
+                        match autosave.shutdown() {
+                            Ok(()) => {
+                                target.exit();
+                            }
+                            Err(err) => {
+                                eprintln!("[Shutdown-Fehler] Konnte nicht geordnet beenden: {err}");
+                                ui_state.shutdown_error = Some(err);
+                                window.request_redraw();
+                            }
+                        }
                     }
 
                     WindowEvent::Focused(false) => {
@@ -651,7 +659,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         match &logical_key {
                             Key::Named(NamedKey::Escape) => {
                                 let mut changed = false;
-                                if ui_state.is_pen_menu_open
+                                if ui_state.shutdown_error.is_some() {
+                                    ui_state.shutdown_error = None;
+                                    changed = true;
+                                } else if ui_state.is_pen_menu_open
                                     || ui_state.is_highlighter_menu_open
                                     || ui_state.show_page_jump_popup
                                     || ui_state.is_document_menu_open
@@ -745,8 +756,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                             // Jetzt speichern (Disk Flush): Strg + S
                             Key::Character(c) if c.eq_ignore_ascii_case("s") && ctrl => {
-                                autosave.flush();
-                                ui_state.set_export_message("Gespeichert");
+                                match autosave.flush() {
+                                    Ok(()) => {
+                                        ui_state.set_export_message("Gespeichert");
+                                    }
+                                    Err(err) => {
+                                        ui_state.set_export_message(format!(
+                                            "Speicherfehler: {}",
+                                            err.messages.join(", ")
+                                        ));
+                                    }
+                                }
                                 update_window_title(
                                     &window,
                                     &notebook,
@@ -903,6 +923,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 canvas.sync_page(notebook.current_page_mut());
                                 manifest.current_page_index = notebook.current_page_index;
                                 manifest.next_page_id = notebook.next_page_id;
+                                autosave.mark_manifest_dirty(&manifest);
                                 autosave.mark_page_dirty(notebook.current_page(), &manifest);
                                 update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
                                 window.request_redraw();
@@ -915,6 +936,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 canvas.sync_page(notebook.current_page_mut());
                                 manifest.current_page_index = notebook.current_page_index;
                                 manifest.next_page_id = notebook.next_page_id;
+                                autosave.mark_manifest_dirty(&manifest);
                                 autosave.mark_page_dirty(notebook.current_page(), &manifest);
                                 update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
                                 window.request_redraw();
@@ -928,6 +950,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 let _ = storage::ensure_page_loaded(&storage_dir, &mut notebook, curr);
                                 canvas.sync_page(notebook.current_page_mut());
                                 manifest.current_page_index = notebook.current_page_index;
+                                autosave.mark_manifest_dirty(&manifest);
                                 autosave.mark_page_dirty(notebook.current_page(), &manifest);
                                 update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
                                 window.request_redraw();
@@ -941,6 +964,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 let _ = storage::ensure_page_loaded(&storage_dir, &mut notebook, curr);
                                 canvas.sync_page(notebook.current_page_mut());
                                 manifest.current_page_index = notebook.current_page_index;
+                                autosave.mark_manifest_dirty(&manifest);
                                 autosave.mark_page_dirty(notebook.current_page(), &manifest);
                                 update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
                                 window.request_redraw();
@@ -954,6 +978,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 let _ = storage::ensure_page_loaded(&storage_dir, &mut notebook, curr);
                                 canvas.sync_page(notebook.current_page_mut());
                                 manifest.current_page_index = notebook.current_page_index;
+                                autosave.mark_manifest_dirty(&manifest);
                                 autosave.mark_page_dirty(notebook.current_page(), &manifest);
                                 update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
                                 window.request_redraw();
@@ -994,8 +1019,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             // Beenden: Strg + Q
                             Key::Character(c) if c.eq_ignore_ascii_case("q") && ctrl => {
                                 println!("[Shutdown] Sichere alle ungespeicherten Daten auf Festplatte...");
-                                autosave.shutdown();
-                                target.exit();
+                                match autosave.shutdown() {
+                                    Ok(()) => {
+                                        target.exit();
+                                    }
+                                    Err(err) => {
+                                        eprintln!("[Shutdown-Fehler] Konnte nicht geordnet beenden: {err}");
+                                        ui_state.shutdown_error = Some(err);
+                                        window.request_redraw();
+                                    }
+                                }
                             }
 
 
@@ -1863,6 +1896,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     let _ = storage::ensure_page_loaded(&storage_dir, &mut notebook, curr);
                                     canvas.sync_page(notebook.current_page_mut());
                                     manifest.current_page_index = notebook.current_page_index;
+                                    autosave.mark_manifest_dirty(&manifest);
                                     autosave.mark_page_dirty(notebook.current_page(), &manifest);
                                     update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
                                     window.request_redraw();
@@ -1875,6 +1909,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     canvas.sync_page(notebook.current_page_mut());
                                     manifest.current_page_index = notebook.current_page_index;
                                     manifest.next_page_id = notebook.next_page_id;
+                                    manifest.pages = notebook
+                                        .pages
+                                        .iter()
+                                        .map(|p| storage::PageMeta {
+                                            id: p.id,
+                                            background: Some(p.background),
+                                        })
+                                        .collect();
+                                    autosave.mark_manifest_dirty(&manifest);
                                     autosave.mark_page_dirty(notebook.current_page(), &manifest);
                                     update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
                                     window.request_redraw();
@@ -1885,7 +1928,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     notebook.add_page(bg);
                                     manifest.current_page_index = notebook.current_page_index;
                                     manifest.next_page_id = notebook.next_page_id;
+                                    manifest.pages = notebook
+                                        .pages
+                                        .iter()
+                                        .map(|p| storage::PageMeta {
+                                            id: p.id,
+                                            background: Some(p.background),
+                                        })
+                                        .collect();
                                     canvas.sync_page(notebook.current_page_mut());
+                                    autosave.mark_manifest_dirty(&manifest);
                                     autosave.mark_page_dirty(notebook.current_page(), &manifest);
                                     update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
                                     window.request_redraw();
@@ -1897,6 +1949,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         let _ = storage::ensure_page_loaded(&storage_dir, &mut notebook, idx);
                                         canvas.sync_page(notebook.current_page_mut());
                                         manifest.current_page_index = idx;
+                                        autosave.mark_manifest_dirty(&manifest);
                                         autosave.mark_page_dirty(notebook.current_page(), &manifest);
                                         update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
                                         window.request_redraw();
@@ -1980,7 +2033,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     }
                                 }
                                 UiAction::CreateNotebook(title) => {
-                                    autosave.flush();
+                                    let _ = autosave.flush();
                                     match storage::create_new_notebook(&storage_base_dir, &title) {
                                         Ok((new_nb, new_manifest, new_dir)) => {
                                             autosave.switch_notebook_dir(new_dir.clone());
@@ -2010,6 +2063,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             Ok(()) => {
                                                 ui_state.document_title = manifest.title.clone();
                                                 ui_state.available_notebooks = storage::list_notebooks(&storage_base_dir);
+                                                autosave.mark_manifest_dirty(&manifest);
                                                 update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
                                                 ui_state.set_export_message(format!("Umbenannt in '{}'", new_title));
                                                 window.request_redraw();
@@ -2113,6 +2167,43 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     }
                                     autosave.mark_page_dirty(notebook.current_page(), &manifest);
                                     window.request_redraw();
+                                }
+                                UiAction::RetryShutdown => {
+                                    println!("[Shutdown] Wiederhole Speichern vor Beenden...");
+                                    match autosave.shutdown() {
+                                        Ok(()) => {
+                                            ui_state.shutdown_error = None;
+                                            target.exit();
+                                        }
+                                        Err(err) => {
+                                            ui_state.shutdown_error = Some(err);
+                                            window.request_redraw();
+                                        }
+                                    }
+                                }
+                                UiAction::ExportRecoveryAndExit => {
+                                    println!("[Shutdown] Starte Notfall-Export aller ungespeicherten Daten...");
+                                    match autosave.export_recovery(Some(&notebook)) {
+                                        Ok(paths) => {
+                                            eprintln!(
+                                                "[Recovery] Notfall-Export erfolgreich geschrieben ({} Dateien): {:?}",
+                                                paths.len(),
+                                                paths
+                                            );
+                                            target.exit();
+                                        }
+                                        Err(err) => {
+                                            eprintln!("[Recovery-Fehler] Konnte Notfall-Export nicht schreiben: {err}");
+                                            if let Some(ref mut se) = ui_state.shutdown_error {
+                                                se.messages.push(format!("Notfall-Export fehlgeschlagen: {err}"));
+                                            }
+                                            window.request_redraw();
+                                        }
+                                    }
+                                }
+                                UiAction::ForceExit => {
+                                    println!("[Shutdown] Beenden erzwungen trotz ungespeicherter Änderungen.");
+                                    target.exit();
                                 }
                             }
                         }
