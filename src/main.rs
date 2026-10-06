@@ -55,21 +55,6 @@ fn update_window_title(
     window.set_title(&title);
 }
 
-/// Prüft, ob ein Bildschirmpunkt (physische Pixel) auf einem UI-Element liegt.
-///
-/// egui arbeitet in logischen Punkten; Touch- und Stift-Positionen kommen in physischen
-/// Pixeln. `layer_id_at` erfasst jedes egui-Element des letzten Frames (Leiste, Popover,
-/// Fenster), auch wenn egui den Zeiger selbst noch nicht kennt (Stift, erster Touch).
-fn is_screen_point_in_ui(
-    egui_ctx: &egui::Context,
-    ui_state: &UiState,
-    screen_pos: (f32, f32),
-    scale: f32,
-) -> bool {
-    let pos = egui::pos2(screen_pos.0 / scale, screen_pos.1 / scale);
-    ui_state.is_point_in_ui(pos.x, pos.y) || egui_ctx.layer_id_at(pos).is_some()
-}
-
 /// Exportiert das Notizbuch im Hintergrund als PDF. Noch nicht geladene Seiten werden vorher
 /// von der Festplatte nachgeladen; das Ergebnis geht über `result_tx` an den Event-Loop zurück.
 fn start_pdf_export(
@@ -270,7 +255,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Err(storage::StorageError::AlreadyLocked(msg)) => {
             eprintln!("[Storage-Lock] {msg}");
             autosave.set_read_only(true);
-            ui_state.set_export_message("⚠️ In anderer Instanz geöffnet (Schreibschutz)");
+            ui_state.set_export_message("⚠ In anderer Instanz geöffnet (Schreibschutz)");
             None
         }
         Err(e) => {
@@ -477,7 +462,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 .events
                                                 .push(egui::Event::PointerMoved(ui_pos));
                                             if stylus_ui_capture
-                                                || is_screen_point_in_ui(&egui_ctx, &ui_state, (sx, sy), scale)
+                                                || ui::is_screen_point_in_ui(&egui_ctx, &ui_state, (sx, sy), scale)
                                             {
                                                 window.request_redraw();
                                             }
@@ -532,7 +517,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         stylus_tool_id = Some(tool.id());
                                         let (sx, sy) = stylus_screen_pos;
 
-                                        if is_screen_point_in_ui(&egui_ctx, &ui_state, (sx, sy), scale) {
+                                        if ui::is_screen_point_in_ui(&egui_ctx, &ui_state, (sx, sy), scale) {
                                             // In die Eingabe-Warteschlange des NÄCHSTEN egui-Frames
                                             // (egui_ctx.input_mut würde vom nächsten Frame überschrieben)
                                             let ui_pos = egui::pos2(sx / scale, sy / scale);
@@ -710,7 +695,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // 2. Prüfen, ob das UI Pointer-Interaktionen beansprucht (Event-Isolation)
                 // Konsumiert Klicks innerhalb der abgerundeten Pill-Toolbar, des Popovers oder offener Menüs
                 let is_pointer_in_ui = egui_ctx.wants_pointer_input()
-                    || is_screen_point_in_ui(
+                    || ui::is_screen_point_in_ui(
                         &egui_ctx,
                         &ui_state,
                         cursor_screen_pos,
@@ -1539,7 +1524,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         match touch.phase {
                             TouchPhase::Started => {
                                 // Event-Isolation für Touch-Eingaben
-                                let is_touch_in_ui = is_screen_point_in_ui(
+                                let is_touch_in_ui = ui::is_screen_point_in_ui(
                                     &egui_ctx,
                                     &ui_state,
                                     (tx, ty),
@@ -2133,7 +2118,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                         eprintln!("[Storage-Lock] {msg}");
                                                         _notebook_lock = None;
                                                         autosave.set_read_only(true);
-                                                        ui_state.set_export_message("⚠️ In anderer Instanz geöffnet (Schreibschutz)");
+                                                        ui_state.set_export_message("⚠ In anderer Instanz geöffnet (Schreibschutz)");
                                                     }
                                                     Err(e) => {
                                                         eprintln!("[Storage-Lock] Konnte Lock nicht erwerben: {e}");

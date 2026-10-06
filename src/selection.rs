@@ -303,14 +303,14 @@ pub fn render_selection_overlay(
         painter.rect_filled(
             rect,
             egui::Rounding::same(4.0_f32),
-            egui::Color32::from_rgba_premultiplied(40, 120, 240, 35),
+            egui::Color32::from_rgba_unmultiplied(40, 120, 240, 35),
         );
         painter.rect_stroke(
             rect,
             egui::Rounding::same(4.0_f32),
             egui::Stroke::new(
                 1.5_f32,
-                egui::Color32::from_rgba_premultiplied(80, 160, 255, 220),
+                egui::Color32::from_rgba_unmultiplied(80, 160, 255, 220),
             ),
         );
         return;

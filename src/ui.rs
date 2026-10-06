@@ -376,16 +376,16 @@ fn tool_pill_button(
             egui::Color32::WHITE,
             egui::Stroke::new(
                 1.0_f32,
-                egui::Color32::from_rgba_premultiplied(110, 165, 255, 190),
+                egui::Color32::from_rgba_unmultiplied(110, 165, 255, 190),
             ),
         )
     } else {
         (
-            egui::Color32::from_rgba_premultiplied(255, 255, 255, 8),
+            egui::Color32::from_rgba_unmultiplied(255, 255, 255, 8),
             egui::Color32::from_gray(215),
             egui::Stroke::new(
                 1.0_f32,
-                egui::Color32::from_rgba_premultiplied(255, 255, 255, 15),
+                egui::Color32::from_rgba_unmultiplied(255, 255, 255, 15),
             ),
         )
     };
@@ -421,23 +421,23 @@ fn stroke_preview_button(
                 egui::Color32::from_rgba_premultiplied(50, 85, 150, 220),
                 egui::Stroke::new(
                     1.0_f32,
-                    egui::Color32::from_rgba_premultiplied(120, 175, 255, 200),
+                    egui::Color32::from_rgba_unmultiplied(120, 175, 255, 200),
                 ),
             )
         } else if response.hovered() {
             (
-                egui::Color32::from_rgba_premultiplied(255, 255, 255, 16),
+                egui::Color32::from_rgba_unmultiplied(255, 255, 255, 16),
                 egui::Stroke::new(
                     1.0_f32,
-                    egui::Color32::from_rgba_premultiplied(255, 255, 255, 25),
+                    egui::Color32::from_rgba_unmultiplied(255, 255, 255, 25),
                 ),
             )
         } else {
             (
-                egui::Color32::from_rgba_premultiplied(255, 255, 255, 8),
+                egui::Color32::from_rgba_unmultiplied(255, 255, 255, 8),
                 egui::Stroke::new(
                     1.0_f32,
-                    egui::Color32::from_rgba_premultiplied(255, 255, 255, 14),
+                    egui::Color32::from_rgba_unmultiplied(255, 255, 255, 14),
                 ),
             )
         };
@@ -497,18 +497,18 @@ fn action_pill_button(
 
     let (bg, stroke) = if enabled {
         (
-            egui::Color32::from_rgba_premultiplied(255, 255, 255, 10),
+            egui::Color32::from_rgba_unmultiplied(255, 255, 255, 10),
             egui::Stroke::new(
                 1.0_f32,
-                egui::Color32::from_rgba_premultiplied(255, 255, 255, 22),
+                egui::Color32::from_rgba_unmultiplied(255, 255, 255, 22),
             ),
         )
     } else {
         (
-            egui::Color32::from_rgba_premultiplied(255, 255, 255, 3),
+            egui::Color32::from_rgba_unmultiplied(255, 255, 255, 3),
             egui::Stroke::new(
                 1.0_f32,
-                egui::Color32::from_rgba_premultiplied(255, 255, 255, 8),
+                egui::Color32::from_rgba_unmultiplied(255, 255, 255, 8),
             ),
         )
     };
@@ -678,7 +678,7 @@ fn sidebar_divider(ui: &mut egui::Ui, button_size: f32) {
         rect.center().y,
         egui::Stroke::new(
             1.0_f32,
-            egui::Color32::from_rgba_premultiplied(255, 255, 255, 25),
+            egui::Color32::from_rgba_unmultiplied(255, 255, 255, 25),
         ),
     );
 }
@@ -767,6 +767,26 @@ fn color_circle_swatch(
     response.on_hover_text(tooltip)
 }
 
+/// Prüft, ob ein Bildschirmpunkt (physische Pixel) auf einem UI-Element liegt.
+///
+/// egui arbeitet in logischen Punkten; Touch- und Stift-Positionen kommen in physischen
+/// Pixeln. `layer_id_at` erfasst die egui-Bereiche des letzten Frames (Leiste, Popover,
+/// Fenster), auch wenn egui den Zeiger selbst noch nicht kennt (Stift, erster Touch).
+/// Ebenen der Ordnung `Background` decken den ganzen Bildschirm ab und gehören zum
+/// Zeichenblatt, nicht zur Oberfläche.
+pub fn is_screen_point_in_ui(
+    ctx: &egui::Context,
+    state: &UiState,
+    screen_pos: (f32, f32),
+    scale: f32,
+) -> bool {
+    let pos = egui::pos2(screen_pos.0 / scale, screen_pos.1 / scale);
+    state.is_point_in_ui(pos.x, pos.y)
+        || ctx
+            .layer_id_at(pos)
+            .is_some_and(|layer| layer.order != egui::Order::Background)
+}
+
 /// Rendert die schwebende Toolbar und alle zugehörigen UI-Komponenten mit `egui`.
 ///
 /// Gibt eine Liste von `UiAction`-Events zurück, die vom Hauptprogramm verarbeitet werden.
@@ -811,7 +831,7 @@ pub fn render_ui(
                 .rounding(egui::Rounding::same(UiState::TOOLBAR_ROUNDING))
                 .stroke(egui::Stroke::new(
                     1.0_f32,
-                    egui::Color32::from_rgba_premultiplied(255, 255, 255, 30),
+                    egui::Color32::from_rgba_unmultiplied(255, 255, 255, 30),
                 ))
                 .inner_margin(egui::Margin::same(6.0))
                 .shadow(egui::epaint::Shadow {
@@ -1067,7 +1087,7 @@ pub fn render_ui(
                                     false,
                                     notebook.current_page_index > 0,
                                     None,
-                                    "Vorherige Seite (Bild↑)",
+                                    "Vorherige Seite (Bild auf)",
                                 )
                                 .clicked()
                                 {
@@ -1100,9 +1120,9 @@ pub fn render_ui(
                                     true,
                                     None,
                                     if is_last {
-                                        "Neue Seite anhängen (Bild↓ / N)"
+                                        "Neue Seite anhängen (Bild ab / N)"
                                     } else {
-                                        "Nächste Seite (Bild↓ / N)"
+                                        "Nächste Seite (Bild ab / N)"
                                     },
                                 )
                                 .clicked()
@@ -1178,7 +1198,7 @@ pub fn render_ui(
                         .rounding(egui::Rounding::same(12.0))
                         .stroke(egui::Stroke::new(
                             1.0_f32,
-                            egui::Color32::from_rgba_premultiplied(255, 255, 255, 30),
+                            egui::Color32::from_rgba_unmultiplied(255, 255, 255, 30),
                         ))
                         .inner_margin(egui::Margin::symmetric(14.0, 12.0))
                         .shadow(egui::epaint::Shadow {
@@ -1329,7 +1349,7 @@ pub fn render_ui(
                         .rounding(egui::Rounding::same(12.0))
                         .stroke(egui::Stroke::new(
                             1.0_f32,
-                            egui::Color32::from_rgba_premultiplied(255, 255, 255, 30),
+                            egui::Color32::from_rgba_unmultiplied(255, 255, 255, 30),
                         ))
                         .inner_margin(egui::Margin::symmetric(14.0, 12.0))
                         .shadow(egui::epaint::Shadow {
@@ -1493,7 +1513,7 @@ pub fn render_ui(
                         .rounding(egui::Rounding::same(12.0))
                         .stroke(egui::Stroke::new(
                             1.0_f32,
-                            egui::Color32::from_rgba_premultiplied(255, 255, 255, 30),
+                            egui::Color32::from_rgba_unmultiplied(255, 255, 255, 30),
                         ))
                         .inner_margin(egui::Margin::symmetric(14.0, 12.0))
                         .shadow(egui::epaint::Shadow {
@@ -1709,7 +1729,7 @@ pub fn render_ui(
                     .rounding(egui::Rounding::same(12.0))
                     .stroke(egui::Stroke::new(
                         1.0_f32,
-                        egui::Color32::from_rgba_premultiplied(255, 255, 255, 30),
+                        egui::Color32::from_rgba_unmultiplied(255, 255, 255, 30),
                     ))
                     .inner_margin(egui::Margin::symmetric(14.0, 12.0))
                     .shadow(egui::epaint::Shadow {
@@ -1759,7 +1779,7 @@ pub fn render_ui(
                     .rounding(egui::Rounding::same(14.0))
                     .stroke(egui::Stroke::new(
                         1.0_f32,
-                        egui::Color32::from_rgba_premultiplied(255, 255, 255, 30),
+                        egui::Color32::from_rgba_unmultiplied(255, 255, 255, 30),
                     ))
                     .inner_margin(egui::Margin::symmetric(18.0, 16.0))
                     .shadow(egui::epaint::Shadow {
@@ -1782,7 +1802,7 @@ pub fn render_ui(
                     );
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui
-                            .add(egui::Button::new(egui::RichText::new("✕").size(12.0)).frame(false))
+                            .add(egui::Button::new(egui::RichText::new("🗙").size(12.0)).frame(false))
                             .clicked()
                         {
                             state.is_document_menu_open = false;
@@ -1845,7 +1865,7 @@ pub fn render_ui(
                                     egui::TextEdit::singleline(&mut state.renaming_title_input)
                                         .desired_width(230.0),
                                 );
-                                if ui.button("✓").clicked()
+                                if ui.button("✔").clicked()
                                     || (edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)))
                                 {
                                     let new_t = state.renaming_title_input.trim();
@@ -1857,19 +1877,19 @@ pub fn render_ui(
                                     }
                                     state.renaming_notebook_id = None;
                                 }
-                                if ui.button("✕").clicked() {
+                                if ui.button("🗙").clicked() {
                                     state.renaming_notebook_id = None;
                                 }
                             } else {
                                 let (bg, border) = if is_current {
                                     (
                                         egui::Color32::from_rgba_premultiplied(45, 80, 145, 200),
-                                        egui::Stroke::new(1.0_f32, egui::Color32::from_rgba_premultiplied(110, 165, 255, 180)),
+                                        egui::Stroke::new(1.0_f32, egui::Color32::from_rgba_unmultiplied(110, 165, 255, 180)),
                                     )
                                 } else {
                                     (
-                                        egui::Color32::from_rgba_premultiplied(255, 255, 255, 8),
-                                        egui::Stroke::new(1.0_f32, egui::Color32::from_rgba_premultiplied(255, 255, 255, 16)),
+                                        egui::Color32::from_rgba_unmultiplied(255, 255, 255, 8),
+                                        egui::Stroke::new(1.0_f32, egui::Color32::from_rgba_unmultiplied(255, 255, 255, 16)),
                                     )
                                 };
 
@@ -1889,9 +1909,9 @@ pub fn render_ui(
                                                             .color(egui::Color32::WHITE),
                                                     );
                                                     if summary.status == crate::storage::NotebookStatus::Damaged {
-                                                        ui.colored_label(egui::Color32::from_rgb(255, 100, 100), "⚠️ Beschädigt");
+                                                        ui.colored_label(egui::Color32::from_rgb(255, 100, 100), "⚠ Beschädigt");
                                                     } else if is_current {
-                                                        ui.colored_label(egui::Color32::from_rgb(46, 204, 113), "● Aktiv");
+                                                        ui.colored_label(egui::Color32::from_rgb(46, 204, 113), "⚫ Aktiv");
                                                     }
                                                 });
                                                 let subtext = if let Some(ref err) = summary.error {
@@ -2000,7 +2020,7 @@ pub fn render_ui(
                     .rounding(egui::Rounding::same(14.0))
                     .stroke(egui::Stroke::new(
                         1.0_f32,
-                        egui::Color32::from_rgba_premultiplied(255, 255, 255, 30),
+                        egui::Color32::from_rgba_unmultiplied(255, 255, 255, 30),
                     ))
                     .inner_margin(egui::Margin::symmetric(20.0, 16.0))
                     .shadow(egui::epaint::Shadow {
@@ -2023,7 +2043,7 @@ pub fn render_ui(
                     );
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui
-                            .add(egui::Button::new(egui::RichText::new("✕").size(13.0)).frame(false))
+                            .add(egui::Button::new(egui::RichText::new("🗙").size(13.0)).frame(false))
                             .clicked()
                         {
                             state.is_update_dialog_open = false;
@@ -2079,7 +2099,7 @@ pub fn render_ui(
                     }
                     crate::updater::UpdaterStatus::UpToDate { current_version } => {
                         ui.horizontal(|ui| {
-                            ui.colored_label(egui::Color32::from_rgb(46, 204, 113), "✓");
+                            ui.colored_label(egui::Color32::from_rgb(46, 204, 113), "✔");
                             ui.label(
                                 egui::RichText::new(format!("ink-notes ist auf dem neuesten Stand (v{}).", current_version))
                                     .color(egui::Color32::from_rgb(46, 204, 113))
@@ -2115,7 +2135,7 @@ pub fn render_ui(
                     crate::updater::UpdaterStatus::UpdateAvailable(release) => {
                         ui.vertical(|ui| {
                             ui.horizontal(|ui| {
-                                ui.colored_label(egui::Color32::from_rgb(46, 204, 113), "●");
+                                ui.colored_label(egui::Color32::from_rgb(46, 204, 113), "⚫");
                                 ui.label(
                                     egui::RichText::new(format!("Neue Version verfügbar: {}", release.tag_name))
                                         .strong()
@@ -2191,7 +2211,7 @@ pub fn render_ui(
                     crate::updater::UpdaterStatus::DownloadFinished { file_path, asset_name } => {
                         ui.vertical(|ui| {
                             ui.horizontal(|ui| {
-                                ui.colored_label(egui::Color32::from_rgb(46, 204, 113), "✓");
+                                ui.colored_label(egui::Color32::from_rgb(46, 204, 113), "✔");
                                 ui.label(
                                     egui::RichText::new(format!("'{}' erfolgreich heruntergeladen!", asset_name))
                                         .strong()
@@ -2303,7 +2323,7 @@ pub fn render_ui(
                         })
                         .show(ui, |ui| {
                             ui.label(
-                                egui::RichText::new(format!("✓ {}", msg))
+                                egui::RichText::new(format!("✔ {}", msg))
                                     .color(egui::Color32::from_rgba_unmultiplied(
                                         220, 255, 230, alpha,
                                     ))
@@ -2319,7 +2339,7 @@ pub fn render_ui(
 
     // 5. Nicht-wegklickbare Warnung bei Ladefehlern / Quarantäne (Block 1)
     if let Some(warning) = notebook.load_warnings.get(&notebook.current_page().id) {
-        egui::Window::new("⚠️ Datenintegritäts-Warnung")
+        egui::Window::new("⚠ Datenintegritäts-Warnung")
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
@@ -2342,7 +2362,7 @@ pub fn render_ui(
             .show(ctx, |ui| {
                 ui.set_width(420.0);
                 ui.horizontal(|ui| {
-                    ui.colored_label(egui::Color32::from_rgb(255, 80, 80), "⚠️");
+                    ui.colored_label(egui::Color32::from_rgb(255, 80, 80), "⚠");
                     ui.label(
                         egui::RichText::new(format!(
                             "Seite {} konnte nicht fehlerfrei geladen werden!",
@@ -2408,7 +2428,7 @@ pub fn render_ui(
     // Notfall-/Sicherheits-Dialog bei Fehlschlag des Speicherns vor dem Beenden
     if let Some(err) = &state.shutdown_error {
         let mut dismiss = false;
-        egui::Window::new("⚠️ Ungespeicherte Änderungen")
+        egui::Window::new("⚠ Ungespeicherte Änderungen")
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
@@ -2431,7 +2451,7 @@ pub fn render_ui(
             .show(ctx, |ui| {
                 ui.set_width(460.0);
                 ui.horizontal(|ui| {
-                    ui.colored_label(egui::Color32::from_rgb(255, 80, 80), "⚠️");
+                    ui.colored_label(egui::Color32::from_rgb(255, 80, 80), "⚠");
                     ui.label(
                         egui::RichText::new("Fehler beim Beenden")
                             .color(egui::Color32::from_rgb(255, 100, 100))
@@ -2909,5 +2929,107 @@ mod tests {
             r.height() > first.height(),
             "Auswahl-Aktionen fehlen: {r:?}"
         );
+    }
+
+    /// Quelltexte, deren String-Literale in der Oberfläche erscheinen können.
+    const UI_SOURCES: [(&str, &str); 3] = [
+        ("ui.rs", include_str!("ui.rs")),
+        ("selection.rs", include_str!("selection.rs")),
+        ("main.rs", include_str!("main.rs")),
+    ];
+
+    /// Liefert alle Zeichen aus String-Literalen eines Quelltexts (ohne Zeilenkommentare).
+    fn string_literal_chars(src: &str) -> Vec<char> {
+        let mut out = Vec::new();
+        let mut chars = src.chars().peekable();
+        let (mut in_str, mut in_comment) = (false, false);
+        while let Some(c) = chars.next() {
+            if in_comment {
+                in_comment = c != '\n';
+            } else if in_str {
+                match c {
+                    '\\' => {
+                        chars.next();
+                    }
+                    '"' => in_str = false,
+                    _ => out.push(c),
+                }
+            } else if c == '/' && chars.peek() == Some(&'/') {
+                in_comment = true;
+            } else if c == '"' {
+                in_str = true;
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn test_all_ui_texts_are_renderable() {
+        // Zeichen ohne Glyphe in den eingebauten egui-Schriften erscheinen als leere Kästchen
+        let ctx = egui::Context::default();
+        ctx.begin_frame(egui::RawInput::default());
+        let font = egui::FontId::proportional(14.0);
+        let mut missing = std::collections::BTreeSet::new();
+        for (name, src) in UI_SOURCES {
+            for c in string_literal_chars(src) {
+                if !c.is_ascii() && !ctx.fonts(|f| f.has_glyphs(&font, &c.to_string())) {
+                    missing.insert(format!("{name}: {c} (U+{:04X})", c as u32));
+                }
+            }
+        }
+        let _ = ctx.end_frame();
+        assert!(
+            missing.is_empty(),
+            "Nicht darstellbare Zeichen: {missing:#?}"
+        );
+    }
+
+    #[test]
+    fn test_no_invalid_premultiplied_colors() {
+        // Bei vormultiplizierten Farben darf kein Farbkanal größer als Alpha sein,
+        // sonst wird z. B. (255, 255, 255, 8) als fast deckendes Weiß gezeichnet
+        let mut invalid = Vec::new();
+        for (name, src) in UI_SOURCES {
+            for part in src.split("from_rgba_premultiplied(").skip(1) {
+                let args: Vec<u32> = part
+                    .split(')')
+                    .next()
+                    .unwrap_or_default()
+                    .split(',')
+                    .filter_map(|a| a.trim().parse().ok())
+                    .collect();
+                if args.len() == 4 && args[..3].iter().any(|&v| v > args[3]) {
+                    invalid.push(format!("{name}: {args:?}"));
+                }
+            }
+        }
+        assert!(
+            invalid.is_empty(),
+            "Ungültige vormultiplizierte Farben: {invalid:#?}"
+        );
+    }
+
+    #[test]
+    fn test_canvas_points_are_not_ui() {
+        // Regression v0.3.0: eine bildschirmfüllende Background-Ebene wurde als UI gewertet,
+        // dadurch ließ sich auf dem Blatt nicht mehr zeichnen
+        let notebook = Notebook::new();
+        for scale in [1.0_f32, 2.0] {
+            let mut state = UiState::new();
+            let ctx = render_frames(&mut state, &notebook, 10);
+            let bar = state.toolbar_rect.unwrap();
+            let phys = |p: egui::Pos2| (p.x * scale, p.y * scale);
+
+            for canvas_pt in [egui::pos2(600.0, 400.0), egui::pos2(1200.0, 800.0)] {
+                assert!(
+                    !is_screen_point_in_ui(&ctx, &state, phys(canvas_pt), scale),
+                    "Blattpunkt {canvas_pt:?} darf keine UI sein (Skalierung {scale})"
+                );
+            }
+            assert!(
+                is_screen_point_in_ui(&ctx, &state, phys(bar.center()), scale),
+                "Leiste muss UI sein (Skalierung {scale})"
+            );
+        }
     }
 }
