@@ -88,19 +88,19 @@ Ergebnis in `target/`:
 
 ### Release-Signatur einrichten (einmalig)
 
-In-App-Updates werden nur mit gültiger Minisign-Signatur installiert. Einmalig ein Schlüsselpaar erzeugen (ohne Passwort, da es nur als CI-Secret verwendet wird):
+In-App-Updates werden nur mit gültiger Minisign-Signatur installiert. Signiert wird mit [rsign2](https://crates.io/crates/rsign2), einer Minisign-kompatiblen Implementierung (`cargo install rsign2 --locked`). Einmalig ein Schlüsselpaar erzeugen (ohne Passwort, da es nur als CI-Secret verwendet wird):
 
 ```bash
-minisign -G -W -p ink-notes.pub -s ink-notes.key
-# oder ohne minisign-Paket, mit dem kompatiblen rsign2 (cargo install rsign2):
 rsign generate -W -p ink-notes.pub -s ink-notes.key
 ```
+
+> **Wichtig:** Schlüssel und Signierwerkzeug müssen zusammenpassen. `rsign generate -W` verschlüsselt den Schlüssel mit einem leeren Passwort; das `minisign`-CLI (z. B. Ubuntu-Paket 0.11) kann ihn ohne Terminal nicht laden. `build-release.sh` und die CI signieren deshalb mit `rsign`.
 
 1. Die zweite Zeile aus `ink-notes.pub` (beginnt mit `RW`) in `src/updater.rs` als `UPDATE_SIGNING_PUBLIC_KEY` eintragen und committen.
 2. Den kompletten Inhalt von `ink-notes.key` in Gitea unter *Repository → Einstellungen → Actions → Secrets* als `MINISIGN_SECRET_KEY` anlegen.
 3. `ink-notes.key` sicher offline aufbewahren und vom Rechner löschen. Geht der Schlüssel verloren, können bestehende Installationen keine Updates mehr prüfen.
 
-Lokal signiert `build-release.sh` nur, wenn `MINISIGN_SECRET_KEY` gesetzt ist. In der CI ist die Signatur Pflicht (`INK_NOTES_REQUIRE_SIGNATURE=1`), und das Skript prüft, dass der geheime Schlüssel zum eingebauten öffentlichen Schlüssel passt.
+Lokal signiert `build-release.sh` nur, wenn `MINISIGN_SECRET_KEY` gesetzt und `rsign` installiert ist. In der CI ist die Signatur Pflicht (`INK_NOTES_REQUIRE_SIGNATURE=1`), und das Skript prüft, dass der geheime Schlüssel zum eingebauten öffentlichen Schlüssel passt.
 
 ### 2. Installation auf Zorin OS 18 / Ubuntu 24.04
 

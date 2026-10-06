@@ -38,7 +38,6 @@ jobs:
             squashfs-tools \
             dpkg-dev \
             curl \
-            minisign \
             python3
 
       - name: Setup Rust Toolchain
@@ -49,6 +48,10 @@ jobs:
           # schlagen cargo fmt und cargo clippy in den Quality Gates sofort fehl
           components: rustfmt, clippy
           cache: true
+
+      - name: Install rsign2 (Release-Signatur)
+        # RUSTFLAGS leeren: die Toolchain-Action setzt -D warnings, das soll nicht für rsign2 gelten
+        run: RUSTFLAGS="" cargo install rsign2 --locked --version 0.6.7
 
       - name: Code Quality & Testing (Quality Gates)
         run: |

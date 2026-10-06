@@ -30,7 +30,9 @@ echo "=== Berechne SHA256-Prüfsummen in target/${CHECKSUM_FILE} ==="
 cd "${ROOT_DIR}/target"
 sha256sum "${DEB_NAME}" "${APPIMAGE_NAME}" > "${CHECKSUM_FILE}"
 
-# 4. Prüfsummen mit Minisign signieren (Pflicht für In-App-Updates)
+# 4. Prüfsummen signieren (Pflicht für In-App-Updates)
+# Signiert wird mit rsign2 (minisign-kompatibles Format): Der Schlüssel wurde mit
+# `rsign generate -W` erzeugt; das minisign-CLI kann ihn ohne Terminal nicht laden.
 SIGNATURE_FILE="${CHECKSUM_FILE}.minisig"
 rm -f "${SIGNATURE_FILE}"
 # Schlüssel kann von rustfmt in die Folgezeile umgebrochen sein
@@ -40,14 +42,26 @@ if [ -n "${MINISIGN_SECRET_KEY:-}" ]; then
         echo "FEHLER: UPDATE_SIGNING_PUBLIC_KEY in src/updater.rs ist leer – diese Version könnte keine Updates prüfen."
         exit 1
     fi
-    echo "=== Signiere ${CHECKSUM_FILE} mit Minisign ==="
+    if ! command -v rsign >/dev/null 2>&1; then
+        echo "FEHLER: rsign nicht gefunden (Installation: cargo install rsign2 --locked)."
+        exit 1
+    fi
+    echo "=== Signiere ${CHECKSUM_FILE} mit rsign2 ==="
     KEY_FILE="$(mktemp)"
     trap 'rm -f "${KEY_FILE}"' EXIT
     printf '%s\n' "${MINISIGN_SECRET_KEY}" > "${KEY_FILE}"
-    minisign -S -s "${KEY_FILE}" -m "${CHECKSUM_FILE}" -t "ink-notes v${VERSION}"
+    rsign sign -W -s "${KEY_FILE}" -t "ink-notes v${VERSION}" -x "${SIGNATURE_FILE}" "${CHECKSUM_FILE}"
     rm -f "${KEY_FILE}"
     # Stellt sicher, dass der geheime Schlüssel zum eingebauten öffentlichen Schlüssel passt
-    minisign -V -P "${EMBEDDED_PUBKEY}" -m "${CHECKSUM_FILE}"
+    # rsign beendet sich bei falscher Key-ID mit Exit-Code 0, daher zusätzlich die Meldung prüfen
+    if ! VERIFY_OUT=$(rsign verify -P "${EMBEDDED_PUBKEY}" -x "${SIGNATURE_FILE}" "${CHECKSUM_FILE}" 2>&1) \
+        || ! grep -q "Signature and comment signature verified" <<<"${VERIFY_OUT}"; then
+        echo "${VERIFY_OUT}"
+        echo "FEHLER: Signatur passt nicht zum eingebauten öffentlichen Schlüssel (UPDATE_SIGNING_PUBLIC_KEY)."
+        rm -f "${SIGNATURE_FILE}"
+        exit 1
+    fi
+    echo "${VERIFY_OUT}"
 elif [ "${INK_NOTES_REQUIRE_SIGNATURE:-0}" = "1" ]; then
     echo "FEHLER: MINISIGN_SECRET_KEY ist nicht gesetzt, eine Signatur ist aber Pflicht."
     exit 1
