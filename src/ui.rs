@@ -160,6 +160,8 @@ pub struct UiState {
     pub updater_token_input: String,
     pub show_updater_config: bool,
     pub update_modal_rect: Option<egui::Rect>,
+    /// Steuert, ob Touch-Eingaben mit einem Finger zeichnen oder das Dokument verschieben (Default: false = reine Gesten-Navigation & Zoom)
+    pub touch_draw_enabled: bool,
 }
 
 impl Default for UiState {
@@ -190,6 +192,7 @@ impl Default for UiState {
             updater_token_input: String::new(),
             show_updater_config: false,
             update_modal_rect: None,
+            touch_draw_enabled: false,
         }
     }
 }
@@ -950,7 +953,19 @@ pub fn render_ui(
 
                         toolbar_divider(ui);
 
-                        // --- 9. AUTOSAVE-STATUSANZEIGE ---
+                        // --- 9. TOUCH-MODUS UMSCHALTER (Gesten vs. Zeichnen) ---
+                        let (touch_icon, touch_tt) = if state.touch_draw_enabled {
+                            ("✏️ Touch: Stift", "Touch-Modus: Einzelfinger zeichnet, zwei Finger zoomen/verschieben. Klicken zum Umschalten auf reine Gesten-Navigation.")
+                        } else {
+                            ("🖐️ Touch: Zoom/Pan", "Touch-Modus: Finger zoomen und verschieben die Seite (ideal für Stifte wie Lazarite!). Klicken für Finger-Zeichnen.")
+                        };
+                        if action_pill_button(ui, true, touch_icon, touch_tt).clicked() {
+                            state.touch_draw_enabled = !state.touch_draw_enabled;
+                        }
+
+                        toolbar_divider(ui);
+
+                        // --- 10. AUTOSAVE-STATUSANZEIGE ---
                         let (dot_color, label_text) = match autosave_status {
                             AutosaveStatus::Saved => (egui::Color32::from_rgb(46, 204, 113), "Gespeichert"),
                             AutosaveStatus::Saving => (egui::Color32::from_rgb(241, 196, 15), "Speichert..."),
@@ -2082,5 +2097,14 @@ mod tests {
         if let Some(rect) = state.update_modal_rect {
             assert!(state.is_point_in_ui(rect.center().x, rect.center().y));
         }
+    }
+
+    #[test]
+    fn test_touch_draw_mode_toggle() {
+        let mut state = UiState::new();
+        assert!(!state.touch_draw_enabled); // Default: false = Gesten-Navigation & Zoom
+
+        state.touch_draw_enabled = true;
+        assert!(state.touch_draw_enabled);
     }
 }

@@ -246,4 +246,40 @@ mod tests {
         assert!((offset1[0] - offset2[0]).abs() < 1e-5);
         assert!((offset1[1] - offset2[1]).abs() < 1e-5);
     }
+
+    #[test]
+    fn test_pinch_to_zoom_math() {
+        let mut vp = ViewportState::new();
+        let page_vp = PageViewport::calculate(1920.0, 1080.0, 24.0);
+
+        // Simulation von 2 Fingern:
+        // Finger 1 bei (400, 500), Finger 2 bei (600, 500) -> Distanz: 200, Zentrum: (500, 500)
+        let p1_start = (400.0_f32, 500.0_f32);
+        let p2_start = (600.0_f32, 500.0_f32);
+        let dist_start =
+            ((p2_start.0 - p1_start.0).powi(2) + (p2_start.1 - p1_start.1).powi(2)).sqrt();
+        let center_start = (
+            (p1_start.0 + p2_start.0) * 0.5,
+            (p1_start.1 + p2_start.1) * 0.5,
+        );
+        assert_eq!(dist_start, 200.0);
+        assert_eq!(center_start, (500.0, 500.0));
+
+        // Finger auseinanderziehen und leicht verschieben:
+        // Finger 1 bei (350, 520), Finger 2 bei (650, 520) -> Distanz: 300, Zentrum: (500, 520)
+        let p1_end = (350.0_f32, 520.0_f32);
+        let p2_end = (650.0_f32, 520.0_f32);
+        let dist_end = ((p2_end.0 - p1_end.0).powi(2) + (p2_end.1 - p1_end.1).powi(2)).sqrt();
+        let center_end = ((p1_end.0 + p2_end.0) * 0.5, (p1_end.1 + p2_end.1) * 0.5);
+        assert_eq!(dist_end, 300.0);
+        assert_eq!(center_end, (500.0, 520.0));
+
+        let zoom_factor = dist_end / dist_start; // 1.5x Vergrößerung
+        let pan_delta = (center_end.0 - center_start.0, center_end.1 - center_start.1); // (0, +20)
+
+        vp.pan_by_screen_delta(pan_delta.0, pan_delta.1, &page_vp);
+        vp.zoom_at_cursor([center_end.0, center_end.1], zoom_factor, &page_vp);
+
+        assert!((vp.zoom - 1.5).abs() < 1e-4);
+    }
 }

@@ -52,6 +52,49 @@ fn update_window_title(
     window.set_title(&title);
 }
 
+/// Finalisiert einen Strich (mit Spline-Tessellierung, Ecken-Erkennung & RDP oder Auto-Snap)
+/// und fügt ihn in die aktuelle Seite des Notizbuchs ein.
+fn commit_stroke_to_notebook(
+    canvas: &mut CanvasState,
+    notebook: &mut Notebook,
+    manifest: &mut NotebookManifest,
+    autosave: &mut AutosaveController,
+    ui_state: &UiState,
+    window: &Window,
+    snapped_shape: Option<RecognizedShape>,
+) {
+    let new_id = notebook.next_stroke_id();
+    let stroke_opt = if let Some(shape) = snapped_shape {
+        let stroke_width = ui_state.pen_stroke_width_mm * ink_notes::document::UNITS_PER_MM;
+        let color = canvas.current_ink_color;
+        canvas.cancel_stroke();
+        Some(geometry::shape_to_stroke(
+            shape,
+            new_id,
+            color,
+            stroke_width,
+        ))
+    } else {
+        canvas.finish_stroke(new_id)
+    };
+
+    if let Some(stroke) = stroke_opt {
+        let page = notebook.current_page_mut();
+        page.add_stroke(stroke);
+        canvas.sync_page(page);
+        manifest.next_stroke_id = notebook.next_stroke_id;
+        autosave.mark_page_dirty(notebook.current_page(), manifest);
+        update_window_title(
+            window,
+            notebook,
+            manifest,
+            ui_state.active_tool,
+            autosave.status(),
+        );
+        window.request_redraw();
+    }
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let event_loop = EventLoop::new()?;
     let window = Arc::new(
@@ -62,6 +105,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     let mut canvas = pollster::block_on(CanvasState::new(window.clone()))?;
+
+    let mut tablet_manager = match octotablet::builder::Builder::default().build_shared(&window) {
+        Ok(mgr) => {
+            println!("[Input] Octotablet Stylus-/Tablet-Manager erfolgreich initialisiert (Wayland/X11 Tablet-Protokoll aktiv).");
+            Some(mgr)
+        }
+        Err(err) => {
+            println!("[Input] Hinweis: Octotablet Tablet-Manager nicht aktiv ({err}). Nutze Standard-Event-Pipeline.");
+            None
+        }
+    };
 
     // 1. Notizbuch aus Storage laden oder initialisieren (Session-Wiederherstellung)
     let storage_base_dir = storage::default_storage_dir();
@@ -135,7 +189,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut modifiers = ModifiersState::empty();
 
     let mut is_mouse_drawing = false;
-    let mut active_touch_id: Option<u64> = None;
+
+    // Multi-Touch & Pinch-to-Zoom Zustand
+    let mut active_touches: std::collections::HashMap<u64, (f32, f32)> =
+        std::collections::HashMap::new();
+    let mut pinch_prev_distance: Option<f32> = None;
+    let mut pinch_prev_center: Option<(f32, f32)> = None;
+    let mut is_pinch_gesturing = false;
+    let mut is_touch_drawing = false;
+    let mut is_touch_panning = false;
+    let mut touch_pan_last_pos = (0.0_f32, 0.0_f32);
+
+    // Stylus / Digitizer Zustand (Octotablet / Wayland Tablet Protocol)
+    let mut is_stylus_drawing = false;
+    let mut is_stylus_in_proximity = false;
+    let mut stylus_tool_id: Option<octotablet::tool::ID> = None;
+    let mut stylus_barrel_pressed = false;
+    let mut stylus_screen_pos = (0.0_f32, 0.0_f32);
 
     // Viewport-Pan & Zoom-Zustand
     let mut is_panning = false;
@@ -201,6 +271,265 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     window.request_redraw();
                 }
 
+                // Stylus-/Tablet-Events via Octotablet abfragen (Wayland/X11 Tablet-Protokoll für aktive Stifte wie Lazarite)
+                if let Some(ref mut mgr) = tablet_manager {
+                    if let Ok(tablet_events) = mgr.pump() {
+                        let scale = window.scale_factor() as f32;
+                        let now = start_time.elapsed().as_secs_f64();
+
+                        for t_event in tablet_events {
+                            if let octotablet::events::Event::Tool { tool, event } = t_event {
+                                let tool_is_hardware_eraser =
+                                    tool.tool_type == Some(octotablet::tool::Type::Eraser);
+
+                                match event {
+                                    octotablet::events::ToolEvent::In { .. } => {
+                                        is_stylus_in_proximity = true;
+                                        stylus_tool_id = Some(tool.id());
+                                    }
+                                    octotablet::events::ToolEvent::Out
+                                    | octotablet::events::ToolEvent::Removed => {
+                                        is_stylus_in_proximity = false;
+                                        if stylus_tool_id == Some(tool.id()) {
+                                            stylus_tool_id = None;
+                                            if is_stylus_drawing {
+                                                is_stylus_drawing = false;
+                                                is_drawing = false;
+                                                commit_stroke_to_notebook(
+                                                    &mut canvas,
+                                                    &mut notebook,
+                                                    &mut manifest,
+                                                    &mut autosave,
+                                                    &ui_state,
+                                                    &window,
+                                                    stroke_snapped_shape.take(),
+                                                );
+                                            }
+                                            if is_erasing {
+                                                is_erasing = false;
+                                            }
+                                        }
+                                    }
+                                    octotablet::events::ToolEvent::Button { pressed, .. } => {
+                                        stylus_barrel_pressed = pressed;
+                                        if pressed && is_stylus_drawing {
+                                            is_stylus_drawing = false;
+                                            is_drawing = false;
+                                            canvas.cancel_stroke();
+                                            is_erasing = true;
+                                            window.request_redraw();
+                                        } else if !pressed
+                                            && is_erasing
+                                            && !tool_is_hardware_eraser
+                                            && ui_state.active_tool != ActiveTool::Eraser
+                                        {
+                                            is_erasing = false;
+                                        }
+                                    }
+                                    octotablet::events::ToolEvent::Pose(pose) => {
+                                        is_stylus_in_proximity = true;
+                                        let sx = pose.position[0] * scale;
+                                        let sy = pose.position[1] * scale;
+                                        stylus_screen_pos = (sx, sy);
+                                        cursor_screen_pos = (sx, sy);
+
+                                        if let Some(p) = pose.pressure.get() {
+                                            current_pressure = p;
+                                        }
+
+                                        if is_erasing {
+                                            if let Some(page_pt) = canvas.screen_to_page(sx, sy) {
+                                                let page = notebook.current_page_mut();
+                                                let removed = page.erase_at(
+                                                    page_pt,
+                                                    eraser_radius,
+                                                    stroke_max_radius,
+                                                );
+                                                if !removed.is_empty() {
+                                                    canvas.sync_page(page);
+                                                    autosave.mark_page_dirty(
+                                                        notebook.current_page(),
+                                                        &manifest,
+                                                    );
+                                                    update_window_title(
+                                                        &window,
+                                                        &notebook,
+                                                        &manifest,
+                                                        ui_state.active_tool,
+                                                        autosave.status(),
+                                                    );
+                                                    window.request_redraw();
+                                                }
+                                            }
+                                        } else if is_stylus_drawing && is_drawing {
+                                            let dx = sx - stroke_hold_anchor_pos.0;
+                                            let dy = sy - stroke_hold_anchor_pos.1;
+                                            if (dx * dx + dy * dy).sqrt() > 3.0 {
+                                                stroke_last_motion_time = Instant::now();
+                                                stroke_hold_anchor_pos = (sx, sy);
+                                            }
+
+                                            if !stroke_already_snapped {
+                                                let page_pt = canvas.screen_to_page_clamped(sx, sy);
+                                                canvas.extend_stroke(
+                                                    page_pt.x,
+                                                    page_pt.y,
+                                                    current_pressure,
+                                                    now,
+                                                );
+                                                window.request_redraw();
+                                            }
+                                        }
+                                    }
+                                    octotablet::events::ToolEvent::Down => {
+                                        is_stylus_in_proximity = true;
+                                        stylus_tool_id = Some(tool.id());
+                                        let (sx, sy) = stylus_screen_pos;
+
+                                        let is_stylus_in_ui = egui_ctx.wants_pointer_input()
+                                            || ui_state.is_point_in_ui(sx, sy)
+                                            || (ui_state.show_page_jump_popup
+                                                && egui_ctx.is_pointer_over_area())
+                                            || (ui_state.is_document_menu_open
+                                                && egui_ctx.is_pointer_over_area())
+                                            || (ui_state.is_update_dialog_open
+                                                && egui_ctx.is_pointer_over_area());
+
+                                        if is_stylus_in_ui {
+                                            egui_ctx.input_mut(|i| {
+                                                i.events.push(egui::Event::PointerMoved(egui::pos2(
+                                                    sx / scale,
+                                                    sy / scale,
+                                                )));
+                                                i.events.push(egui::Event::PointerButton {
+                                                    pos: egui::pos2(sx / scale, sy / scale),
+                                                    button: egui::PointerButton::Primary,
+                                                    pressed: true,
+                                                    modifiers: egui::Modifiers::default(),
+                                                });
+                                            });
+                                            window.request_redraw();
+                                            continue;
+                                        }
+
+                                        let should_erase = tool_is_hardware_eraser
+                                            || stylus_barrel_pressed
+                                            || ui_state.active_tool == ActiveTool::Eraser;
+
+                                        if should_erase {
+                                            is_erasing = true;
+                                            if let Some(page_pt) = canvas.screen_to_page(sx, sy) {
+                                                let page = notebook.current_page_mut();
+                                                let removed = page.erase_at(
+                                                    page_pt,
+                                                    eraser_radius,
+                                                    stroke_max_radius,
+                                                );
+                                                if !removed.is_empty() {
+                                                    canvas.sync_page(page);
+                                                    autosave.mark_page_dirty(
+                                                        notebook.current_page(),
+                                                        &manifest,
+                                                    );
+                                                    update_window_title(
+                                                        &window,
+                                                        &notebook,
+                                                        &manifest,
+                                                        ui_state.active_tool,
+                                                        autosave.status(),
+                                                    );
+                                                    window.request_redraw();
+                                                }
+                                            }
+                                        } else if ui_state.active_tool.is_drawing()
+                                            || ui_state.active_tool == ActiveTool::Shape
+                                        {
+                                            if let Some(page_pt) = canvas.screen_to_page(sx, sy) {
+                                                is_stylus_drawing = true;
+                                                is_drawing = true;
+                                                stroke_last_motion_time = Instant::now();
+                                                stroke_hold_anchor_pos = (sx, sy);
+                                                stroke_already_snapped = false;
+                                                stroke_snapped_shape = None;
+                                                canvas.start_stroke(
+                                                    page_pt.x,
+                                                    page_pt.y,
+                                                    current_pressure,
+                                                    now,
+                                                );
+                                                window.request_redraw();
+                                            }
+                                        }
+                                    }
+                                    octotablet::events::ToolEvent::Up => {
+                                        let (sx, sy) = stylus_screen_pos;
+                                        let is_stylus_in_ui = egui_ctx.wants_pointer_input()
+                                            || ui_state.is_point_in_ui(sx, sy)
+                                            || (ui_state.show_page_jump_popup
+                                                && egui_ctx.is_pointer_over_area())
+                                            || (ui_state.is_document_menu_open
+                                                && egui_ctx.is_pointer_over_area())
+                                            || (ui_state.is_update_dialog_open
+                                                && egui_ctx.is_pointer_over_area());
+
+                                        if is_stylus_in_ui {
+                                            egui_ctx.input_mut(|i| {
+                                                i.events.push(egui::Event::PointerButton {
+                                                    pos: egui::pos2(sx / scale, sy / scale),
+                                                    button: egui::PointerButton::Primary,
+                                                    pressed: false,
+                                                    modifiers: egui::Modifiers::default(),
+                                                });
+                                            });
+                                            window.request_redraw();
+                                            continue;
+                                        }
+
+                                        if is_erasing {
+                                            is_erasing = false;
+                                        }
+
+                                        if is_stylus_drawing {
+                                            is_stylus_drawing = false;
+                                            is_drawing = false;
+
+                                            if !stroke_already_snapped {
+                                                let page_pt = canvas.screen_to_page_clamped(sx, sy);
+                                                canvas.extend_stroke(
+                                                    page_pt.x,
+                                                    page_pt.y,
+                                                    current_pressure,
+                                                    now,
+                                                );
+                                            }
+
+                                            let snapped_shape =
+                                                stroke_snapped_shape.take().or_else(|| {
+                                                    if ui_state.active_tool == ActiveTool::Shape {
+                                                        geometry::detect_shape(&canvas.live_samples)
+                                                    } else {
+                                                        None
+                                                    }
+                                                });
+
+                                            commit_stroke_to_notebook(
+                                                &mut canvas,
+                                                &mut notebook,
+                                                &mut manifest,
+                                                &mut autosave,
+                                                &ui_state,
+                                                &window,
+                                                snapped_shape,
+                                            );
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
+                }
+
                 // Draw-and-Hold Überprüfung: Stift regungslos für > 400 ms gehalten (< 3 px Distanz)
                 if is_drawing && !stroke_already_snapped {
                     let elapsed = stroke_last_motion_time.elapsed();
@@ -221,13 +550,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
 
-                // Bei anstehenden Änderungen, aktivem Toast oder aktivem Zeichnen regelmäßig aufwachen
+                // Bei anstehenden Änderungen, aktivem Toast, Stylus in Proximity oder aktivem Zeichnen regelmäßig aufwachen
                 if new_status == AutosaveStatus::Pending
                     || new_status == AutosaveStatus::Saving
                     || ui_state.export_message.is_some()
                     || (is_drawing && !stroke_already_snapped)
+                    || is_stylus_drawing
+                    || is_stylus_in_proximity
                 {
-                    target.set_control_flow(ControlFlow::wait_duration(Duration::from_millis(16)));
+                    target.set_control_flow(ControlFlow::wait_duration(Duration::from_millis(8)));
                 } else {
                     target.set_control_flow(ControlFlow::Wait);
                 }
@@ -263,7 +594,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                         is_erasing = false;
                         is_mouse_drawing = false;
-                        active_touch_id = None;
+                        active_touches.clear();
+                        is_pinch_gesturing = false;
+                        pinch_prev_distance = None;
+                        pinch_prev_center = None;
+                        is_touch_drawing = false;
+                        is_touch_panning = false;
+                        is_stylus_drawing = false;
+                        is_stylus_in_proximity = false;
                     }
 
                     WindowEvent::Resized(physical_size) => {
@@ -672,8 +1010,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                         match state {
                             ElementState::Pressed => {
-                                // Palm-Rejection: Keine Mausevents verarbeiten, wenn Touch aktiv ist
-                                if active_touch_id.is_some() {
+                                // Palm-Rejection: Keine Mausevents verarbeiten, wenn Stylus aktiv zeichnet
+                                if is_stylus_drawing {
                                     return;
                                 }
 
@@ -868,9 +1206,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         let now = start_time.elapsed().as_secs_f64();
                                         canvas.extend_stroke(page_pt.x, page_pt.y, current_pressure, now);
                                     }
-                                    let new_id = notebook.next_stroke_id();
-
-                                    // Prüfen, ob Form durch Draw-and-Hold gesnappt ist oder im Shape-Modus gezeichnet wurde
                                     let snapped_shape = stroke_snapped_shape.take().or_else(|| {
                                         if ui_state.active_tool == ActiveTool::Shape {
                                             geometry::detect_shape(&canvas.live_samples)
@@ -879,24 +1214,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         }
                                     });
 
-                                    let stroke_opt = if let Some(shape) = snapped_shape {
-                                        let stroke_width = ui_state.pen_stroke_width_mm * ink_notes::document::UNITS_PER_MM;
-                                        let color = canvas.current_ink_color;
-                                        canvas.cancel_stroke();
-                                        Some(geometry::shape_to_stroke(shape, new_id, color, stroke_width))
-                                    } else {
-                                        canvas.finish_stroke(new_id)
-                                    };
-
-                                    if let Some(stroke) = stroke_opt {
-                                        let page = notebook.current_page_mut();
-                                        page.add_stroke(stroke);
-                                        canvas.sync_page(page);
-                                        manifest.next_stroke_id = notebook.next_stroke_id;
-                                        autosave.mark_page_dirty(notebook.current_page(), &manifest);
-                                        update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
-                                        window.request_redraw();
-                                    }
+                                    commit_stroke_to_notebook(
+                                        &mut canvas,
+                                        &mut notebook,
+                                        &mut manifest,
+                                        &mut autosave,
+                                        &ui_state,
+                                        &window,
+                                        snapped_shape,
+                                    );
                                 }
                             }
                         }
@@ -916,8 +1242,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             return;
                         }
 
-                        // Palm-Rejection: Keine Cursor-Events verarbeiten, wenn Touch aktiv ist
-                        if active_touch_id.is_none() {
+                        // Wenn der Stylus aktiv zeichnet, keine Mauscursor-Bewegungen verarbeiten
+                        if !is_stylus_drawing {
                             if ui_state.active_tool == ActiveTool::Select && selection_state.drag_mode != DragMode::None {
                                 if let Some(page_pt) = canvas.screen_to_page(sx, sy) {
                                     match &mut selection_state.drag_mode {
@@ -1047,208 +1373,275 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                         let is_eraser_action = ui_state.active_tool == ActiveTool::Eraser;
 
+                        // Hardware-Palm-Rejection: Wenn der Stylus in Proximity ist oder zeichnet, Touch ignorieren
+                        if is_stylus_drawing || is_stylus_in_proximity {
+                            return;
+                        }
+
                         match touch.phase {
                             TouchPhase::Started => {
-                                // Palm-Rejection
-                                if is_mouse_drawing || (active_touch_id.is_some() && active_touch_id != Some(touch.id)) {
-                                    return;
-                                }
-
                                 // Event-Isolation für Touch-Eingaben
                                 let is_touch_in_ui = egui_ctx.wants_pointer_input()
                                     || ui_state.is_point_in_ui(tx, ty)
                                     || (ui_state.show_page_jump_popup && egui_ctx.is_pointer_over_area())
-                                    || (ui_state.is_document_menu_open && egui_ctx.is_pointer_over_area());
+                                    || (ui_state.is_document_menu_open && egui_ctx.is_pointer_over_area())
+                                    || (ui_state.is_update_dialog_open && egui_ctx.is_pointer_over_area());
                                 if is_touch_in_ui {
                                     return;
                                 }
 
-                                active_touch_id = Some(touch.id);
-                                current_pressure = pressure;
-                                cursor_screen_pos = (tx, ty);
+                                active_touches.insert(touch.id, (tx, ty));
 
-                                if is_eraser_action {
-                                    is_erasing = true;
-                                    if let Some(page_pt) = canvas.screen_to_page(tx, ty) {
-                                        let page = notebook.current_page_mut();
-                                        let removed = page.erase_at(page_pt, eraser_radius, stroke_max_radius);
-                                        if !removed.is_empty() {
-                                            canvas.sync_page(page);
-                                            autosave.mark_page_dirty(notebook.current_page(), &manifest);
-                                            update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
-                                            window.request_redraw();
-                                        }
+                                if active_touches.len() >= 2 {
+                                    // Multi-Touch Geste: Sobald 2+ Finger aufliegen, Inking sofort abbrechen und zoomen/pannen
+                                    if is_touch_drawing {
+                                        is_touch_drawing = false;
+                                        is_drawing = false;
+                                        canvas.cancel_stroke();
+                                        window.request_redraw();
                                     }
-                                } else if ui_state.active_tool == ActiveTool::Select {
-                                    let screen_vec = Vec2::new(tx, ty);
-                                    let hit = selection_state.hit_test_handles(notebook.current_page(), &canvas, screen_vec);
-                                    match hit {
-                                        SelectionHandleHit::RotateHandle { center_page } => {
+                                    is_touch_panning = false;
+                                    is_pinch_gesturing = true;
+
+                                    let pts: Vec<(f32, f32)> = active_touches.values().copied().take(2).collect();
+                                    let p1 = pts[0];
+                                    let p2 = pts[1];
+                                    let center = ((p1.0 + p2.0) * 0.5, (p1.1 + p2.1) * 0.5);
+                                    let dist = ((p2.0 - p1.0).powi(2) + (p2.1 - p1.1).powi(2)).sqrt();
+                                    pinch_prev_center = Some(center);
+                                    pinch_prev_distance = Some(dist);
+                                } else if active_touches.len() == 1 && !is_pinch_gesturing {
+                                    cursor_screen_pos = (tx, ty);
+                                    current_pressure = pressure;
+
+                                    if !ui_state.touch_draw_enabled {
+                                        // Standard: 1 Finger scrollt / verschiebt den Canvas (Pan)
+                                        is_touch_panning = true;
+                                        touch_pan_last_pos = (tx, ty);
+                                    } else {
+                                        // Modus Finger-Zeichnen aktiv
+                                        if is_eraser_action {
+                                            is_erasing = true;
                                             if let Some(page_pt) = canvas.screen_to_page(tx, ty) {
-                                                let start_angle = (page_pt.y - center_page.y).atan2(page_pt.x - center_page.x);
-                                                let initial_strokes = notebook.current_page().get_strokes(&selection_state.selected_ids);
-                                                selection_state.drag_mode = DragMode::Rotate {
-                                                    center_page,
-                                                    start_angle,
-                                                    initial_strokes,
-                                                };
-                                                window.request_redraw();
-                                            }
-                                        }
-                                        SelectionHandleHit::CornerHandle {
-                                            corner_idx: _,
-                                            fixed_corner_page,
-                                            start_pos_page,
-                                            initial_box_size,
-                                        } => {
-                                            let initial_strokes = notebook.current_page().get_strokes(&selection_state.selected_ids);
-                                            selection_state.drag_mode = DragMode::Scale {
-                                                fixed_corner_page,
-                                                start_pos_page,
-                                                initial_box_size,
-                                                initial_strokes,
-                                            };
-                                            window.request_redraw();
-                                        }
-                                        SelectionHandleHit::Body => {
-                                            if let Some(page_pt) = canvas.screen_to_page(tx, ty) {
-                                                let initial_strokes = notebook.current_page().get_strokes(&selection_state.selected_ids);
-                                                selection_state.drag_mode = DragMode::Move {
-                                                    start_page: page_pt,
-                                                    initial_strokes,
-                                                };
-                                                window.request_redraw();
-                                            }
-                                        }
-                                        SelectionHandleHit::None => {
-                                            if let Some(page_pt) = canvas.screen_to_page(tx, ty) {
-                                                if let Some(stroke) = notebook.current_page().find_stroke_at(page_pt, 25.0) {
-                                                    let stroke_id = stroke.id;
-                                                    if !selection_state.selected_ids.contains(&stroke_id) {
-                                                        selection_state.select_single(stroke_id);
-                                                    }
-                                                    let initial_strokes = notebook.current_page().get_strokes(&selection_state.selected_ids);
-                                                    selection_state.drag_mode = DragMode::Move {
-                                                        start_page: page_pt,
-                                                        initial_strokes,
-                                                    };
-                                                    window.request_redraw();
-                                                } else {
-                                                    selection_state.clear();
-                                                    selection_state.drag_mode = DragMode::BoxSelect {
-                                                        start_page: page_pt,
-                                                        current_page: page_pt,
-                                                    };
+                                                let page = notebook.current_page_mut();
+                                                let removed = page.erase_at(page_pt, eraser_radius, stroke_max_radius);
+                                                if !removed.is_empty() {
+                                                    canvas.sync_page(page);
+                                                    autosave.mark_page_dirty(notebook.current_page(), &manifest);
+                                                    update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
                                                     window.request_redraw();
                                                 }
                                             }
+                                        } else if ui_state.active_tool == ActiveTool::Select {
+                                            let screen_vec = Vec2::new(tx, ty);
+                                            let hit = selection_state.hit_test_handles(notebook.current_page(), &canvas, screen_vec);
+                                            match hit {
+                                                SelectionHandleHit::RotateHandle { center_page } => {
+                                                    if let Some(page_pt) = canvas.screen_to_page(tx, ty) {
+                                                        let start_angle = (page_pt.y - center_page.y).atan2(page_pt.x - center_page.x);
+                                                        let initial_strokes = notebook.current_page().get_strokes(&selection_state.selected_ids);
+                                                        selection_state.drag_mode = DragMode::Rotate {
+                                                            center_page,
+                                                            start_angle,
+                                                            initial_strokes,
+                                                        };
+                                                        window.request_redraw();
+                                                    }
+                                                }
+                                                SelectionHandleHit::CornerHandle {
+                                                    corner_idx: _,
+                                                    fixed_corner_page,
+                                                    start_pos_page,
+                                                    initial_box_size,
+                                                } => {
+                                                    let initial_strokes = notebook.current_page().get_strokes(&selection_state.selected_ids);
+                                                    selection_state.drag_mode = DragMode::Scale {
+                                                        fixed_corner_page,
+                                                        start_pos_page,
+                                                        initial_box_size,
+                                                        initial_strokes,
+                                                    };
+                                                    window.request_redraw();
+                                                }
+                                                SelectionHandleHit::Body => {
+                                                    if let Some(page_pt) = canvas.screen_to_page(tx, ty) {
+                                                        let initial_strokes = notebook.current_page().get_strokes(&selection_state.selected_ids);
+                                                        selection_state.drag_mode = DragMode::Move {
+                                                            start_page: page_pt,
+                                                            initial_strokes,
+                                                        };
+                                                        window.request_redraw();
+                                                    }
+                                                }
+                                                SelectionHandleHit::None => {
+                                                    if let Some(page_pt) = canvas.screen_to_page(tx, ty) {
+                                                        if let Some(stroke) = notebook.current_page().find_stroke_at(page_pt, 25.0) {
+                                                            let stroke_id = stroke.id;
+                                                            if !selection_state.selected_ids.contains(&stroke_id) {
+                                                                selection_state.select_single(stroke_id);
+                                                            }
+                                                            let initial_strokes = notebook.current_page().get_strokes(&selection_state.selected_ids);
+                                                            selection_state.drag_mode = DragMode::Move {
+                                                                start_page: page_pt,
+                                                                initial_strokes,
+                                                            };
+                                                            window.request_redraw();
+                                                        } else {
+                                                            selection_state.clear();
+                                                            selection_state.drag_mode = DragMode::BoxSelect {
+                                                                start_page: page_pt,
+                                                                current_page: page_pt,
+                                                            };
+                                                            window.request_redraw();
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        } else if ui_state.active_tool.is_drawing() || ui_state.active_tool == ActiveTool::Shape {
+                                            if let Some(page_pt) = canvas.screen_to_page(tx, ty) {
+                                                is_touch_drawing = true;
+                                                is_drawing = true;
+                                                stroke_last_motion_time = Instant::now();
+                                                stroke_hold_anchor_pos = (tx, ty);
+                                                stroke_already_snapped = false;
+                                                stroke_snapped_shape = None;
+                                                canvas.start_stroke(page_pt.x, page_pt.y, pressure, now);
+                                                window.request_redraw();
+                                            }
                                         }
-                                    }
-                                } else if ui_state.active_tool.is_drawing() || ui_state.active_tool == ActiveTool::Shape {
-                                    if let Some(page_pt) = canvas.screen_to_page(tx, ty) {
-                                        is_drawing = true;
-                                        stroke_last_motion_time = Instant::now();
-                                        stroke_hold_anchor_pos = (tx, ty);
-                                        stroke_already_snapped = false;
-                                        stroke_snapped_shape = None;
-                                        canvas.start_stroke(page_pt.x, page_pt.y, pressure, now);
-                                        window.request_redraw();
                                     }
                                 }
                             }
                             TouchPhase::Moved => {
-                                if is_mouse_drawing || active_touch_id != Some(touch.id) {
-                                    return;
-                                }
+                                active_touches.insert(touch.id, (tx, ty));
 
-                                current_pressure = pressure;
-                                cursor_screen_pos = (tx, ty);
+                                if active_touches.len() >= 2 {
+                                    let pts: Vec<(f32, f32)> = active_touches.values().copied().take(2).collect();
+                                    let p1 = pts[0];
+                                    let p2 = pts[1];
+                                    let curr_center = ((p1.0 + p2.0) * 0.5, (p1.1 + p2.1) * 0.5);
+                                    let curr_dist = ((p2.0 - p1.0).powi(2) + (p2.1 - p1.1).powi(2)).sqrt();
 
-                                if ui_state.active_tool == ActiveTool::Select && selection_state.drag_mode != DragMode::None {
-                                    if let Some(page_pt) = canvas.screen_to_page(tx, ty) {
-                                        match &mut selection_state.drag_mode {
-                                            DragMode::BoxSelect { current_page, .. } => {
-                                                *current_page = page_pt;
-                                                window.request_redraw();
-                                            }
-                                            DragMode::Move { start_page, initial_strokes } => {
-                                                let delta = page_pt - *start_page;
-                                                let mut updated = initial_strokes.clone();
-                                                for s in &mut updated {
-                                                    s.translate(delta);
-                                                }
-                                                notebook.current_page_mut().update_strokes_ephemeral(&updated);
-                                                canvas.sync_page(notebook.current_page_mut());
-                                                window.request_redraw();
-                                            }
-                                            DragMode::Rotate { center_page, start_angle, initial_strokes } => {
-                                                let current_angle = (page_pt.y - center_page.y).atan2(page_pt.x - center_page.x);
-                                                let delta_angle = current_angle - *start_angle;
-                                                let mut updated = initial_strokes.clone();
-                                                for s in &mut updated {
-                                                    s.rotate(*center_page, delta_angle);
-                                                }
-                                                notebook.current_page_mut().update_strokes_ephemeral(&updated);
-                                                canvas.sync_page(notebook.current_page_mut());
-                                                window.request_redraw();
-                                            }
-                                            DragMode::Scale { fixed_corner_page, start_pos_page, initial_box_size: _, initial_strokes } => {
-                                                let orig_delta = *start_pos_page - *fixed_corner_page;
-                                                let new_delta = page_pt - *fixed_corner_page;
-                                                let scale_x = if orig_delta.x.abs() > 1.0 {
-                                                    (new_delta.x / orig_delta.x).clamp(0.05, 20.0)
-                                                } else {
-                                                    1.0
-                                                };
-                                                let scale_y = if orig_delta.y.abs() > 1.0 {
-                                                    (new_delta.y / orig_delta.y).clamp(0.05, 20.0)
-                                                } else {
-                                                    1.0
-                                                };
-                                                let factors = Vec2::new(scale_x, scale_y);
-                                                let mut updated = initial_strokes.clone();
-                                                for s in &mut updated {
-                                                    s.scale(*fixed_corner_page, factors);
-                                                }
-                                                notebook.current_page_mut().update_strokes_ephemeral(&updated);
-                                                canvas.sync_page(notebook.current_page_mut());
-                                                window.request_redraw();
-                                            }
-                                            DragMode::None => {}
+                                    if let (Some(prev_dist), Some(prev_center)) = (pinch_prev_distance, pinch_prev_center) {
+                                        let dx = curr_center.0 - prev_center.0;
+                                        let dy = curr_center.1 - prev_center.1;
+                                        if dx.abs() > 0.05 || dy.abs() > 0.05 {
+                                            canvas.pan(dx, dy);
                                         }
+                                        if prev_dist > 5.0 && curr_dist > 5.0 {
+                                            let zoom_factor = curr_dist / prev_dist;
+                                            if (zoom_factor - 1.0).abs() > 0.001 {
+                                                canvas.zoom_at(curr_center.0, curr_center.1, zoom_factor);
+                                                ui_state.current_zoom = canvas.camera.zoom;
+                                            }
+                                        }
+                                        window.request_redraw();
                                     }
-                                } else if is_erasing {
-                                    if let Some(page_pt) = canvas.screen_to_page(tx, ty) {
-                                        let page = notebook.current_page_mut();
-                                        let removed = page.erase_at(page_pt, eraser_radius, stroke_max_radius);
-                                        if !removed.is_empty() {
-                                            canvas.sync_page(page);
-                                            autosave.mark_page_dirty(notebook.current_page(), &manifest);
-                                            update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
+                                    pinch_prev_center = Some(curr_center);
+                                    pinch_prev_distance = Some(curr_dist);
+                                } else if active_touches.len() == 1 && !is_pinch_gesturing {
+                                    if is_touch_panning {
+                                        let dx = tx - touch_pan_last_pos.0;
+                                        let dy = ty - touch_pan_last_pos.1;
+                                        touch_pan_last_pos = (tx, ty);
+                                        canvas.pan(dx, dy);
+                                        window.request_redraw();
+                                    } else if is_touch_drawing {
+                                        current_pressure = pressure;
+                                        cursor_screen_pos = (tx, ty);
+
+                                        let dx = tx - stroke_hold_anchor_pos.0;
+                                        let dy = ty - stroke_hold_anchor_pos.1;
+                                        if (dx * dx + dy * dy).sqrt() > 3.0 {
+                                            stroke_last_motion_time = Instant::now();
+                                            stroke_hold_anchor_pos = (tx, ty);
+                                        }
+
+                                        if !stroke_already_snapped {
+                                            let page_pt = canvas.screen_to_page_clamped(tx, ty);
+                                            canvas.extend_stroke(page_pt.x, page_pt.y, pressure, now);
                                             window.request_redraw();
                                         }
-                                    }
-                                } else if is_drawing {
-                                    let dx = tx - stroke_hold_anchor_pos.0;
-                                    let dy = ty - stroke_hold_anchor_pos.1;
-                                    if (dx * dx + dy * dy).sqrt() > 3.0 {
-                                        stroke_last_motion_time = Instant::now();
-                                        stroke_hold_anchor_pos = (tx, ty);
-                                    }
-
-                                    if !stroke_already_snapped {
-                                        let page_pt = canvas.screen_to_page_clamped(tx, ty);
-                                        canvas.extend_stroke(page_pt.x, page_pt.y, pressure, now);
-                                        window.request_redraw();
+                                    } else if is_erasing {
+                                        if let Some(page_pt) = canvas.screen_to_page(tx, ty) {
+                                            let page = notebook.current_page_mut();
+                                            let removed = page.erase_at(page_pt, eraser_radius, stroke_max_radius);
+                                            if !removed.is_empty() {
+                                                canvas.sync_page(page);
+                                                autosave.mark_page_dirty(notebook.current_page(), &manifest);
+                                                update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
+                                                window.request_redraw();
+                                            }
+                                        }
+                                    } else if ui_state.active_tool == ActiveTool::Select && selection_state.drag_mode != DragMode::None {
+                                        if let Some(page_pt) = canvas.screen_to_page(tx, ty) {
+                                            match &mut selection_state.drag_mode {
+                                                DragMode::BoxSelect { current_page, .. } => {
+                                                    *current_page = page_pt;
+                                                    window.request_redraw();
+                                                }
+                                                DragMode::Move { start_page, initial_strokes } => {
+                                                    let delta = page_pt - *start_page;
+                                                    let mut updated = initial_strokes.clone();
+                                                    for s in &mut updated {
+                                                        s.translate(delta);
+                                                    }
+                                                    notebook.current_page_mut().update_strokes_ephemeral(&updated);
+                                                    canvas.sync_page(notebook.current_page_mut());
+                                                    window.request_redraw();
+                                                }
+                                                DragMode::Rotate { center_page, start_angle, initial_strokes } => {
+                                                    let current_angle = (page_pt.y - center_page.y).atan2(page_pt.x - center_page.x);
+                                                    let delta_angle = current_angle - *start_angle;
+                                                    let mut updated = initial_strokes.clone();
+                                                    for s in &mut updated {
+                                                        s.rotate(*center_page, delta_angle);
+                                                    }
+                                                    notebook.current_page_mut().update_strokes_ephemeral(&updated);
+                                                    canvas.sync_page(notebook.current_page_mut());
+                                                    window.request_redraw();
+                                                }
+                                                DragMode::Scale { fixed_corner_page, start_pos_page, initial_box_size: _, initial_strokes } => {
+                                                    let orig_delta = *start_pos_page - *fixed_corner_page;
+                                                    let new_delta = page_pt - *fixed_corner_page;
+                                                    let scale_x = if orig_delta.x.abs() > 1.0 {
+                                                        (new_delta.x / orig_delta.x).clamp(0.05, 20.0)
+                                                    } else {
+                                                        1.0
+                                                    };
+                                                    let scale_y = if orig_delta.y.abs() > 1.0 {
+                                                        (new_delta.y / orig_delta.y).clamp(0.05, 20.0)
+                                                    } else {
+                                                        1.0
+                                                    };
+                                                    let factors = Vec2::new(scale_x, scale_y);
+                                                    let mut updated = initial_strokes.clone();
+                                                    for s in &mut updated {
+                                                        s.scale(*fixed_corner_page, factors);
+                                                    }
+                                                    notebook.current_page_mut().update_strokes_ephemeral(&updated);
+                                                    canvas.sync_page(notebook.current_page_mut());
+                                                    window.request_redraw();
+                                                }
+                                                DragMode::None => {}
+                                            }
+                                        }
                                     }
                                 }
                             }
-                            TouchPhase::Ended => {
-                                if active_touch_id == Some(touch.id) {
-                                    active_touch_id = None;
+                            TouchPhase::Ended | TouchPhase::Cancelled => {
+                                active_touches.remove(&touch.id);
+
+                                if active_touches.is_empty() {
+                                    is_pinch_gesturing = false;
+                                    pinch_prev_distance = None;
+                                    pinch_prev_center = None;
+                                    is_touch_panning = false;
+
                                     if is_erasing {
                                         is_erasing = false;
                                     }
+
                                     if ui_state.active_tool == ActiveTool::Select {
                                         match std::mem::take(&mut selection_state.drag_mode) {
                                             DragMode::BoxSelect { start_page, current_page } => {
@@ -1273,14 +1666,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             DragMode::None => {}
                                         }
                                     }
-                                    if is_drawing {
+
+                                    if is_touch_drawing {
+                                        is_touch_drawing = false;
                                         is_drawing = false;
+
                                         if !stroke_already_snapped {
                                             let page_pt = canvas.screen_to_page_clamped(tx, ty);
-                                            let now = start_time.elapsed().as_secs_f64();
                                             canvas.extend_stroke(page_pt.x, page_pt.y, pressure, now);
                                         }
-                                        let new_id = notebook.next_stroke_id();
 
                                         let snapped_shape = stroke_snapped_shape.take().or_else(|| {
                                             if ui_state.active_tool == ActiveTool::Shape {
@@ -1290,37 +1684,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             }
                                         });
 
-                                        let stroke_opt = if let Some(shape) = snapped_shape {
-                                            let stroke_width = ui_state.pen_stroke_width_mm * ink_notes::document::UNITS_PER_MM;
-                                            let color = canvas.current_ink_color;
-                                            canvas.cancel_stroke();
-                                            Some(geometry::shape_to_stroke(shape, new_id, color, stroke_width))
-                                        } else {
-                                            canvas.finish_stroke(new_id)
-                                        };
-
-                                        if let Some(stroke) = stroke_opt {
-                                            let page = notebook.current_page_mut();
-                                            page.add_stroke(stroke);
-                                            canvas.sync_page(page);
-                                            manifest.next_stroke_id = notebook.next_stroke_id;
-                                            autosave.mark_page_dirty(notebook.current_page(), &manifest);
-                                            update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
-                                            window.request_redraw();
-                                        }
+                                        commit_stroke_to_notebook(
+                                            &mut canvas,
+                                            &mut notebook,
+                                            &mut manifest,
+                                            &mut autosave,
+                                            &ui_state,
+                                            &window,
+                                            snapped_shape,
+                                        );
                                     }
-                                }
-                            }
-                            TouchPhase::Cancelled => {
-                                if active_touch_id == Some(touch.id) {
-                                    active_touch_id = None;
-                                    selection_state.drag_mode = DragMode::None;
-                                    if is_drawing {
-                                        is_drawing = false;
-                                        canvas.cancel_stroke();
-                                        window.request_redraw();
-                                    }
-                                    is_erasing = false;
+                                } else if active_touches.len() == 1 {
+                                    pinch_prev_distance = None;
+                                    pinch_prev_center = None;
+                                    let rem = *active_touches.values().next().unwrap();
+                                    touch_pan_last_pos = rem;
                                 }
                             }
                         }
