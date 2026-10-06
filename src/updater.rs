@@ -368,6 +368,17 @@ pub enum UpdaterStatus {
     Error(String),
 }
 
+/// Lehnt jede URL ohne HTTPS ab, sofern unsicheres HTTP nicht ausdrücklich erlaubt ist.
+fn ensure_secure_scheme(url: &url::Url, allow_insecure_http: bool) -> Result<(), String> {
+    match url.scheme() {
+        "https" => Ok(()),
+        "http" if allow_insecure_http => Ok(()),
+        scheme => Err(format!(
+            "Unsicheres Protokoll '{scheme}' für '{url}' abgewiesen. Es wird zwingend HTTPS verlangt."
+        )),
+    }
+}
+
 /// Erstellt einen ureq Agent mit sauberen Timeouts.
 fn create_http_agent() -> ureq::Agent {
     ureq::AgentBuilder::new()
@@ -384,12 +395,15 @@ fn http_get_with_auth_guard(
     initial_url_str: &str,
     token: Option<&str>,
     max_redirects: usize,
+    allow_insecure_http: bool,
 ) -> Result<ureq::Response, String> {
     let mut current_url = url::Url::parse(initial_url_str)
         .map_err(|e| format!("Ungültige URL '{initial_url_str}': {e}"))?;
     let initial_origin = current_url.origin().ascii_serialization();
 
     for _ in 0..=max_redirects {
+        // Jede Anfrage prüfen – auch Download-Links aus der API und Weiterleitungsziele
+        ensure_secure_scheme(&current_url, allow_insecure_http)?;
         let mut req = agent.get(current_url.as_str());
 
         // Token NUR anhängen, wenn Origin (Scheme, Host, Port) identisch ist
@@ -500,7 +514,13 @@ impl UpdaterController {
             );
 
             let agent = create_http_agent();
-            match http_get_with_auth_guard(&agent, &api_url, config.auth_token.as_deref(), 5) {
+            match http_get_with_auth_guard(
+                &agent,
+                &api_url,
+                config.auth_token.as_deref(),
+                5,
+                config.allow_insecure_http,
+            ) {
                 Ok(resp) => match resp.into_json::<GiteaRelease>() {
                     Ok(release) => {
                         if release.prerelease && !config.include_prereleases {
@@ -569,6 +589,7 @@ impl UpdaterController {
                 &asset.browser_download_url,
                 config.auth_token.as_deref(),
                 5,
+                config.allow_insecure_http,
             ) {
                 Ok(r) => r,
                 Err(e) => {
@@ -658,6 +679,7 @@ impl UpdaterController {
                         &ca.browser_download_url,
                         config.auth_token.as_deref(),
                         5,
+                        config.allow_insecure_http,
                     ) {
                         Ok(c_resp) => match c_resp.into_string() {
                             Ok(text) => text,
@@ -994,6 +1016,30 @@ dcdeb7ac87d9e6cb8022e5a71bc7f2c56d779b4fce4efdd5bae5be3b0214884a  ink-notes_0.1.
             ..Default::default()
         };
         assert!(allowed_insecure.validate_url().is_ok());
+    }
+
+    #[test]
+    fn test_https_enforced_for_every_request() {
+        let https = url::Url::parse("https://gitea.pansi.eu/a.deb").unwrap();
+        let http = url::Url::parse("http://cdn.example.com/a.deb").unwrap();
+        let ftp = url::Url::parse("ftp://example.com/a.deb").unwrap();
+        assert!(ensure_secure_scheme(&https, false).is_ok());
+        assert!(ensure_secure_scheme(&http, false).is_err());
+        assert!(ensure_secure_scheme(&http, true).is_ok());
+        assert!(ensure_secure_scheme(&ftp, true).is_err());
+
+        // Ein http-Download-Link aus der Release-API wird abgewiesen, bevor eine
+        // Verbindung aufgebaut wird
+        let agent = create_http_agent();
+        let err = http_get_with_auth_guard(
+            &agent,
+            "http://127.0.0.1:9/ink-notes.AppImage",
+            Some("geheim"),
+            5,
+            false,
+        )
+        .unwrap_err();
+        assert!(err.contains("HTTPS"), "{err}");
     }
 
     #[test]
