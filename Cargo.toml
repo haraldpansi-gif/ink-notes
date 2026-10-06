@@ -39,6 +39,7 @@ sha2 = "0.10"
 ureq = { version = "2.10", default-features = false, features = ["tls", "gzip", "json"] }
 url = "2.5"
 octotablet = "0.1.0"
+minisign-verify = "0.3.0"
 
 [profile.dev]
 opt-level = 1 # Erhöht Rendering-Performance auch im Debug-Modus

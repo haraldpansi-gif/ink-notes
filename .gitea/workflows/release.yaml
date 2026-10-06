@@ -38,6 +38,7 @@ jobs:
             squashfs-tools \
             dpkg-dev \
             curl \
+            minisign \
             python3
 
       - name: Setup Rust Toolchain
@@ -52,10 +53,13 @@ jobs:
           cargo clippy --all-targets -- -D warnings
           cargo test
 
-      - name: Build Release Artifacts (.deb, .AppImage, SHA256SUMS.txt)
+      - name: Build Release Artifacts (.deb, .AppImage, SHA256SUMS.txt + .minisig)
         run: |
           chmod +x scripts/*.sh
           ./scripts/build-release.sh
+        env:
+          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+          INK_NOTES_REQUIRE_SIGNATURE: "1"
 
       - name: Publish Release to Gitea
         run: |

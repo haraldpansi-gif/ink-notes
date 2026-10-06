@@ -7,7 +7,7 @@
 //! - Sichere Asset-Namensbereinigung (Path Traversal Schutz)
 //! - Isolierter Benutzer-Cache-Pfad (`$XDG_CACHE_HOME/ink-notes/updates` mit 0700 Rechten)
 //! - Integritätsprüfung via SHA-256 (`SHA256SUMS.txt`) mit automatischem Löschen ungültiger Dateien
-//! - Erweiterbare Schnittstelle für optionale Signaturprüfung (.sig / .minisig)
+//! - Pflicht-Signaturprüfung der `SHA256SUMS.txt` via Minisign (eingebauter öffentlicher Schlüssel)
 //! - Atomares AppImage-Self-Update via `.new`-Zwischendatei, Backup-Pflicht und atomarem `fs::rename`
 //! - Echtes Fortschritts-Streaming (~10 Updates/s)
 //! - Korrekte SemVer-Prüfung via `semver` Crate (Prerelease-Schutz standardmäßig aktiv)
@@ -313,22 +313,77 @@ pub fn verify_checksum(
     Ok(())
 }
 
-/// Status einer Signaturverifikation (.sig / .minisig).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SignatureVerificationStatus {
-    NotPresent,
-    Verified { signer: String },
-    Failed(String),
+/// Öffentlicher Minisign-Schlüssel (Base64), mit dem die `SHA256SUMS.txt` jedes Releases
+/// signiert sein muss. Ist er leer, lehnt diese Version alle In-App-Updates ab.
+/// Erzeugen: `minisign -G -W -p ink-notes.pub -s ink-notes.key`, dann die zweite Zeile
+/// aus `ink-notes.pub` hier eintragen (siehe README, Abschnitt Release-Signatur).
+pub const UPDATE_SIGNING_PUBLIC_KEY: &str = "";
+
+/// Name des Prüfsummen-Assets eines Releases.
+pub const CHECKSUMS_ASSET_NAME: &str = "SHA256SUMS.txt";
+/// Name der Minisign-Signatur zu [`CHECKSUMS_ASSET_NAME`].
+pub const CHECKSUMS_SIGNATURE_ASSET_NAME: &str = "SHA256SUMS.txt.minisig";
+
+/// Prüft die Minisign-Signatur der Prüfsummendatei. Nur aktuelle (prehashed) Signaturen
+/// werden akzeptiert; ohne hinterlegten Schlüssel schlägt die Prüfung immer fehl.
+pub fn verify_checksums_signature(
+    checksums: &[u8],
+    signature_text: &str,
+    public_key_b64: &str,
+) -> Result<(), String> {
+    let key = public_key_b64.trim();
+    if key.is_empty() {
+        return Err("In dieser Version ist kein Signaturschlüssel für Updates hinterlegt. Bitte das Update manuell installieren.".to_string());
+    }
+    let public_key = minisign_verify::PublicKey::from_base64(key)
+        .map_err(|e| format!("Ungültiger Update-Signaturschlüssel: {e}."))?;
+    let signature = minisign_verify::Signature::decode(signature_text)
+        .map_err(|e| format!("{CHECKSUMS_SIGNATURE_ASSET_NAME} ist ungültig: {e}."))?;
+    public_key
+        .verify(checksums, &signature, false)
+        .map_err(|e| format!("Signaturprüfung von {CHECKSUMS_ASSET_NAME} fehlgeschlagen: {e}."))
 }
 
-/// Erweiterbare Schnittstelle für kryptografische Signaturprüfung.
-pub fn verify_signature_if_present(
-    _asset_file: &Path,
-    _sig_bytes: Option<&[u8]>,
-) -> Result<SignatureVerificationStatus, String> {
-    // Erweiterungspunkt: Sobald ein Signaturschlüssel / Minisign-Public-Key
-    // im Projekt konfiguriert ist, kann hier die kryptografische Verifikation erfolgen.
-    Ok(SignatureVerificationStatus::NotPresent)
+/// Lädt einen Text-Asset des Releases über den abgesicherten HTTP-Client.
+fn fetch_release_text(
+    agent: &ureq::Agent,
+    release: &GiteaRelease,
+    name: &str,
+    config: &UpdaterConfig,
+) -> Result<String, String> {
+    let asset = release
+        .assets
+        .iter()
+        .find(|a| a.name == name)
+        .ok_or_else(|| format!("Release enthält keine {name}."))?;
+    http_get_with_auth_guard(
+        agent,
+        &asset.browser_download_url,
+        config.auth_token.as_deref(),
+        5,
+        config.allow_insecure_http,
+    )
+    .map_err(|e| format!("Konnte {name} nicht laden: {e}."))?
+    .into_string()
+    .map_err(|e| format!("Konnte {name} nicht dekodieren: {e}."))
+}
+
+/// Lädt `SHA256SUMS.txt` samt Minisign-Signatur und gibt den Inhalt nur bei gültiger
+/// Signatur zurück.
+fn fetch_verified_checksums(
+    agent: &ureq::Agent,
+    release: &GiteaRelease,
+    config: &UpdaterConfig,
+    public_key_b64: &str,
+) -> Result<String, String> {
+    // Ohne Schlüssel gar nicht erst Netzwerkanfragen stellen
+    if public_key_b64.trim().is_empty() {
+        return verify_checksums_signature(b"", "", public_key_b64).map(|()| String::new());
+    }
+    let checksums = fetch_release_text(agent, release, CHECKSUMS_ASSET_NAME, config)?;
+    let signature = fetch_release_text(agent, release, CHECKSUMS_SIGNATURE_ASSET_NAME, config)?;
+    verify_checksums_signature(checksums.as_bytes(), &signature, public_key_b64)?;
+    Ok(checksums)
 }
 
 /// Event-Typen für den asynchronen Worker.
@@ -583,7 +638,31 @@ impl UpdaterController {
             let target_file = cache_dir.join(&safe_asset_name);
             let agent = create_http_agent();
 
-            // 1. Download des Release-Assets mit Fortschritts-Streaming
+            // 1. Signierte Prüfsummen laden und verifizieren, BEVOR das Paket geladen wird
+            let checksums_content = match active_release.as_ref() {
+                Some(release) => match fetch_verified_checksums(
+                    &agent,
+                    release,
+                    &config,
+                    UPDATE_SIGNING_PUBLIC_KEY,
+                ) {
+                    Ok(text) => text,
+                    Err(e) => {
+                        let _ = tx.send(UpdaterEvent::DownloadError(format!(
+                            "{e} Download abgelehnt."
+                        )));
+                        return;
+                    }
+                },
+                None => {
+                    let _ = tx.send(UpdaterEvent::DownloadError(
+                        "Kein Release ausgewählt. Download abgelehnt.".to_string(),
+                    ));
+                    return;
+                }
+            };
+
+            // 2. Download des Release-Assets mit Fortschritts-Streaming
             let resp = match http_get_with_auth_guard(
                 &agent,
                 &asset.browser_download_url,
@@ -667,54 +746,13 @@ impl UpdaterController {
 
             drop(file);
 
-            // 2. Integritätsprüfung gegen SHA256SUMS.txt
-            let checksum_asset = active_release
-                .as_ref()
-                .and_then(|r| r.assets.iter().find(|a| a.name == "SHA256SUMS.txt"));
-
-            let checksums_content = match checksum_asset {
-                Some(ca) => {
-                    match http_get_with_auth_guard(
-                        &agent,
-                        &ca.browser_download_url,
-                        config.auth_token.as_deref(),
-                        5,
-                        config.allow_insecure_http,
-                    ) {
-                        Ok(c_resp) => match c_resp.into_string() {
-                            Ok(text) => text,
-                            Err(e) => {
-                                let _ = std::fs::remove_file(&target_file);
-                                let _ = tx.send(UpdaterEvent::DownloadError(format!(
-                                    "Konnte SHA256SUMS.txt nicht dekodieren: {e}. Datei gelöscht."
-                                )));
-                                return;
-                            }
-                        },
-                        Err(e) => {
-                            let _ = std::fs::remove_file(&target_file);
-                            let _ = tx.send(UpdaterEvent::DownloadError(format!(
-                                "Konnte SHA256SUMS.txt nicht laden: {e}. Datei aus Sicherheitsgründen gelöscht."
-                            )));
-                            return;
-                        }
-                    }
-                }
-                None => {
-                    let _ = std::fs::remove_file(&target_file);
-                    let _ = tx.send(UpdaterEvent::DownloadError(
-                        "Release enthält keine SHA256SUMS.txt-Prüfsummen. Download abgelehnt und gelöscht.".to_string(),
-                    ));
-                    return;
-                }
-            };
-
+            // 3. Integritätsprüfung des Pakets gegen die signierte SHA256SUMS.txt
             if let Err(err) = verify_checksum(&target_file, &safe_asset_name, &checksums_content) {
                 let _ = tx.send(UpdaterEvent::DownloadError(err));
                 return;
             }
 
-            // 3. Wenn es ein AppImage ist, Executable-Bit auf 0755 setzen
+            // 4. Wenn es ein AppImage ist, Executable-Bit auf 0755 setzen
             if safe_asset_name.ends_with(".AppImage") {
                 #[cfg(unix)]
                 {
@@ -1016,6 +1054,57 @@ dcdeb7ac87d9e6cb8022e5a71bc7f2c56d779b4fce4efdd5bae5be3b0214884a  ink-notes_0.1.
             ..Default::default()
         };
         assert!(allowed_insecure.validate_url().is_ok());
+    }
+
+    /// Nur für Tests erzeugtes Minisign-Schlüsselpaar (der geheime Schlüssel wurde verworfen).
+    const TEST_PUBLIC_KEY: &str = "RWQr5S8CVgsjS4UA3uY0xqTDua4uRSSzKWpFfJKLCypjgP3NGt9Tmdbh";
+    const TEST_CHECKSUMS: &str = "abc123  ink-notes_9.9.9_amd64.deb\n";
+    const TEST_SIGNATURE: &str = "untrusted comment: signature from rsign secret key
+RUQr5S8CVgsjS5BYMUx1ICe1E356aP7wesQXw+oKF6Rd8WsvdF1dmCb1ffonXgJ2GhWE5iAWPXQaT8Y/Y4zLIpyS1PA8JCe8eAM=
+trusted comment: ink-notes test
+iw0NOedyAQg3emO36fHjyfn+AbnI7Idyl+NwFTDJX1YceLM1jSfjIfeIc0D49IQXyGTpM/QnkZJkRO/eI8ZKBQ==
+";
+
+    #[test]
+    fn test_checksums_signature_verification() {
+        // Gültige Signatur
+        assert!(verify_checksums_signature(
+            TEST_CHECKSUMS.as_bytes(),
+            TEST_SIGNATURE,
+            TEST_PUBLIC_KEY
+        )
+        .is_ok());
+
+        // Manipulierte Prüfsummen (z. B. ausgetauschter Hash)
+        let tampered = TEST_CHECKSUMS.replace("abc123", "abc124");
+        assert!(
+            verify_checksums_signature(tampered.as_bytes(), TEST_SIGNATURE, TEST_PUBLIC_KEY)
+                .is_err()
+        );
+
+        // Fremder Schlüssel
+        let other_key = "RWQf6LRCGA9i53mlYecO4IzT51TGPpvWucNSCh1CBM0QTaLn73Y7GFO3";
+        assert!(
+            verify_checksums_signature(TEST_CHECKSUMS.as_bytes(), TEST_SIGNATURE, other_key)
+                .is_err()
+        );
+
+        // Kein Schlüssel hinterlegt -> strikt ablehnen
+        let err =
+            verify_checksums_signature(TEST_CHECKSUMS.as_bytes(), TEST_SIGNATURE, "").unwrap_err();
+        assert!(err.contains("kein Signaturschlüssel"), "{err}");
+
+        // Fehlende / kaputte Signatur
+        assert!(
+            verify_checksums_signature(TEST_CHECKSUMS.as_bytes(), "", TEST_PUBLIC_KEY).is_err()
+        );
+
+        // Altes (nicht prehashed) Signaturformat wird nicht akzeptiert
+        let legacy_sig = "untrusted comment: signature from minisign secret key
+RWQf6LRCGA9i59SLOFxz6NxvASXDJeRtuZykwQepbDEGt87ig1BNpWaVWuNrm73YiIiJbq71Wi+dP9eKL8OC351vwIasSSbXxwA=
+trusted comment: timestamp:1555779966\tfile:test
+QtKMXWyYcwdpZAlPF7tE2ENJkRd1ujvKjlj1m9RtHTBnZPa5WKU5uWRs5GoP5M/VqE81QFuMKI5k/SfNQUaOAA==";
+        assert!(verify_checksums_signature(b"test", legacy_sig, other_key).is_err());
     }
 
     #[test]

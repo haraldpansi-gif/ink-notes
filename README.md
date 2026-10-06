@@ -71,7 +71,7 @@ Eine latenzoptimierte, hardwarebeschleunigte Inking- und Notizbuch-Anwendung fü
 
 - **Natives .deb-Paket**: Optimiert für Zorin OS 18 (Ubuntu 24.04 LTS Basis) mit vollständiger XDG Desktop-Integration (`.desktop`, Hicolor-Icons SVG & PNG, AppStream Metainfo, Debian Copyright & Changelog).
 - **Portables .AppImage**: Eigenständiges x86_64 Bundle.
-- **In-App Updater (`src/updater.rs`)**: Automatischer Prüflauf gegen Gitea Releases, SemVer-Filterung, SHA-256-Prüfung und atomarer In-Place Austausch.
+- **In-App Updater (`src/updater.rs`)**: Automatischer Prüflauf gegen Gitea Releases, SemVer-Filterung, Minisign-Signaturprüfung, SHA-256-Prüfung und atomarer In-Place Austausch.
 
 ### 1. Release-Pakete bauen
 
@@ -84,6 +84,23 @@ Ergebnis in `target/`:
 - `ink-notes_0.1.0_amd64.deb`
 - `ink-notes_0.1.0_x86_64.AppImage`
 - `SHA256SUMS.txt`
+- `SHA256SUMS.txt.minisig` (nur mit gesetztem `MINISIGN_SECRET_KEY`, siehe unten)
+
+### Release-Signatur einrichten (einmalig)
+
+In-App-Updates werden nur mit gültiger Minisign-Signatur installiert. Einmalig ein Schlüsselpaar erzeugen (ohne Passwort, da es nur als CI-Secret verwendet wird):
+
+```bash
+minisign -G -W -p ink-notes.pub -s ink-notes.key
+# oder ohne minisign-Paket, mit dem kompatiblen rsign2 (cargo install rsign2):
+rsign generate -W -p ink-notes.pub -s ink-notes.key
+```
+
+1. Die zweite Zeile aus `ink-notes.pub` (beginnt mit `RW`) in `src/updater.rs` als `UPDATE_SIGNING_PUBLIC_KEY` eintragen und committen.
+2. Den kompletten Inhalt von `ink-notes.key` in Gitea unter *Repository → Einstellungen → Actions → Secrets* als `MINISIGN_SECRET_KEY` anlegen.
+3. `ink-notes.key` sicher offline aufbewahren und vom Rechner löschen. Geht der Schlüssel verloren, können bestehende Installationen keine Updates mehr prüfen.
+
+Lokal signiert `build-release.sh` nur, wenn `MINISIGN_SECRET_KEY` gesetzt ist. In der CI ist die Signatur Pflicht (`INK_NOTES_REQUIRE_SIGNATURE=1`), und das Skript prüft, dass der geheime Schlüssel zum eingebauten öffentlichen Schlüssel passt.
 
 ### 2. Installation auf Zorin OS 18 / Ubuntu 24.04
 
@@ -123,15 +140,15 @@ export GITEA_TOKEN="<DEIN_GITEA_TOKEN>"
 
 Der In-App-Updater (`src/updater.rs`) folgt strengen Sicherheitsrichtlinien:
 
-1. **SHA-256-Integritätsprüfung:**
-   - Vor jeder Ausführung oder Installation wird die offizielle Prüfsummendatei `SHA256SUMS.txt` aus dem Release bezogen.
-   - Der SHA-256-Hash des heruntergeladenen Pakets wird berechnet (`sha2`).
+1. **Minisign-Signatur (Pflicht):**
+   - Jedes Release enthält `SHA256SUMS.txt.minisig`, eine Minisign-Signatur der Prüfsummendatei.
+   - Der Updater lädt `SHA256SUMS.txt` und die Signatur **vor** dem Paket und prüft sie gegen den in die App eingebauten öffentlichen Schlüssel (`UPDATE_SIGNING_PUBLIC_KEY` in `src/updater.rs`, Crate `minisign-verify`).
+   - Fehlt die Signatur, ist sie ungültig oder ist kein Schlüssel eingebaut, wird das Update abgelehnt. Ein kompromittierter Release-Server kann so keine manipulierten Pakete ausliefern.
+2. **SHA-256-Integritätsprüfung:**
+   - Der SHA-256-Hash des heruntergeladenen Pakets wird mit dem Eintrag in der signierten `SHA256SUMS.txt` verglichen (`sha2`).
    - Weicht die Prüfsumme ab oder fehlt ein Eintrag, wird die Datei sofort gelöscht und der Installationsvorgang mit Fehlermeldung abgebrochen.
-   - *Hinweis zur Authentizität:* Eine Prüfsumme vom selben Release-Server garantiert Schutz gegen Übertragungsfehler und Datei-Beschädigungen, jedoch keine kryptografische Nicht-Abstreitbarkeit gegenüber einem kompromittierten Server.
-2. **Signatur-Ausblick:**
-   - Die Updater-Architektur enthält Schnittstellen für optionale `.sig`/`.minisig`-Signaturen zur zukünftigen End-to-End-Kryptoverifikation über öffentliche Schlüssel.
 3. **Redirect-Schutz & HTTPS:**
-   - Alle API- und Download-Endpunkte erzwingen standardmäßig HTTPS.
+   - Jede Anfrage erzwingt HTTPS – auch Download-Links aus der Release-API und jedes Weiterleitungsziel.
    - Bei HTTP-Redirects werden sensible Autorisierungs-Header (`Authorization: token ...`) verworfen, sobald die Weiterleitung auf eine andere Origin oder ein externes CDN verweist.
 4. **Isolierter Download-Pfad & Path-Traversal-Schutz:**
    - Downloads werden in einem isolierten Benutzerverzeichnis abgelegt (`$XDG_CACHE_HOME/ink-notes/updates` bzw. `~/.cache/ink-notes/updates`, Berechtigung `0700`).

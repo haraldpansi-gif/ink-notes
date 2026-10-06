@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # Haupt-Release-Build-Skript für ink-notes (Zorin OS 18 / Linux)
-# Erstellt .deb, .AppImage und SHA256-Prüfsummen in target/
+# Erstellt .deb, .AppImage, SHA256-Prüfsummen und deren Minisign-Signatur in target/
 # ==============================================================================
 set -euo pipefail
 
@@ -30,10 +30,36 @@ echo "=== Berechne SHA256-Prüfsummen in target/${CHECKSUM_FILE} ==="
 cd "${ROOT_DIR}/target"
 sha256sum "${DEB_NAME}" "${APPIMAGE_NAME}" > "${CHECKSUM_FILE}"
 
+# 4. Prüfsummen mit Minisign signieren (Pflicht für In-App-Updates)
+SIGNATURE_FILE="${CHECKSUM_FILE}.minisig"
+rm -f "${SIGNATURE_FILE}"
+EMBEDDED_PUBKEY=$(grep -m1 'pub const UPDATE_SIGNING_PUBLIC_KEY' "${ROOT_DIR}/src/updater.rs" | cut -d '"' -f2)
+if [ -n "${MINISIGN_SECRET_KEY:-}" ]; then
+    if [ -z "${EMBEDDED_PUBKEY}" ]; then
+        echo "FEHLER: UPDATE_SIGNING_PUBLIC_KEY in src/updater.rs ist leer – diese Version könnte keine Updates prüfen."
+        exit 1
+    fi
+    echo "=== Signiere ${CHECKSUM_FILE} mit Minisign ==="
+    KEY_FILE="$(mktemp)"
+    trap 'rm -f "${KEY_FILE}"' EXIT
+    printf '%s\n' "${MINISIGN_SECRET_KEY}" > "${KEY_FILE}"
+    minisign -S -s "${KEY_FILE}" -m "${CHECKSUM_FILE}" -t "ink-notes v${VERSION}"
+    rm -f "${KEY_FILE}"
+    # Stellt sicher, dass der geheime Schlüssel zum eingebauten öffentlichen Schlüssel passt
+    minisign -V -P "${EMBEDDED_PUBKEY}" -m "${CHECKSUM_FILE}"
+elif [ "${INK_NOTES_REQUIRE_SIGNATURE:-0}" = "1" ]; then
+    echo "FEHLER: MINISIGN_SECRET_KEY ist nicht gesetzt, eine Signatur ist aber Pflicht."
+    exit 1
+else
+    echo "WARNUNG: MINISIGN_SECRET_KEY nicht gesetzt – ${CHECKSUM_FILE} bleibt unsigniert."
+    echo "         Installierte Apps lehnen ein solches Release als Update ab."
+fi
+
 echo "======================================================================"
 echo "Release-Artefakte für v${VERSION} erfolgreich erstellt:"
 echo "======================================================================"
 ls -lh "${DEB_NAME}" "${APPIMAGE_NAME}" "${CHECKSUM_FILE}"
+if [ -f "${SIGNATURE_FILE}" ]; then ls -lh "${SIGNATURE_FILE}"; fi
 echo ""
 echo "Inhalt von target/${CHECKSUM_FILE}:"
 cat "${CHECKSUM_FILE}"
