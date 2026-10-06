@@ -9,15 +9,25 @@ on:
 jobs:
   release:
     name: Build Packages & Publish to Gitea
+    # Hinweis zum Gitea act_runner:
+    # Standardmäßig 'ubuntu-latest'. Falls Ihr Runner unter einem anderen Label registriert ist
+    # (z. B. 'linux', 'ubuntu-24.04' oder 'host'), passen Sie dieses Label an.
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v4.2.2
 
       - name: Install System Packaging Tools
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          export DEBIAN_FRONTEND=noninteractive
+          SUDO=""
+          if [ "$(id -u)" -ne 0 ]; then
+            if command -v sudo >/dev/null 2>&1; then
+              SUDO="sudo"
+            fi
+          fi
+          $SUDO apt-get update -y
+          $SUDO apt-get install -y --no-install-recommends \
             build-essential \
             pkg-config \
             libx11-dev \
@@ -31,10 +41,16 @@ jobs:
             python3
 
       - name: Setup Rust Toolchain
-        uses: actions-rust-lang/setup-rust-toolchain@v1
+        uses: actions-rust-lang/setup-rust-toolchain@v1.11.0
         with:
           toolchain: stable
           cache: true
+
+      - name: Code Quality & Testing (Quality Gates)
+        run: |
+          cargo fmt --check
+          cargo clippy --all-targets -- -D warnings
+          cargo test
 
       - name: Build Release Artifacts (.deb, .AppImage, SHA256SUMS.txt)
         run: |
@@ -43,8 +59,9 @@ jobs:
 
       - name: Publish Release to Gitea
         run: |
-          ./scripts/publish-gitea-release.sh "${{ secrets.GITEA_TOKEN || secrets.GITHUB_TOKEN }}"
+          ./scripts/publish-gitea-release.sh
         env:
+          GITEA_TOKEN: ${{ secrets.GITEA_TOKEN || secrets.GITHUB_TOKEN }}
           GITEA_SERVER: ${{ github.server_url }}
           REPO_OWNER: ${{ github.repository_owner }}
           REPO_NAME: ${{ github.event.repository.name }}
