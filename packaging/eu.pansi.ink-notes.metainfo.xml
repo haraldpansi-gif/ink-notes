@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>eu.pansi.ink-notes</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <name>ink-notes</name>
+  <summary>Latenzoptimierte Vektor-Notizbuch- und Inking-App für Linux</summary>
+  <description>
+    <p>
+      ink-notes ist eine hardwarebeschleunigte, hochperformante Notizbuch- und Inking-Anwendung für Linux,
+      geschrieben in Rust mit wgpu. Sie bietet minimale Eingabelatenz mit Stylus, Touchpad oder Maus.
+    </p>
+    <p>Hauptmerkmale:</p>
+    <ul>
+      <li>Zwei-Stufen-Inking-Modell: Echtzeit-Glättung mit 1€-Filter und akausale Ecken-Erhaltung</li>
+      <li>Automatische Geometrie- und Formerkennung (Geraden, Rechtecke, Kreise, Koordinatensysteme, Polygone)</li>
+      <li>Stufenloser Viewport mit cursor-zentriertem Zoom (25% bis 500%) und Panning</li>
+      <li>Objektauswahl, Lasso, Skalieren, stufenloses Drehen und Multicolor-Umfärbung</li>
+      <li>Multi-Dokumenten- und Notizbuch-Verwaltung mit atomarem Autosave</li>
+      <li>Vektor-PDF-Export für Druck und Weitergabe</li>
+    </ul>
+  </description>
+  <launchable type="desktop-id">eu.pansi.ink-notes.desktop</launchable>
+  <provides>
+    <binary>ink-notes</binary>
+  </provides>
+  <categories>
+    <category>Office</category>
+    <category>Graphics</category>
+    <category>Utility</category>
+  </categories>
+  <developer id="eu.pansi">
+    <name>Harald</name>
+  </developer>
+  <url type="homepage">https://gitea.pansi.eu/harald/ink-notes</url>
+  <url type="bugtracker">https://gitea.pansi.eu/harald/ink-notes/issues</url>
+  <content_rating type="oars-1.1" />
+</component>

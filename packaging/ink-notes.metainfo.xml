@@ -20,7 +20,7 @@
       <li>Vektor-PDF-Export für Druck und Weitergabe</li>
     </ul>
   </description>
-  <launchable type="desktop-id">ink-notes.desktop</launchable>
+  <launchable type="desktop-id">eu.pansi.ink-notes.desktop</launchable>
   <provides>
     <binary>ink-notes</binary>
   </provides>
@@ -32,7 +32,7 @@
   <developer id="eu.pansi">
     <name>Harald</name>
   </developer>
-  <url type="homepage">https://farmersdog.pansi.eu/harald/ink-notes</url>
-  <url type="bugtracker">https://farmersdog.pansi.eu/harald/ink-notes/issues</url>
+  <url type="homepage">https://gitea.pansi.eu/harald/ink-notes</url>
+  <url type="bugtracker">https://gitea.pansi.eu/harald/ink-notes/issues</url>
   <content_rating type="oars-1.1" />
 </component>

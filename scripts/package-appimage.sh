@@ -18,10 +18,21 @@ APPDIR="${ROOT_DIR}/target/AppDir"
 CACHE_DIR="${ROOT_DIR}/target/tools"
 APPIMAGETOOL="${CACHE_DIR}/appimagetool-x86_64.AppImage"
 
+# Pinned appimagetool Release & SHA-256 Hash
+APPIMAGETOOL_VERSION="1.9.1"
+APPIMAGETOOL_URL="https://github.com/AppImage/appimagetool/releases/download/${APPIMAGETOOL_VERSION}/appimagetool-x86_64.AppImage"
+APPIMAGETOOL_SHA256="ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0"
+
 echo "=== [1/5] Stelle Release-Binary sicher (ink-notes v${VERSION}) ==="
 if [ ! -f "target/release/ink-notes" ]; then
     cargo build --release
 fi
+
+# Prüfe glibc-Mindestversion
+echo "=== Prüfe glibc-Symbolversionen ==="
+MAX_GLIBC=$(objdump -T "target/release/ink-notes" | grep "GLIBC_" | sed -e 's/.*GLIBC_//' | cut -d')' -f1 | sort -V | tail -n 1 || echo "unknown")
+echo "Höchste benötigte glibc-Symbolversion: GLIBC_${MAX_GLIBC}"
+echo "Hinweis: ink-notes nutzt den Host-Grafikstack (Vulkan ICD, Wayland/X11) und glibc >= ${MAX_GLIBC}."
 
 # Sicherstellen, dass das PNG-Icon existiert
 if [ ! -f "assets/ink-notes.png" ]; then
@@ -41,15 +52,20 @@ mkdir -p "${APPDIR}/usr/share/metainfo"
 cp "target/release/ink-notes" "${APPDIR}/usr/bin/ink-notes"
 chmod 755 "${APPDIR}/usr/bin/ink-notes"
 
-cp "packaging/ink-notes.desktop" "${APPDIR}/usr/share/applications/ink-notes.desktop"
-cp "packaging/ink-notes.desktop" "${APPDIR}/ink-notes.desktop"
+# Desktop-Datei
+cp "packaging/eu.pansi.ink-notes.desktop" "${APPDIR}/usr/share/applications/eu.pansi.ink-notes.desktop"
+cp "packaging/eu.pansi.ink-notes.desktop" "${APPDIR}/eu.pansi.ink-notes.desktop"
+ln -sf "eu.pansi.ink-notes.desktop" "${APPDIR}/ink-notes.desktop"
 
-cp "assets/ink-notes.svg" "${APPDIR}/usr/share/icons/hicolor/scalable/apps/ink-notes.svg"
-cp "assets/ink-notes.png" "${APPDIR}/usr/share/icons/hicolor/256x256/apps/ink-notes.png"
-cp "assets/ink-notes.png" "${APPDIR}/ink-notes.png"
-ln -sf "ink-notes.png" "${APPDIR}/.DirIcon"
+# Icons
+cp "assets/ink-notes.svg" "${APPDIR}/usr/share/icons/hicolor/scalable/apps/eu.pansi.ink-notes.svg"
+cp "assets/ink-notes.png" "${APPDIR}/usr/share/icons/hicolor/256x256/apps/eu.pansi.ink-notes.png"
+cp "assets/ink-notes.png" "${APPDIR}/eu.pansi.ink-notes.png"
+ln -sf "eu.pansi.ink-notes.png" "${APPDIR}/.DirIcon"
 
-cp "packaging/ink-notes.metainfo.xml" "${APPDIR}/usr/share/metainfo/eu.pansi.ink-notes.metainfo.xml"
+# Metainfo
+cp "packaging/eu.pansi.ink-notes.metainfo.xml" "${APPDIR}/usr/share/metainfo/eu.pansi.ink-notes.metainfo.xml"
+cp "packaging/eu.pansi.ink-notes.metainfo.xml" "${APPDIR}/usr/share/metainfo/eu.pansi.ink-notes.appdata.xml"
 
 # AppRun Skript erstellen
 cat <<'EOF' > "${APPDIR}/AppRun"
@@ -62,11 +78,32 @@ exec "${SELF_DIR}/usr/bin/ink-notes" "$@"
 EOF
 chmod 755 "${APPDIR}/AppRun"
 
-echo "=== [3/5] Hole appimagetool (gecacht in ${CACHE_DIR}) ==="
+echo "=== [3/5] Hole & verifiziere gepinntes appimagetool v${APPIMAGETOOL_VERSION} ==="
 mkdir -p "${CACHE_DIR}"
-if [ ! -f "${APPIMAGETOOL}" ]; then
-    echo "Lade appimagetool herunter..."
-    curl -fsSL -o "${APPIMAGETOOL}" "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage"
+
+need_download=true
+if [ -f "${APPIMAGETOOL}" ]; then
+    CURRENT_HASH=$(sha256sum "${APPIMAGETOOL}" | cut -d' ' -f1)
+    if [ "${CURRENT_HASH}" = "${APPIMAGETOOL_SHA256}" ]; then
+        need_download=false
+    else
+        echo "Gecachtes appimagetool hat ungültigen Hash. Lade neu herunter..."
+        rm -f "${APPIMAGETOOL}"
+    fi
+fi
+
+if [ "${need_download}" = true ]; then
+    echo "Lade appimagetool v${APPIMAGETOOL_VERSION} herunter..."
+    curl -fsSL -o "${APPIMAGETOOL}.tmp" "${APPIMAGETOOL_URL}"
+    DOWNLOAD_HASH=$(sha256sum "${APPIMAGETOOL}.tmp" | cut -d' ' -f1)
+    if [ "${DOWNLOAD_HASH}" != "${APPIMAGETOOL_SHA256}" ]; then
+        echo "FEHLER: SHA256-Prüfsumme für appimagetool stimmt nicht überein!"
+        echo "Erwartet: ${APPIMAGETOOL_SHA256}"
+        echo "Erhalten: ${DOWNLOAD_HASH}"
+        rm -f "${APPIMAGETOOL}.tmp"
+        exit 1
+    fi
+    mv "${APPIMAGETOOL}.tmp" "${APPIMAGETOOL}"
     chmod +x "${APPIMAGETOOL}"
 fi
 
