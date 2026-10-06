@@ -10,9 +10,10 @@ Eine latenzoptimierte, hardwarebeschleunigte Inking- und Notizbuch-Anwendung fü
 
 ### ⚡ Latenzoptimierte Inking-Pipeline
 - **Hardware-Rendering:** Direct-to-Screen-Rendering mit `wgpu` (Vulkan / X11 / Wayland) unter Nutzung von `PresentMode::Mailbox` für minimale Eingabeverzögerung.
-- **1€-Filter (One-Euro-Filter):** Dynamischer Tiefpassfilter zur Glättung von Zittern bei langsamen Bewegungen ohne spürbare Latenz bei schnellen Schwüngen.
+- **Zwei-Stufen-Modell:**
+  1. *Live-Phase:* Eingehende Stylus-Samples werden in Echtzeit durch einen 1€-Filter (One-Euro-Filter) entprellt und inkrementell als GPU-Meshes dargestellt.
+  2. *Commit-Phase (Post-Stroke Finalisierung):* Akausale Ecken-Erkennung (Corner Preservation bei Knicken > 65°), gewichtetes 3-Punkt-Druckfenster, Ramer-Douglas-Peucker (RDP) Dezimierung und saubere runde Endkappen.
 - **Centripetal Catmull-Rom Splines:** Weiche C1-stetige Kurveninterpolation ohne Überschwinger oder Schleifen.
-- **Drucksensitive Dreiecksstreifen-Tessellierung:** Rechnerische Generierung von Triangle-Meshes mit winkelhalbierenden Normalenvektoren entlang des Pfads.
 - **Werkzeuge:**
   - **Stift (Pen):** Feine, variable Strichstärken (0.3 mm bis 1.2 mm) mit Notiz-Farben (Schwarz, Blau, Rot, Grün, Grau).
   - **Textmarker (Highlighter):** Breite, halbtransparente Striche (4.0 mm bis 8.0 mm) mit Multiplikations-Blending.
@@ -29,7 +30,7 @@ Eine latenzoptimierte, hardwarebeschleunigte Inking- und Notizbuch-Anwendung fü
   - **Geraden (Line):** Sehnen- zu Pfadlängenverhältnis > 0.92.
   - **Rechtecke (Rectangle):** 4 orthogonale Ecken via Douglas-Peucker-Polygonzug (RDP).
   - **Kreise & Ellipsen (Circle/Ellipse):** Geschlossene Pfade mit minimaler Varianz via Least-Squares Circle Fit.
-  - **Koordinatensysteme (Axes):** Zwei orthogonale Achsen (80°–100° gesnappt auf exakt 90°) mit optionalen Richtungspfeilen.
+  - **Koordinatensysteme (Axes):** Zwei orthogonale Achsen (80°–100° gesnappt auf exakt 90°) mit Richtungspfeilen.
   - **Dreiecke, Rhomben / Rauten & Oktaeder:** Regelmäßige Polygone mit Eckpunkt-Analyse.
 - **Interaktionsmodelle:**
   - **Draw-and-Hold:** Verweilt der Stift am Ende eines Strichs für > 400 ms regungslos (< 3 px), snappt die Skizze sofort automatisch in eine perfekte Vektorform ein.
@@ -46,77 +47,125 @@ Eine latenzoptimierte, hardwarebeschleunigte Inking- und Notizbuch-Anwendung fü
 
 ### 📚 Multi-Dokumenten- & Notizbuch-Verwaltung
 - **Dateisystem-Architektur:** Jedes Dokument wird in einem separaten Verzeichnis unter `~/.local/share/ink-notes/notebooks/<id>/` mit `manifest.json` und Einzelseiten (`page_<id>.json`) gespeichert.
-- **Dokumenten-Manager:** Dunkles Glassmorphism-Modal direkt in der Toolbar:
-  - Neues Notizbuch anlegen.
-  - Zwischen Notizbüchern mit einem Klick wechseln.
-  - Dokumente direkt umbenennen (`✏`).
-  - Dokumente löschen (`🗑`).
+- **Dokumenten-Manager:** Toolbar-Modal zum Anlegen, Wechseln, Umbenennen und Löschen von Notizbüchern.
 - **Verlustfreier Wechsel:** Beim Dokumentenwechsel sichert ein synchroner Disk-Flush alle anstehenden Änderungen garantiert ab.
 
 ### 📄 Seiten & Hintergründe
 - **Virtuelles DIN-A4-Raster:** 2100 × 2970 Koordinateneinheiten (10 Einheiten = 1 mm).
-- **Hintergrundmuster:**
-  - Blanko
-  - Kariert (5 mm Raster)
-  - Liniert (7.5 mm Zeilenabstand)
-  - Punktraster (5 mm Dot-Grid)
+- **Hintergrundmuster:** Blanko, Kariert (5 mm), Liniert (7.5 mm), Punktraster (5 mm).
 - **Seitenverwaltung:** Vor- und Zurückblättern, neue Seiten anfügen, Seitensprung-Menü.
 
 ### 💾 Autosave & Persistenz
-- **Asynchroner Autosave-Controller:** Sichert Änderungen im Hintergrund-Thread nach 1.5 s Ruhezeit (Debounce), ohne das Zeichnen zu blockieren.
+- **Asynchroner Autosave-Controller:** Sichert Änderungen im Hintergrund nach 1.5 s Ruhezeit (Debounce), ohne das Zeichnen zu blockieren.
 - **Atomares Schreiben:** Temp-Dateien mit atomarem Rename (`manifest.json.tmp` -> `manifest.json`) schützen vor Datenkorruption bei Abstürzen.
-- **Sicherer Shutdown:** `ESC` oder Schließen des Fensters führt vor Programmende einen vollständigen synchronen Flush aus.
+- **Dediziertes Speichern (`Strg + S`):** Sofortiger, synchroner Disk-Flush mit visueller Toast-Rückmeldung.
+- **Sicherer Shutdown:** `Strg + Q` oder Schließen des Fensters führt vor Programmende einen vollständigen synchronen Flush aus.
 
 ### 🖨️ Vektor-PDF-Export
-- Exportiert das gesamte Dokument via `printpdf` nach `./export.pdf`.
-- Striche und geometrische Formen werden als skalierbare Vektoren ausgegeben.
+- Exportiert das Dokument via `printpdf` nach `~/Documents/<Titel>.pdf` (mit automatischer Kollisionsvermeidung `_1`, `_2`).
+- Striche und geometrische Formen werden als skalierbare Vektoren ausgegeben. Kürzel: `Strg + E`.
 
 ---
 
-### 🚀 Release, Packaging & In-App Auto-Update (Zorin OS 18 / Ubuntu)
-- **Natives .deb-Paket**: Optimiert für Zorin OS 18 (Ubuntu 24.04 LTS Noble-Basis) mit vollständiger XDG Desktop-Integration (`.desktop`, Hicolor-Icons SVG & 256x256 PNG, AppStream Metainfo).
-- **Portables .AppImage**: Eigenständiges, distributionsunabhängiges Bundle (x86_64) mit integrierten Laufzeitabhängigkeiten.
-- **In-App Gitea Updater (`src/updater.rs`)**:
-  - Fragt im Hintergrund die Gitea Releases API (`https://gitea.pansi.eu/api/v1/repos/harald/ink-notes/releases/latest`) ab.
-  - Zeigt bei neuen Versionen ein Update-Badge in der Toolbar an.
-  - Release-Modal mit Versionsvergleich, Changelog und 1-Click-Download / In-Place-Aktualisierung.
-- **Gitea Actions CI/CD (`.gitea/workflows/release.yaml`)**: Automatisches Paketieren und Veröffentlichen auf Gitea bei Git-Tags (`v*`).
+## 📦 Release, Packaging & Updater
 
----
-
-## 📦 Paketierung & Installation (Zorin OS 18)
+- **Natives .deb-Paket**: Optimiert für Zorin OS 18 (Ubuntu 24.04 LTS Basis) mit vollständiger XDG Desktop-Integration (`.desktop`, Hicolor-Icons SVG & PNG, AppStream Metainfo, Debian Copyright & Changelog).
+- **Portables .AppImage**: Eigenständiges x86_64 Bundle.
+- **In-App Updater (`src/updater.rs`)**: Automatischer Prüflauf gegen Gitea Releases, SemVer-Filterung, SHA-256-Prüfung und atomarer In-Place Austausch.
 
 ### 1. Release-Pakete bauen
 
 ```bash
-# Baut sowohl .deb als auch .AppImage und berechnet SHA256SUMS.txt in target/
+# Baut .deb, .AppImage und berechnet SHA256SUMS.txt in target/
 ./scripts/build-release.sh
 ```
 
 Ergebnis in `target/`:
-- `ink-notes_0.1.0_amd64.deb` (~4.2 MB)
-- `ink-notes_0.1.0_x86_64.AppImage` (~5.6 MB)
+- `ink-notes_0.1.0_amd64.deb`
+- `ink-notes_0.1.0_x86_64.AppImage`
 - `SHA256SUMS.txt`
 
-### 2. Installation auf Zorin OS 18
+### 2. Installation auf Zorin OS 18 / Ubuntu 24.04
 
 ```bash
 # Natives Debian-Paket installieren
 sudo dpkg -i target/ink-notes_0.1.0_amd64.deb
 
-# Oder portables AppImage direkt starten
+# Oder portables AppImage starten
 chmod +x target/ink-notes_0.1.0_x86_64.AppImage
 ./target/ink-notes_0.1.0_x86_64.AppImage
 ```
 
-Nach der `.deb`-Installation ist `ink-notes` nahtlos im Zorin OS Anwendungsmenü unter *Büro* und *Grafik* integriert.
+#### Hinweise zu AppImage, glibc & FUSE:
+- **glibc-Mindestversion:** `ink-notes` benötigt `glibc >= 2.39` (Standard unter Ubuntu 24.04 LTS und Zorin OS 18).
+- **Host-Grafikstack:** Das AppImage bündelt die Anwendungslogik, nutzt für maximale Performance und Hardwarebeschleunigung jedoch den Treiber- und Grafikstack des Host-Systems (Vulkan ICD-Treiber, Wayland bzw. X11).
+- **FUSE 2 / FUSE 3 Kompatibilität:** Ubuntu 24.04-basierte Distributionen nutzen standardmäßig FUSE 3 (`fuse3`). Sollte das AppImage beim Start einen Fehler bezüglich `libfuse.so.2` ausgeben, kann entweder das Kompatibilitätspaket installiert werden:
+  ```bash
+  sudo apt install libfuse2t64
+  ```
+  oder das AppImage direkt ohne FUSE entpackt und ausgeführt werden:
+  ```bash
+  ./ink-notes_0.1.0_x86_64.AppImage --appimage-extract-and-run
+  ```
 
 ### 3. Release auf Gitea veröffentlichen
 
+Das Skript arbeitet vollkommen idempotent und aktualisiert bei wiederholter Ausführung Release-Notizen und Assets:
+
 ```bash
-# Veröffentlicht die Artefakte auf https://gitea.pansi.eu/harald/ink-notes
-./scripts/publish-gitea-release.sh <DEIN_GITEA_TOKEN>
+export GITEA_TOKEN="<DEIN_GITEA_TOKEN>"
+./scripts/publish-gitea-release.sh
 ```
+
+---
+
+## 🛡️ Updater-Sicherheit
+
+Der In-App-Updater (`src/updater.rs`) folgt strengen Sicherheitsrichtlinien:
+
+1. **SHA-256-Integritätsprüfung:**
+   - Vor jeder Ausführung oder Installation wird die offizielle Prüfsummendatei `SHA256SUMS.txt` aus dem Release bezogen.
+   - Der SHA-256-Hash des heruntergeladenen Pakets wird berechnet (`sha2`).
+   - Weicht die Prüfsumme ab oder fehlt ein Eintrag, wird die Datei sofort gelöscht und der Installationsvorgang mit Fehlermeldung abgebrochen.
+   - *Hinweis zur Authentizität:* Eine Prüfsumme vom selben Release-Server garantiert Schutz gegen Übertragungsfehler und Datei-Beschädigungen, jedoch keine kryptografische Nicht-Abstreitbarkeit gegenüber einem kompromittierten Server.
+2. **Signatur-Ausblick:**
+   - Die Updater-Architektur enthält Schnittstellen für optionale `.sig`/`.minisig`-Signaturen zur zukünftigen End-to-End-Kryptoverifikation über öffentliche Schlüssel.
+3. **Redirect-Schutz & HTTPS:**
+   - Alle API- und Download-Endpunkte erzwingen standardmäßig HTTPS.
+   - Bei HTTP-Redirects werden sensible Autorisierungs-Header (`Authorization: token ...`) verworfen, sobald die Weiterleitung auf eine andere Origin oder ein externes CDN verweist.
+4. **Isolierter Download-Pfad & Path-Traversal-Schutz:**
+   - Downloads werden in einem isolierten Benutzerverzeichnis abgelegt (`$XDG_CACHE_HOME/ink-notes/updates` bzw. `~/.cache/ink-notes/updates`, Berechtigung `0700`).
+   - Asset-Namen werden sanitisiert: Pfadtrenner (`/`, `\`), Pfadüberquerungen (`..`), Steuerzeichen und leere Dateinamen werden strikt abgewiesen.
+5. **Atomarer AppImage-Tausch:**
+   - Kein direktes Überschreiben laufender Programmdateien per `fs::copy` (verhindert den Linux-Kernel-Fehler *"Text file busy"*).
+   - Die neue Datei wird temporär im selben Verzeichnis angelegt (`<name>.new.<pid>`), mit Ausführungsrechten (`0755`) versehen, das bestehende AppImage als `<name>.bak` gesichert (dessen Fehler nicht ignoriert werden) und anschließend per atomarem `fs::rename` ausgetauscht.
+
+---
+
+## ⚙️ CI-Runner einrichten (Gitea Actions / act_runner)
+
+Der Veröffentlichungs-Workflow liegt unter [`.gitea/workflows/release.yaml`](.gitea/workflows/release.yaml).
+
+### Runner-Label konfigurieren
+Der Workflow nutzt standardmäßig das Runner-Label:
+```yaml
+runs-on: ubuntu-latest
+```
+
+In der Konfigurationsdatei Ihres Gitea `act_runner` (`config.yaml`) muss dieses Label auf ein passendes Container-Image oder den Host gemappt sein:
+```yaml
+runner:
+  labels:
+    - "ubuntu-latest:docker://catthehacker/ubuntu:act-latest"
+    # oder für native Host-Ausführung:
+    # - "ubuntu-latest:host"
+```
+
+### Diagnose & Fehlerbehebung
+Bleibt ein Release-Job auf **"Waiting to run"** hängen:
+1. **Runner online?** Prüfen Sie in Gitea unter *Einstellungen -> Aktionen -> Runner*, ob der `act_runner` aktiv und mit einem grünen Punkt als *Online* markiert ist.
+2. **Label-Übereinstimmung:** Stimmen die im Runner registrierten Labels exakt mit dem `runs-on`-Feld in `.gitea/workflows/release.yaml` überein?
+3. **Rechte:** Der Workflow prüft `if [ "$(id -u)" -ne 0 ]` und setzt `sudo` nur ein, wenn der Runner nicht als `root` läuft. Das verhindert Fehler sowohl in unprivilegierten Host-Umgebungen als auch in Root-Containern.
 
 ---
 
@@ -126,13 +175,13 @@ Nach der `.deb`-Installation ist `ink-notes` nahtlos im Zorin OS Anwendungsmenü
 - **Rust & Cargo:** Version 1.75 oder neuer (`rustup update stable`)
 - **System-Bibliotheken (Linux):**
   - Vulkan-Treiber (z. B. `mesa-vulkan-drivers` oder proprietäre Treiber)
-  - X11 / XWayland Bibliotheken (`libx11-dev`, `libxcursor-dev`, `libxrandr-dev`, `libxi-dev`, `libxkbcommon-dev`)
+  - X11 / Wayland Bibliotheken (`libx11-dev`, `libxcursor-dev`, `libxrandr-dev`, `libxi-dev`, `libxkbcommon-dev`)
 
 ### Bauen & Ausführen
 
 ```bash
 # Repository klonen
-git clone gitea@farmersdog.pansi.eu:harald/ink-notes.git
+git clone https://gitea.pansi.eu/harald/ink-notes.git
 cd ink-notes
 
 # Kompilieren und starten via Starter-Skript
@@ -164,8 +213,10 @@ cargo run --release
 | **Nächste Seite** | `Bild ab (PageDown)` oder `N` |
 | **Vorherige Seite** | `Bild auf (PageUp)` |
 | **Erste / Letzte Seite** | `Pos 1 (Home)` / `Ende (End)` |
-| **PDF-Export** | `Strg + E` oder `Strg + S` |
-| **Beenden (mit Disk-Flush)** | `Esc` oder `Q` |
+| **Jetzt speichern (Disk Flush)** | `Strg + S` |
+| **Vektor-PDF-Export** | `Strg + E` |
+| **Dialoge / Menüs schließen** | `Esc` |
+| **Beenden (mit Disk-Flush)** | `Strg + Q` (oder Fenster schließen) |
 
 ---
 
@@ -179,7 +230,7 @@ src/
 ├── viewport.rs     # Kamera-Pan, Zoom, 2D-Transformationsmatrizen
 ├── shader.wgsl     # WGSL Vertex- & Fragment-Shader für Inking-Meshes
 ├── filter.rs       # One-Euro-Filter gegen Eingabe-Jitter
-├── spline.rs       # Centripetal Catmull-Rom & Dreiecksstreifen-Tessellierung
+├── spline.rs       # Catmull-Rom, Corner Preservation & Dreiecksstreifen
 ├── geometry.rs     # RDP-Algorithmus, Least-Squares Circle Fit, Shape Recognition
 ├── selection.rs    # Lasso-Auswahl, Bounding-Box, Griffe, Rotation & Skalierung
 ├── background.rs   # Tessellierung für Kariert, Liniert, Punktraster
@@ -187,7 +238,7 @@ src/
 ├── history.rs      # Undo/Redo-Transaktionsstapel (Add, Erase, Transform)
 ├── storage.rs      # Atomares Laden/Speichern von Manifest & Seiten, Multi-Notebooks
 ├── autosave.rs     # Debounced Hintergrund-Autosave mit MPSC-Kanal
-├── updater.rs      # In-App Gitea Updater (SemVer, Release-API, Download, Self-Update)
+├── updater.rs      # In-App Gitea Updater (SemVer, HTTPS, SHA256-Integrität, Self-Update)
 ├── export.rs       # Skalierbarer Vektor-PDF-Export via printpdf
 └── ui.rs           # Floating Glassmorphism-Toolbar, Dokumenten- & Update-Manager (egui)
 ```
@@ -198,16 +249,16 @@ Ausführliche Details zur Architektur und mathematischen Modellen findest du unt
 
 ## 🧪 Tests ausführen
 
-Die gesamte Inking-Pipeline, Geometrieerkennung, Speicherlogik und der Updater sind mit Unit-Tests abgesichert:
+Die gesamte Inking-Pipeline, Geometrieerkennung, Speicherlogik und der Updater sind mit umfassenden Unit-Tests abgesichert:
 
 ```bash
 cargo test
 ```
 
-Alle 61 Unit-Tests prüfen Berechnungen, Hit-Testing, Undo/Redo, Persistenz und Versionsvergleiche konsistent ab.
+Alle Unit-Tests prüfen Berechnungen, Hit-Testing, Undo/Redo, Persistenz, Updater-Sicherheit und Versionsvergleiche konsistent ab.
 
 ---
 
 ## 📄 Lizenz
 
-MIT License / Open Source Inking Project for Linux.
+Dieses Projekt ist unter der [MIT-Lizenz](LICENSE) lizenziert (Copyright © 2026 Harald Pansi).

@@ -2,6 +2,11 @@
 name = "ink-notes"
 version = "0.1.0"
 edition = "2021"
+description = "Latenzoptimierte Vektor-Notizbuch- und Inking-Anwendung für Linux"
+repository = "https://gitea.pansi.eu/harald/ink-notes"
+license = "MIT"
+readme = "README.md"
+rust-version = "1.75"
 
 [dependencies]
 # Fenster- & Event-Handling (Wayland/X11, Stylus)
@@ -41,6 +46,7 @@ opt-level = 1 # Erhöht Rendering-Performance auch im Debug-Modus
 lto = true
 codegen-units = 1
 opt-level = 3
+strip = true
 
 [dev-dependencies]
 tempfile = "3.27.0"
