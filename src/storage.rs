@@ -89,9 +89,19 @@ impl StrokeData {
     }
 }
 
+/// Aktuelle Dateiformat-Version von ink-notes.
+pub const CURRENT_FORMAT_VERSION: u32 = 1;
+
+/// Standardwert für ältere Dateien ohne explizite Formatversion (Legacy v0).
+pub fn legacy_format_version() -> u32 {
+    0
+}
+
 /// Serialisierbare semantische Seitendaten.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PageData {
+    #[serde(default = "legacy_format_version")]
+    pub format_version: u32,
     pub id: u64,
     pub background: PageBackground,
     pub strokes: Vec<StrokeData>,
@@ -100,6 +110,7 @@ pub struct PageData {
 impl From<&Page> for PageData {
     fn from(page: &Page) -> Self {
         Self {
+            format_version: CURRENT_FORMAT_VERSION,
             id: page.id,
             background: page.background,
             strokes: page.strokes.iter().map(StrokeData::from).collect(),
@@ -138,6 +149,8 @@ impl PageMeta {
 /// Metadaten des gesamten Notizbuchs (`manifest.json`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NotebookManifest {
+    #[serde(default = "legacy_format_version")]
+    pub format_version: u32,
     pub id: String,
     pub title: String,
     pub created_at: u64,
@@ -158,6 +171,7 @@ impl NotebookManifest {
             .unwrap_or_default()
             .as_secs();
         Self {
+            format_version: CURRENT_FORMAT_VERSION,
             id: id.into(),
             title: title.into(),
             created_at: now,
@@ -186,6 +200,7 @@ impl NotebookManifest {
     }
 
     pub fn sync_from_notebook(&mut self, notebook: &Notebook) {
+        self.format_version = CURRENT_FORMAT_VERSION;
         self.pages = notebook
             .pages
             .iter()
@@ -213,6 +228,7 @@ pub enum StorageError {
     InvalidManifest(String),
     CorruptedPage(u64, String),
     PageNotFound(u64),
+    UnsupportedVersion { found: u32, supported: u32 },
 }
 
 impl fmt::Display for StorageError {
@@ -225,6 +241,10 @@ impl fmt::Display for StorageError {
                 write!(f, "Beschädigte Seite {id}: {msg}")
             }
             StorageError::PageNotFound(id) => write!(f, "Seite {id} nicht gefunden"),
+            StorageError::UnsupportedVersion { found, supported } => write!(
+                f,
+                "Notizbuch wurde mit neuerer Version erstellt (Formatversion {found}, unterstützt wird bis {supported})"
+            ),
         }
     }
 }
@@ -345,6 +365,18 @@ pub fn atomic_write_json<T: Serialize>(path: &Path, value: &T) -> Result<(), Sto
 /// Speichert das Manifest atomar in `manifest.json`.
 pub fn save_manifest(notebook_dir: &Path, manifest: &NotebookManifest) -> Result<(), StorageError> {
     let path = notebook_dir.join("manifest.json");
+    if path.exists() {
+        let bak_path = notebook_dir.join("manifest.json.v0.bak");
+        if !bak_path.exists() {
+            if let Ok(content) = fs::read_to_string(&path) {
+                if let Ok(old_m) = serde_json::from_str::<NotebookManifest>(&content) {
+                    if old_m.format_version == 0 {
+                        let _ = fs::copy(&path, &bak_path);
+                    }
+                }
+            }
+        }
+    }
     atomic_write_json(&path, manifest)
 }
 
@@ -361,6 +393,14 @@ pub fn load_manifest(notebook_dir: &Path) -> Result<NotebookManifest, StorageErr
     let mut json_str = String::new();
     file.read_to_string(&mut json_str)?;
     let mut manifest: NotebookManifest = serde_json::from_str(&json_str)?;
+
+    if manifest.format_version > CURRENT_FORMAT_VERSION {
+        return Err(StorageError::UnsupportedVersion {
+            found: manifest.format_version,
+            supported: CURRENT_FORMAT_VERSION,
+        });
+    }
+
     if manifest.pages.is_empty() && !manifest.page_ids.is_empty() {
         manifest.pages = manifest
             .page_ids
@@ -400,6 +440,18 @@ pub fn quarantine_corrupted_page(notebook_dir: &Path, page_id: u64) -> Result<Pa
 /// Speichert eine Seite atomar in `page_<id>.json`.
 pub fn save_page(notebook_dir: &Path, page: &PageData) -> Result<(), StorageError> {
     let path = notebook_dir.join(format!("page_{}.json", page.id));
+    if path.exists() {
+        let bak_path = notebook_dir.join(format!("page_{}.json.v0.bak", page.id));
+        if !bak_path.exists() {
+            if let Ok(content) = fs::read_to_string(&path) {
+                if let Ok(old_p) = serde_json::from_str::<PageData>(&content) {
+                    if old_p.format_version == 0 {
+                        let _ = fs::copy(&path, &bak_path);
+                    }
+                }
+            }
+        }
+    }
     atomic_write_json(&path, page)
 }
 
@@ -414,16 +466,25 @@ pub fn load_page(notebook_dir: &Path, page_id: u64) -> Result<PageData, StorageE
     let mut json_str = String::new();
     file.read_to_string(&mut json_str)?;
 
-    match serde_json::from_str::<PageData>(&json_str) {
-        Ok(data) => Ok(data),
+    let page_data = match serde_json::from_str::<PageData>(&json_str) {
+        Ok(data) => data,
         Err(e) => {
             eprintln!(
                 "[Storage-Warnung] Seite {page_id} in '{}' ist beschädigt: {e}",
                 path.display()
             );
-            Err(StorageError::CorruptedPage(page_id, e.to_string()))
+            return Err(StorageError::CorruptedPage(page_id, e.to_string()));
         }
+    };
+
+    if page_data.format_version > CURRENT_FORMAT_VERSION {
+        return Err(StorageError::UnsupportedVersion {
+            found: page_data.format_version,
+            supported: CURRENT_FORMAT_VERSION,
+        });
     }
+
+    Ok(page_data)
 }
 
 /// Speichert ein gesamtes Notebook synchron auf die Festplatte (z. B. initial oder beim Flush).
@@ -1085,5 +1146,88 @@ mod tests {
         assert!(dir_entries
             .iter()
             .any(|name| name.starts_with("page_1.json.corrupt-")));
+    }
+
+    #[test]
+    fn test_fixture_legacy_v0_loads_and_migrates_with_backup() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let path = temp_dir.path();
+
+        let root_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let fixture_manifest = root_dir.join("tests/fixtures/legacy_v0_manifest.json");
+        let fixture_page = root_dir.join("tests/fixtures/legacy_v0_page_1.json");
+
+        fs::copy(&fixture_manifest, path.join("manifest.json")).unwrap();
+        fs::copy(&fixture_page, path.join("page_1.json")).unwrap();
+
+        let (nb, mut m) = load_notebook(path).expect("Legacy v0 notebook must load");
+        assert_eq!(m.format_version, 0, "Legacy manifest has format_version 0");
+        assert_eq!(nb.pages.len(), 1);
+        assert_eq!(nb.pages[0].background, PageBackground::DotGrid);
+        assert_eq!(nb.pages[0].strokes.len(), 1);
+
+        // Saving must upgrade to format_version 1 and create .v0.bak files
+        save_notebook(path, &nb, &mut m).expect("Save must succeed");
+
+        assert!(
+            path.join("manifest.json.v0.bak").exists(),
+            "manifest.json.v0.bak must be created before upgrading legacy format"
+        );
+        assert!(
+            path.join("page_1.json.v0.bak").exists(),
+            "page_1.json.v0.bak must be created before upgrading legacy format"
+        );
+
+        // Reload to verify format_version is now 1
+        let (_nb_upgraded, m_upgraded) = load_notebook(path).expect("Upgraded notebook must load");
+        assert_eq!(m_upgraded.format_version, 1);
+        let p1_upgraded = load_page(path, 1).expect("Upgraded page must load");
+        assert_eq!(p1_upgraded.format_version, 1);
+    }
+
+    #[test]
+    fn test_fixture_unknown_fields_load_successfully() {
+        let root_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let fixture_page = root_dir.join("tests/fixtures/unknown_fields_page_1.json");
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let path = temp_dir.path();
+        fs::copy(&fixture_page, path.join("page_1.json")).unwrap();
+
+        let page_data = load_page(path, 1).expect("Unknown fields must be tolerated");
+        assert_eq!(page_data.background, PageBackground::Lined);
+        assert_eq!(page_data.format_version, 1);
+    }
+
+    #[test]
+    fn test_fixture_future_version_is_rejected() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let path = temp_dir.path();
+
+        let root_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let fixture_manifest = root_dir.join("tests/fixtures/future_v99_manifest.json");
+        let fixture_page = root_dir.join("tests/fixtures/future_v99_page_1.json");
+
+        let dest_manifest = path.join("manifest.json");
+        let dest_page = path.join("page_1.json");
+        fs::copy(&fixture_manifest, &dest_manifest).unwrap();
+        fs::copy(&fixture_page, &dest_page).unwrap();
+
+        let orig_manifest_content = fs::read(&dest_manifest).unwrap();
+        let orig_page_content = fs::read(&dest_page).unwrap();
+
+        // Loading must fail with UnsupportedVersion
+        let load_res = load_notebook(path);
+        assert!(load_res.is_err(), "Future version must be rejected");
+        match load_res.unwrap_err() {
+            StorageError::UnsupportedVersion { found, supported } => {
+                assert_eq!(found, 99);
+                assert_eq!(supported, CURRENT_FORMAT_VERSION);
+            }
+            other => panic!("Expected UnsupportedVersion, got: {other:?}"),
+        }
+
+        // Files on disk must remain completely untouched
+        assert_eq!(fs::read(&dest_manifest).unwrap(), orig_manifest_content);
+        assert_eq!(fs::read(&dest_page).unwrap(), orig_page_content);
     }
 }

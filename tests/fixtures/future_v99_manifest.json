@@ -1,0 +1,14 @@
+{
+  "format_version": 99,
+  "id": "future_notebook",
+  "title": "Zukunfts-Notizbuch",
+  "created_at": 1800000000,
+  "modified_at": 1800001000,
+  "current_page_index": 0,
+  "pages": [
+    { "id": 1, "background": "Grid5mm" }
+  ],
+  "page_ids": [1],
+  "next_stroke_id": 10,
+  "next_page_id": 2
+}
