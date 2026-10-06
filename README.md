@@ -73,7 +73,54 @@ Eine latenzoptimierte, hardwarebeschleunigte Inking- und Notizbuch-Anwendung fü
 
 ---
 
-## 🚀 Schnellstart
+### 🚀 Release, Packaging & In-App Auto-Update (Zorin OS 18 / Ubuntu)
+- **Natives .deb-Paket**: Optimiert für Zorin OS 18 (Ubuntu 24.04 LTS Noble-Basis) mit vollständiger XDG Desktop-Integration (`.desktop`, Hicolor-Icons SVG & 256x256 PNG, AppStream Metainfo).
+- **Portables .AppImage**: Eigenständiges, distributionsunabhängiges Bundle (x86_64) mit integrierten Laufzeitabhängigkeiten.
+- **In-App Gitea Updater (`src/updater.rs`)**:
+  - Fragt im Hintergrund die Gitea Releases API (`https://gitea.pansi.eu/api/v1/repos/harald/ink-notes/releases/latest`) ab.
+  - Zeigt bei neuen Versionen ein Update-Badge in der Toolbar an.
+  - Release-Modal mit Versionsvergleich, Changelog und 1-Click-Download / In-Place-Aktualisierung.
+- **Gitea Actions CI/CD (`.gitea/workflows/release.yaml`)**: Automatisches Paketieren und Veröffentlichen auf Gitea bei Git-Tags (`v*`).
+
+---
+
+## 📦 Paketierung & Installation (Zorin OS 18)
+
+### 1. Release-Pakete bauen
+
+```bash
+# Baut sowohl .deb als auch .AppImage und berechnet SHA256SUMS.txt in target/
+./scripts/build-release.sh
+```
+
+Ergebnis in `target/`:
+- `ink-notes_0.1.0_amd64.deb` (~4.2 MB)
+- `ink-notes_0.1.0_x86_64.AppImage` (~5.6 MB)
+- `SHA256SUMS.txt`
+
+### 2. Installation auf Zorin OS 18
+
+```bash
+# Natives Debian-Paket installieren
+sudo dpkg -i target/ink-notes_0.1.0_amd64.deb
+
+# Oder portables AppImage direkt starten
+chmod +x target/ink-notes_0.1.0_x86_64.AppImage
+./target/ink-notes_0.1.0_x86_64.AppImage
+```
+
+Nach der `.deb`-Installation ist `ink-notes` nahtlos im Zorin OS Anwendungsmenü unter *Büro* und *Grafik* integriert.
+
+### 3. Release auf Gitea veröffentlichen
+
+```bash
+# Veröffentlicht die Artefakte auf https://gitea.pansi.eu/harald/ink-notes
+./scripts/publish-gitea-release.sh <DEIN_GITEA_TOKEN>
+```
+
+---
+
+## 🚀 Schnellstart (Entwicklung)
 
 ### Voraussetzungen
 - **Rust & Cargo:** Version 1.75 oder neuer (`rustup update stable`)
@@ -140,8 +187,9 @@ src/
 ├── history.rs      # Undo/Redo-Transaktionsstapel (Add, Erase, Transform)
 ├── storage.rs      # Atomares Laden/Speichern von Manifest & Seiten, Multi-Notebooks
 ├── autosave.rs     # Debounced Hintergrund-Autosave mit MPSC-Kanal
+├── updater.rs      # In-App Gitea Updater (SemVer, Release-API, Download, Self-Update)
 ├── export.rs       # Skalierbarer Vektor-PDF-Export via printpdf
-└── ui.rs           # Floating Glassmorphism-Toolbar & Dokumenten-Manager (egui)
+└── ui.rs           # Floating Glassmorphism-Toolbar, Dokumenten- & Update-Manager (egui)
 ```
 
 Ausführliche Details zur Architektur und mathematischen Modellen findest du unter [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
@@ -150,16 +198,16 @@ Ausführliche Details zur Architektur und mathematischen Modellen findest du unt
 
 ## 🧪 Tests ausführen
 
-Die gesamte Inking-Pipeline, Geometrieerkennung und Speicherlogik ist mit Unit-Tests abgesichert:
+Die gesamte Inking-Pipeline, Geometrieerkennung, Speicherlogik und der Updater sind mit Unit-Tests abgesichert:
 
 ```bash
 cargo test
 ```
 
-Alle 53 Unit-Tests prüfen Berechnungen, Hit-Testing, Undo/Redo und Persistenz konsistent ab.
+Alle 61 Unit-Tests prüfen Berechnungen, Hit-Testing, Undo/Redo, Persistenz und Versionsvergleiche konsistent ab.
 
 ---
 
 ## 📄 Lizenz
 
-Proprietäres Notiz-Projekt für Linux. Alle Rechte vorbehalten.
+MIT License / Open Source Inking Project for Linux.

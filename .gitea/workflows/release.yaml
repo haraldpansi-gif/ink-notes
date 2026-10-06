@@ -1,0 +1,50 @@
+name: Build & Publish Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  release:
+    name: Build Packages & Publish to Gitea
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Install System Packaging Tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            pkg-config \
+            libx11-dev \
+            libxcursor-dev \
+            libxrandr-dev \
+            libxi-dev \
+            libxkbcommon-dev \
+            squashfs-tools \
+            dpkg-dev \
+            curl \
+            python3
+
+      - name: Setup Rust Toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          cache: true
+
+      - name: Build Release Artifacts (.deb, .AppImage, SHA256SUMS.txt)
+        run: |
+          chmod +x scripts/*.sh
+          ./scripts/build-release.sh
+
+      - name: Publish Release to Gitea
+        run: |
+          ./scripts/publish-gitea-release.sh "${{ secrets.GITEA_TOKEN || secrets.GITHUB_TOKEN }}"
+        env:
+          GITEA_SERVER: ${{ github.server_url }}
+          REPO_OWNER: ${{ github.repository_owner }}
+          REPO_NAME: ${{ github.event.repository.name }}

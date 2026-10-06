@@ -19,6 +19,7 @@ use ink_notes::geometry::{self, RecognizedShape};
 use ink_notes::selection::{render_selection_overlay, DragMode, SelectionHandleHit, SelectionState};
 use ink_notes::storage::{self, NotebookManifest};
 use ink_notes::ui::{self, ActiveTool, UiAction, UiState};
+use ink_notes::updater::UpdaterController;
 
 /// Aktualisiert den Fenstertitel als minimales On-Screen-Display (OSD) inklusive Autosave-Status.
 fn update_window_title(
@@ -89,6 +90,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 3. egui Context und State initialisieren
     let egui_ctx = egui::Context::default();
     egui_ctx.set_visuals(egui::Visuals::dark());
+
+    // 4. In-App Gitea Updater initialisieren und im Hintergrund nach Releases fragen
+    let mut updater = UpdaterController::new();
+    updater.check_for_updates();
 
     let mut egui_winit_state = egui_winit::State::new(
         egui_ctx.clone(),
@@ -167,6 +172,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let new_status = autosave.update();
                 if new_status != prev_status {
                     update_window_title(&window, &notebook, &manifest, ui_state.active_tool, new_status);
+                }
+
+                let prev_upd = updater.status().clone();
+                updater.update();
+                if *updater.status() != prev_upd {
+                    window.request_redraw();
                 }
 
                 // Draw-and-Hold Überprüfung: Stift regungslos für > 400 ms gehalten (< 3 px Distanz)
@@ -1269,7 +1280,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         render_selection_overlay(&egui_ctx, &selection_state, notebook.current_page(), &canvas);
 
                         // 3. Toolbar & Widgets rendern
-                        let actions = ui::render_ui(&egui_ctx, &mut ui_state, &notebook, autosave.status());
+                        updater.update();
+                        let actions = ui::render_ui(&egui_ctx, &mut ui_state, &notebook, autosave.status(), &updater);
 
                         // 4. UI-Aktionen verarbeiten
                         for action in actions {
@@ -1632,6 +1644,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             ui_state.set_export_message(format!("Fehler beim Löschen: {err}"));
                                         }
                                     }
+                                }
+                                UiAction::CheckForUpdates => {
+                                    updater.check_for_updates();
+                                    window.request_redraw();
+                                }
+                                UiAction::DownloadUpdateAsset(asset) => {
+                                    updater.download_asset(asset);
+                                    window.request_redraw();
+                                }
+                                UiAction::InstallOrOpenUpdate(path) => {
+                                    if let Err(err) = updater.install_or_open(&path) {
+                                        ui_state.set_export_message(format!("Update-Fehler: {err}"));
+                                    } else {
+                                        ui_state.set_export_message("Update gestartet / geöffnet");
+                                    }
+                                    window.request_redraw();
+                                }
+                                UiAction::OpenUrlInBrowser(url) => {
+                                    let _ = webbrowser::open(&url);
+                                }
+                                UiAction::SaveUpdaterConfig { server_url, auth_token } => {
+                                    updater.set_server_url(server_url);
+                                    updater.set_auth_token(auth_token);
+                                    ui_state.set_export_message("Server-Einstellungen gespeichert");
+                                    window.request_redraw();
                                 }
                             }
                         }

@@ -114,6 +114,12 @@ pub enum UiAction {
     RenameNotebook { id: String, new_title: String },
     DeleteNotebook(String),
     RefreshNotebooks,
+    // Gitea Release & Updater
+    CheckForUpdates,
+    DownloadUpdateAsset(crate::updater::GiteaAsset),
+    InstallOrOpenUpdate(std::path::PathBuf),
+    OpenUrlInBrowser(String),
+    SaveUpdaterConfig { server_url: String, auth_token: Option<String> },
 }
 
 /// Zustand der grafischen Benutzeroberfläche.
@@ -144,6 +150,13 @@ pub struct UiState {
     pub new_notebook_title_input: String,
     pub renaming_notebook_id: Option<String>,
     pub renaming_title_input: String,
+    pub document_modal_rect: Option<egui::Rect>,
+    /// Gitea Release- & Update-Manager
+    pub is_update_dialog_open: bool,
+    pub updater_server_url_input: String,
+    pub updater_token_input: String,
+    pub show_updater_config: bool,
+    pub update_modal_rect: Option<egui::Rect>,
 }
 
 impl Default for UiState {
@@ -168,6 +181,12 @@ impl Default for UiState {
             new_notebook_title_input: String::new(),
             renaming_notebook_id: None,
             renaming_title_input: String::new(),
+            document_modal_rect: None,
+            is_update_dialog_open: false,
+            updater_server_url_input: "https://gitea.pansi.eu".to_string(),
+            updater_token_input: String::new(),
+            show_updater_config: false,
+            update_modal_rect: None,
         }
     }
 }
@@ -247,6 +266,7 @@ impl UiState {
     /// Prüft, ob ein Bildschirmpunkt (px, py) innerhalb der UI liegt:
     /// - Entweder innerhalb der abgerundeten Pill-Toolbar
     /// - ODER innerhalb des geöffneten Einstellungs-Popovers
+    /// - ODER innerhalb geöffneter Modalfenster (Dokumenten-Manager, Update-Center)
     pub fn is_point_in_ui(&self, px: f32, py: f32) -> bool {
         if self.is_point_inside_toolbar(px, py) {
             return true;
@@ -254,6 +274,20 @@ impl UiState {
         if let Some(pop_rect) = self.popover_rect {
             if pop_rect.contains(egui::pos2(px, py)) {
                 return true;
+            }
+        }
+        if self.is_document_menu_open {
+            if let Some(doc_rect) = self.document_modal_rect {
+                if doc_rect.contains(egui::pos2(px, py)) {
+                    return true;
+                }
+            }
+        }
+        if self.is_update_dialog_open {
+            if let Some(upd_rect) = self.update_modal_rect {
+                if upd_rect.contains(egui::pos2(px, py)) {
+                    return true;
+                }
             }
         }
         false
@@ -554,6 +588,7 @@ pub fn render_ui(
     state: &mut UiState,
     notebook: &Notebook,
     autosave_status: AutosaveStatus,
+    updater: &crate::updater::UpdaterController,
 ) -> Vec<UiAction> {
     let mut actions = Vec::new();
 
@@ -894,6 +929,47 @@ pub fn render_ui(
                                     .strong(),
                             );
                         });
+
+                        toolbar_divider(ui);
+
+                        // --- 10. GITEA-RELEASE & UPDATE-STATUS ---
+                        let (upd_label, is_highlight) = match updater.status() {
+                            crate::updater::UpdaterStatus::UpdateAvailable(rel) => {
+                                (format!("🚀 Neu: {}", rel.tag_name), true)
+                            }
+                            crate::updater::UpdaterStatus::Downloading { percent, .. } => {
+                                (format!("⏳ {:.0}%", percent * 100.0), true)
+                            }
+                            crate::updater::UpdaterStatus::DownloadFinished { .. } => {
+                                ("✓ Update bereit".to_string(), true)
+                            }
+                            crate::updater::UpdaterStatus::Checking => {
+                                ("🔄 Prüfe...".to_string(), false)
+                            }
+                            _ => ("🔄 Update".to_string(), false),
+                        };
+
+                        let upd_btn = if is_highlight {
+                            let text = egui::RichText::new(&upd_label)
+                                .color(egui::Color32::from_rgb(46, 204, 113))
+                                .strong();
+                            ui.add(egui::Button::new(text).frame(true))
+                                .on_hover_text("Update verfügbar! Klicke hier für Release-Notes und Download.")
+                        } else {
+                            action_pill_button(
+                                ui,
+                                true,
+                                &upd_label,
+                                "Release- & Update-Manager (Gitea Releases prüfen & installieren)",
+                            )
+                        };
+
+                        if upd_btn.clicked() {
+                            state.is_update_dialog_open = !state.is_update_dialog_open;
+                            state.is_pen_menu_open = false;
+                            state.is_highlighter_menu_open = false;
+                            state.is_document_menu_open = false;
+                        }
                     });
                 });
 
@@ -1243,7 +1319,7 @@ pub fn render_ui(
 
     // 3b. Dokumenten-Manager (Notizbücher wechseln, anlegen, umbenennen, löschen)
     if state.is_document_menu_open {
-        egui::Window::new("Dokumenten-Manager")
+        let doc_win = egui::Window::new("Dokumenten-Manager")
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 70.0))
@@ -1434,6 +1510,289 @@ pub fn render_ui(
                     }
                 });
             });
+        state.document_modal_rect = doc_win.map(|w| w.response.rect);
+    } else {
+        state.document_modal_rect = None;
+    }
+
+    // 3c. Release- & Update-Center (Gitea Releases)
+    if state.is_update_dialog_open {
+        let win = egui::Window::new("Release- & Update-Center")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 70.0))
+            .frame(
+                egui::Frame::none()
+                    .fill(egui::Color32::from_rgba_premultiplied(24, 24, 28, 245))
+                    .rounding(egui::Rounding::same(14.0))
+                    .stroke(egui::Stroke::new(
+                        1.0_f32,
+                        egui::Color32::from_rgba_premultiplied(255, 255, 255, 30),
+                    ))
+                    .inner_margin(egui::Margin::symmetric(20.0, 16.0))
+                    .shadow(egui::epaint::Shadow {
+                        offset: egui::vec2(0.0, 8.0),
+                        blur: 24.0,
+                        spread: 0.0,
+                        color: egui::Color32::from_black_alpha(150),
+                    }),
+            )
+            .show(ctx, |ui| {
+                ui.set_width(450.0);
+
+                // Kopfzeile mit Schließen-Button
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new("🚀 Gitea Release- & Update-Center")
+                            .strong()
+                            .size(16.0)
+                            .color(egui::Color32::WHITE),
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui
+                            .add(egui::Button::new(egui::RichText::new("✕").size(13.0)).frame(false))
+                            .clicked()
+                        {
+                            state.is_update_dialog_open = false;
+                        }
+                    });
+                });
+
+                ui.add_space(8.0);
+                ui.separator();
+                ui.add_space(8.0);
+
+                // Info über lokale Installation
+                let current_ver = env!("CARGO_PKG_VERSION");
+                let runtime_name = updater.runtime().display_name();
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("Aktuelle Version:").color(egui::Color32::from_gray(180)));
+                    ui.label(egui::RichText::new(format!("v{}", current_ver)).strong().color(egui::Color32::WHITE));
+                    ui.label(egui::RichText::new(format!("({})", runtime_name)).color(egui::Color32::from_gray(150)));
+                });
+
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("Server:").color(egui::Color32::from_gray(180)));
+                    ui.label(egui::RichText::new(format!("{}/{}/{}", updater.config().server_url, updater.config().repo_owner, updater.config().repo_name)).color(egui::Color32::from_gray(210)));
+                });
+
+                ui.add_space(10.0);
+
+                // Update-Prüfung auslösen
+                let is_busy = matches!(updater.status(), crate::updater::UpdaterStatus::Checking | crate::updater::UpdaterStatus::Downloading { .. });
+                ui.horizontal(|ui| {
+                    if ui.add_enabled(!is_busy, egui::Button::new(egui::RichText::new("🔄 Nach Updates suchen").strong())).clicked() {
+                        actions.push(UiAction::CheckForUpdates);
+                    }
+                });
+
+                ui.add_space(10.0);
+                ui.separator();
+                ui.add_space(10.0);
+
+                // Statusbereich
+                match updater.status() {
+                    crate::updater::UpdaterStatus::Idle => {
+                        ui.label(
+                            egui::RichText::new("Klicke auf 'Nach Updates suchen', um die neuesten Releases vom Gitea-Server abzufragen.")
+                                .color(egui::Color32::from_gray(170)),
+                        );
+                    }
+                    crate::updater::UpdaterStatus::Checking => {
+                        ui.horizontal(|ui| {
+                            ui.spinner();
+                            ui.label(egui::RichText::new("Prüfe Gitea-Releases...").color(egui::Color32::WHITE));
+                        });
+                    }
+                    crate::updater::UpdaterStatus::UpToDate { current_version } => {
+                        ui.horizontal(|ui| {
+                            ui.colored_label(egui::Color32::from_rgb(46, 204, 113), "✓");
+                            ui.label(
+                                egui::RichText::new(format!("ink-notes ist auf dem neuesten Stand (v{}).", current_version))
+                                    .color(egui::Color32::from_rgb(46, 204, 113))
+                                    .strong(),
+                            );
+                        });
+                    }
+                    crate::updater::UpdaterStatus::Error(err) => {
+                        ui.vertical(|ui| {
+                            ui.horizontal(|ui| {
+                                ui.colored_label(egui::Color32::from_rgb(231, 76, 60), "⚠");
+                                ui.label(
+                                    egui::RichText::new("Abfrage fehlgeschlagen:")
+                                        .color(egui::Color32::from_rgb(231, 76, 60))
+                                        .strong(),
+                                );
+                            });
+                            ui.add_space(4.0);
+                            ui.label(
+                                egui::RichText::new(err)
+                                    .size(11.5)
+                                    .color(egui::Color32::from_gray(190)),
+                            );
+                            ui.add_space(4.0);
+                            ui.label(
+                                egui::RichText::new("Hinweis: Falls das Repository privat ist, unten ein Personal Access Token eintragen.")
+                                    .size(11.0)
+                                    .italics()
+                                    .color(egui::Color32::from_gray(140)),
+                            );
+                        });
+                    }
+                    crate::updater::UpdaterStatus::UpdateAvailable(release) => {
+                        ui.vertical(|ui| {
+                            ui.horizontal(|ui| {
+                                ui.colored_label(egui::Color32::from_rgb(46, 204, 113), "●");
+                                ui.label(
+                                    egui::RichText::new(format!("Neue Version verfügbar: {}", release.tag_name))
+                                        .strong()
+                                        .size(14.0)
+                                        .color(egui::Color32::WHITE),
+                                );
+                            });
+
+                            if !release.name.is_empty() && release.name != release.tag_name {
+                                ui.label(egui::RichText::new(&release.name).italics().color(egui::Color32::from_gray(180)));
+                            }
+
+                            if !release.body.is_empty() {
+                                ui.add_space(6.0);
+                                ui.label(egui::RichText::new("Änderungen:").strong().size(11.5).color(egui::Color32::from_gray(170)));
+                                egui::ScrollArea::vertical().max_height(100.0).show(ui, |ui| {
+                                    ui.label(egui::RichText::new(&release.body).size(11.5).color(egui::Color32::from_gray(210)));
+                                });
+                            }
+
+                            ui.add_space(10.0);
+                            ui.label(egui::RichText::new("VERFÜGBARE ARTEFAKTE:").size(10.5).strong().color(egui::Color32::from_gray(150)));
+                            ui.add_space(4.0);
+
+                            for asset in &release.assets {
+                                let is_deb = asset.name.ends_with(".deb");
+                                let is_appimage = asset.name.ends_with(".AppImage");
+                                let is_recommended = match updater.runtime() {
+                                    crate::updater::RuntimeEnvironment::AppImage { .. } => is_appimage,
+                                    crate::updater::RuntimeEnvironment::DebPackage { .. } => is_deb,
+                                    _ => false,
+                                };
+
+                                let size_mb = (asset.size as f64) / (1024.0 * 1024.0);
+                                let btn_text = if size_mb > 0.05 {
+                                    format!("📥 {} ({:.1} MB)", asset.name, size_mb)
+                                } else {
+                                    format!("📥 {}", asset.name)
+                                };
+
+                                ui.horizontal(|ui| {
+                                    let btn = if is_recommended {
+                                        ui.button(egui::RichText::new(format!("⭐ {}", btn_text)).strong().color(egui::Color32::from_rgb(110, 195, 255)))
+                                    } else {
+                                        ui.button(egui::RichText::new(&btn_text))
+                                    };
+
+                                    if btn.clicked() {
+                                        actions.push(UiAction::DownloadUpdateAsset(asset.clone()));
+                                    }
+
+                                    if is_recommended {
+                                        ui.label(egui::RichText::new("(Empfohlen für dieses System)").size(10.5).color(egui::Color32::from_rgb(46, 204, 113)));
+                                    }
+                                });
+                            }
+
+                            ui.add_space(8.0);
+                            if !release.html_url.is_empty() {
+                                if ui.button(egui::RichText::new("🌐 Release auf Gitea öffnen").size(12.0)).clicked() {
+                                    actions.push(UiAction::OpenUrlInBrowser(release.html_url.clone()));
+                                }
+                            }
+                        });
+                    }
+                    crate::updater::UpdaterStatus::Downloading { asset_name, percent } => {
+                        ui.vertical(|ui| {
+                            ui.label(egui::RichText::new(format!("Lade '{}' herunter...", asset_name)).strong());
+                            ui.add_space(6.0);
+                            ui.add(egui::ProgressBar::new(*percent).show_percentage());
+                        });
+                    }
+                    crate::updater::UpdaterStatus::DownloadFinished { file_path, asset_name } => {
+                        ui.vertical(|ui| {
+                            ui.horizontal(|ui| {
+                                ui.colored_label(egui::Color32::from_rgb(46, 204, 113), "✓");
+                                ui.label(
+                                    egui::RichText::new(format!("'{}' erfolgreich heruntergeladen!", asset_name))
+                                        .strong()
+                                        .color(egui::Color32::from_rgb(46, 204, 113)),
+                                );
+                            });
+                            ui.add_space(4.0);
+                            ui.label(
+                                egui::RichText::new(format!("Gespeichert in: {}", file_path.display()))
+                                    .size(11.0)
+                                    .color(egui::Color32::from_gray(170)),
+                            );
+                            ui.add_space(8.0);
+
+                            let action_label = match updater.runtime() {
+                                crate::updater::RuntimeEnvironment::AppImage { .. } => "🚀 AppImage aktualisieren & ausführen",
+                                crate::updater::RuntimeEnvironment::DebPackage { .. } => "📦 Paket mit Software-Center öffnen / installieren",
+                                crate::updater::RuntimeEnvironment::PortableOrDev { .. } => "📂 Im Dateimanager anzeigen",
+                            };
+
+                            ui.horizontal(|ui| {
+                                if ui.button(egui::RichText::new(action_label).strong()).clicked() {
+                                    actions.push(UiAction::InstallOrOpenUpdate(file_path.clone()));
+                                }
+                                if ui.button("📂 Ordner öffnen").clicked() {
+                                    if let Some(parent) = file_path.parent() {
+                                        actions.push(UiAction::OpenUrlInBrowser(parent.to_string_lossy().to_string()));
+                                    }
+                                }
+                            });
+                        });
+                    }
+                }
+
+                ui.add_space(12.0);
+                ui.separator();
+                ui.add_space(4.0);
+
+                // Erweiterte Konfiguration (Collapsible)
+                egui::CollapsingHeader::new(egui::RichText::new("⚙ Erweiterte Server-Einstellungen").size(11.5).color(egui::Color32::from_gray(160)))
+                    .default_open(false)
+                    .show(ui, |ui| {
+                        ui.add_space(4.0);
+                        ui.label(egui::RichText::new("Gitea Server-URL:").size(11.0));
+                        ui.add(egui::TextEdit::singleline(&mut state.updater_server_url_input).desired_width(380.0));
+
+                        ui.add_space(4.0);
+                        ui.label(egui::RichText::new("Personal Access Token (optional für private Repos):").size(11.0));
+                        ui.add(egui::TextEdit::singleline(&mut state.updater_token_input).password(true).desired_width(380.0));
+
+                        ui.add_space(6.0);
+                        if ui.button(egui::RichText::new("💾 Einstellungen speichern").size(11.5)).clicked() {
+                            let token = if state.updater_token_input.trim().is_empty() {
+                                None
+                            } else {
+                                Some(state.updater_token_input.trim().to_string())
+                            };
+                            actions.push(UiAction::SaveUpdaterConfig {
+                                server_url: state.updater_server_url_input.trim().to_string(),
+                                auth_token: token,
+                            });
+                        }
+                    });
+
+                ui.add_space(6.0);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if action_pill_button(ui, true, "Schließen", "Fenster schließen").clicked() {
+                        state.is_update_dialog_open = false;
+                    }
+                });
+            });
+        state.update_modal_rect = win.map(|w| w.response.rect);
+    } else {
+        state.update_modal_rect = None;
     }
 
     // 4. Feedback-Toast für PDF-Export oder wichtige Systemmeldungen
@@ -1519,9 +1878,10 @@ mod tests {
         let ctx = egui::Context::default();
         let mut state = UiState::new();
         let notebook = Notebook::new();
+        let updater = crate::updater::UpdaterController::new();
 
         ctx.begin_frame(egui::RawInput::default());
-        let actions = render_ui(&ctx, &mut state, &notebook, AutosaveStatus::Saved);
+        let actions = render_ui(&ctx, &mut state, &notebook, AutosaveStatus::Saved, &updater);
         let output = ctx.end_frame();
 
         assert!(actions.is_empty());
@@ -1615,12 +1975,32 @@ mod tests {
         state.document_title = "Mathematik I".to_string();
 
         let notebook = Notebook::new();
+        let updater = crate::updater::UpdaterController::new();
         let ctx = egui::Context::default();
         let _ = ctx.run(egui::RawInput::default(), |ctx| {
-            let _ = super::render_ui(ctx, &mut state, &notebook, AutosaveStatus::Saved);
+            let _ = super::render_ui(ctx, &mut state, &notebook, AutosaveStatus::Saved, &updater);
         });
 
         assert!(state.is_document_menu_open);
         assert_eq!(state.available_notebooks.len(), 2);
+    }
+
+    #[test]
+    fn test_updater_modal_ui_actions() {
+        let mut state = UiState::new();
+        state.is_update_dialog_open = true;
+
+        let notebook = Notebook::new();
+        let updater = crate::updater::UpdaterController::new();
+        let ctx = egui::Context::default();
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            let _ = super::render_ui(ctx, &mut state, &notebook, AutosaveStatus::Saved, &updater);
+        });
+
+        assert!(state.is_update_dialog_open);
+        assert!(state.update_modal_rect.is_some());
+        if let Some(rect) = state.update_modal_rect {
+            assert!(state.is_point_in_ui(rect.center().x, rect.center().y));
+        }
     }
 }
