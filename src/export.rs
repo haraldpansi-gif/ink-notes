@@ -12,7 +12,7 @@
 use std::error::Error;
 use std::fs::File;
 use std::io::BufWriter;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use printpdf::path::{PaintMode, WindingOrder};
 use printpdf::{Color, Line, Mm, PdfDocument, PdfDocumentReference, Point, Polygon, Rgb};
@@ -21,6 +21,70 @@ use crate::background::{GRID_5MM_SPACING, LINED_SPACING};
 use crate::document::{
     Notebook, Page, PageBackground, Stroke, A4_HEIGHT_MM, A4_WIDTH_MM, PAGE_HEIGHT, PAGE_WIDTH,
 };
+
+/// Bereinigt einen Titel für die Verwendung in Dateinamen (entfernt illegale Zeichen).
+pub fn sanitize_filename_component(title: &str) -> String {
+    let sanitized: String = title
+        .chars()
+        .map(|c| match c {
+            '/' | '\\' | '\0' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
+            c => c,
+        })
+        .collect();
+    let trimmed = sanitized.trim();
+    if trimmed.is_empty() {
+        "Notizbuch".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+/// Ermittelt das Standard-Dokumentenverzeichnis ($XDG_DOCUMENTS_DIR mit Fallback ~/Documents).
+pub fn default_documents_dir() -> PathBuf {
+    if let Ok(dir) = std::env::var("XDG_DOCUMENTS_DIR") {
+        if !dir.trim().is_empty() {
+            return PathBuf::from(dir);
+        }
+    }
+
+    if let Ok(home) = std::env::var("HOME") {
+        if !home.trim().is_empty() {
+            return PathBuf::from(home).join("Documents");
+        }
+    }
+
+    PathBuf::from(".")
+}
+
+/// Ermittelt den kollisionsfreien Export-Pfad für ein Notizbuch im übergebenen Verzeichnis.
+/// Existiert die Datei bereits, wird ein Zähler angehängt (`_1`, `_2`, etc.).
+pub fn resolve_pdf_export_path_in_dir(dir: &Path, title: &str) -> PathBuf {
+    let sanitized_title = sanitize_filename_component(title);
+    let base_name = format!("{}.pdf", sanitized_title);
+    let primary_path = dir.join(&base_name);
+
+    if !primary_path.exists() {
+        return primary_path;
+    }
+
+    let mut counter = 1;
+    loop {
+        let candidate_name = format!("{}_{}.pdf", sanitized_title, counter);
+        let candidate_path = dir.join(candidate_name);
+        if !candidate_path.exists() {
+            return candidate_path;
+        }
+        counter += 1;
+    }
+}
+
+/// Ermittelt das Ziel für den PDF-Export unter Berücksichtigung von XDG_DOCUMENTS_DIR
+/// und automatischer Namenskollisionsvermeidung. Erstellt das Verzeichnis, falls nötig.
+pub fn resolve_pdf_export_path(title: &str) -> PathBuf {
+    let docs_dir = default_documents_dir();
+    let _ = std::fs::create_dir_all(&docs_dir);
+    resolve_pdf_export_path_in_dir(&docs_dir, title)
+}
 
 /// Wählbare Exportstrategie für Vektorstriche.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -818,5 +882,44 @@ mod tests {
         let bytes = bytes_res.unwrap();
         assert!(bytes.len() > 1024);
         assert!(bytes.starts_with(b"%PDF-1."));
+    }
+
+    #[test]
+    fn test_sanitize_filename_component() {
+        assert_eq!(sanitize_filename_component("Notizbuch 1"), "Notizbuch 1");
+        assert_eq!(
+            sanitize_filename_component("Projekt/2026: Entwurf"),
+            "Projekt_2026_ Entwurf"
+        );
+        assert_eq!(sanitize_filename_component("   "), "Notizbuch");
+        assert_eq!(sanitize_filename_component(""), "Notizbuch");
+        assert_eq!(
+            sanitize_filename_component("Mathe * Vorlesung?"),
+            "Mathe _ Vorlesung_"
+        );
+    }
+
+    #[test]
+    fn test_resolve_pdf_export_path_collision_avoidance() {
+        let temp_dir = tempfile::tempdir().expect("Konnte tempdir nicht erstellen");
+        let dir = temp_dir.path();
+
+        // 1. Erstmaliger Export: keine Kollision
+        let path1 = resolve_pdf_export_path_in_dir(dir, "Mathe Vorlesung");
+        assert_eq!(path1, dir.join("Mathe Vorlesung.pdf"));
+
+        // Datei anlegen
+        std::fs::write(&path1, b"dummy pdf 1").expect("Konnte Datei nicht schreiben");
+
+        // 2. Zweiter Export: Kollision -> _1
+        let path2 = resolve_pdf_export_path_in_dir(dir, "Mathe Vorlesung");
+        assert_eq!(path2, dir.join("Mathe Vorlesung_1.pdf"));
+
+        // Zweite Datei anlegen
+        std::fs::write(&path2, b"dummy pdf 2").expect("Konnte Datei nicht schreiben");
+
+        // 3. Dritter Export: Kollision -> _2
+        let path3 = resolve_pdf_export_path_in_dir(dir, "Mathe Vorlesung");
+        assert_eq!(path3, dir.join("Mathe Vorlesung_2.pdf"));
     }
 }

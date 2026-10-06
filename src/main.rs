@@ -16,7 +16,7 @@ use glam::Vec2;
 use ink_notes::autosave::{AutosaveController, AutosaveStatus};
 use ink_notes::canvas::CanvasState;
 use ink_notes::document::{Notebook, PageBackground};
-use ink_notes::export::{export_notebook_to_pdf, ExportStrategy};
+use ink_notes::export::{self, export_notebook_to_pdf, ExportStrategy};
 use ink_notes::geometry::{self, RecognizedShape};
 use ink_notes::selection::{
     render_selection_overlay, DragMode, SelectionHandleHit, SelectionState,
@@ -181,8 +181,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  Strg + 0       : Zoom zurücksetzen (100% zentriert)");
     println!("  Draw-and-Hold  : Form am Strichende >400ms halten zum automatischen Einrasten");
     println!("  Strg + Z / Y   : Transaktionales Undo / Redo für alle Aktionen");
-    println!("  Strg + E / S   : Vektor-PDF-Export (nach ./export.pdf)");
-    println!("  ESC / Q        : Beenden (mit sicherem Disk-Flush)");
+    println!("  Strg + E       : Vektor-PDF-Export (~/Documents/<Titel>.pdf)");
+    println!("  Strg + S       : Jetzt speichern (Disk Flush)");
+    println!("  ESC            : Dialoge / Menüs schließen oder Selektion aufheben");
+    println!("  Strg + Q       : Beenden (mit sicherem Disk-Flush)");
 
     event_loop.run(move |event, target| {
         match event {
@@ -310,9 +312,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                         match &logical_key {
                             Key::Named(NamedKey::Escape) => {
-                                println!("[Shutdown] Sichere alle ungespeicherten Daten auf Festplatte...");
-                                autosave.shutdown();
-                                target.exit();
+                                let mut changed = false;
+                                if ui_state.is_pen_menu_open
+                                    || ui_state.is_highlighter_menu_open
+                                    || ui_state.show_page_jump_popup
+                                    || ui_state.is_document_menu_open
+                                    || ui_state.is_update_dialog_open
+                                    || ui_state.show_updater_config
+                                {
+                                    ui_state.is_pen_menu_open = false;
+                                    ui_state.is_highlighter_menu_open = false;
+                                    ui_state.show_page_jump_popup = false;
+                                    ui_state.is_document_menu_open = false;
+                                    ui_state.is_update_dialog_open = false;
+                                    ui_state.show_updater_config = false;
+                                    changed = true;
+                                }
+ else if !selection_state.is_empty() {
+                                    selection_state.clear();
+                                    changed = true;
+                                }
+                                if changed {
+                                    window.request_redraw();
+                                }
                             }
 
                             // Undo: Strg + Z
@@ -383,44 +405,57 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                             }
 
-                            // PDF-Export: Strg + E oder Strg + S
-                            Key::Character(c)
-                                if (c.eq_ignore_ascii_case("e") || c.eq_ignore_ascii_case("s"))
-                                    && ctrl =>
-                            {
+                            // Jetzt speichern (Disk Flush): Strg + S
+                            Key::Character(c) if c.eq_ignore_ascii_case("s") && ctrl => {
+                                autosave.flush();
+                                ui_state.set_export_message("Gespeichert");
+                                update_window_title(
+                                    &window,
+                                    &notebook,
+                                    &manifest,
+                                    ui_state.active_tool,
+                                    autosave.status(),
+                                );
+                                window.request_redraw();
+                            }
+
+                            // PDF-Export: Strg + E
+                            Key::Character(c) if c.eq_ignore_ascii_case("e") && ctrl => {
                                 let notebook_clone = notebook.clone();
-                                let export_path = "export.pdf".to_string();
+                                let export_path = export::resolve_pdf_export_path(&manifest.title);
+                                let export_path_str = export_path.display().to_string();
                                 let window_ref = window.clone();
                                 println!(
                                     "[Export] Starte PDF-Vektorexport nach '{}' (im Hintergrundthread)...",
-                                    export_path
+                                    export_path_str
                                 );
-                                ui_state.set_export_message("Exportiere PDF...");
+                                ui_state.set_export_message(format!("PDF gespeichert: {}", export_path.display()));
+                                let export_path_thread = export_path.clone();
                                 std::thread::spawn(move || {
                                     let start = std::time::Instant::now();
                                     match export_notebook_to_pdf(
                                         &notebook_clone,
-                                        &export_path,
+                                        &export_path_thread,
                                         ExportStrategy::FilledPolygon,
                                     ) {
                                         Ok(()) => {
-                                             let elapsed = start.elapsed();
-                                             println!(
-                                                 "[Export] PDF erfolgreich exportiert: '{}' ({:.1?} für {} Seiten)",
-                                                 export_path,
-                                                 elapsed,
-                                                 notebook_clone.pages.len()
-                                             );
-                                             window_ref.request_redraw();
-                                         }
-                                         Err(err) => {
-                                             eprintln!("[Export-Fehler] Konnte PDF nicht exportieren: {err}");
-                                         }
-                                     }
-                                 });
-                                 ui_state.set_export_message("PDF erfolgreich als export.pdf exportiert!");
-                                 window.request_redraw();
+                                            let elapsed = start.elapsed();
+                                            println!(
+                                                "[Export] PDF erfolgreich exportiert: '{}' ({:.1?} für {} Seiten)",
+                                                export_path_thread.display(),
+                                                elapsed,
+                                                notebook_clone.pages.len()
+                                            );
+                                            window_ref.request_redraw();
+                                        }
+                                        Err(err) => {
+                                            eprintln!("[Export-Fehler] Konnte PDF nicht exportieren: {err}");
+                                        }
+                                    }
+                                });
+                                window.request_redraw();
                             }
+
 
                             // Radierer umschalten: E
                             Key::Character(c) if c.eq_ignore_ascii_case("e") && !ctrl => {
@@ -618,12 +653,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 window.request_redraw();
                             }
 
-                            // Beenden: Q
-                            Key::Character(c) if c.eq_ignore_ascii_case("q") && !ctrl => {
+                            // Beenden: Strg + Q
+                            Key::Character(c) if c.eq_ignore_ascii_case("q") && ctrl => {
                                 println!("[Shutdown] Sichere alle ungespeicherten Daten auf Festplatte...");
                                 autosave.shutdown();
                                 target.exit();
                             }
+
 
                             _ => {}
                         }
@@ -1498,24 +1534,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                                 UiAction::ExportPdf => {
                                     let notebook_clone = notebook.clone();
-                                    let export_path = "export.pdf".to_string();
+                                    let export_path = export::resolve_pdf_export_path(&manifest.title);
+                                    let export_path_str = export_path.display().to_string();
                                     let window_ref = window.clone();
                                     println!(
                                         "[Export] Starte PDF-Vektorexport nach '{}' (im Hintergrundthread)...",
-                                        export_path
+                                        export_path_str
                                     );
+                                    ui_state.set_export_message(format!("PDF gespeichert: {}", export_path.display()));
+                                    let export_path_thread = export_path.clone();
                                     std::thread::spawn(move || {
                                         let start = std::time::Instant::now();
                                         match export_notebook_to_pdf(
                                             &notebook_clone,
-                                            &export_path,
+                                            &export_path_thread,
                                             ExportStrategy::FilledPolygon,
                                         ) {
                                             Ok(()) => {
                                                 let elapsed = start.elapsed();
                                                 println!(
                                                     "[Export] PDF erfolgreich exportiert: '{}' ({:.1?} für {} Seiten)",
-                                                    export_path,
+                                                    export_path_thread.display(),
                                                     elapsed,
                                                     notebook_clone.pages.len()
                                                 );
@@ -1526,9 +1565,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             }
                                         }
                                     });
-                                    ui_state.set_export_message("PDF erfolgreich als export.pdf exportiert!");
                                     window.request_redraw();
                                 }
+
                                 UiAction::RefreshNotebooks => {
                                     ui_state.available_notebooks = storage::list_notebooks(&storage_base_dir);
                                     window.request_redraw();
