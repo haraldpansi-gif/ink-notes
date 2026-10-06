@@ -10,7 +10,9 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::canvas::InkVertex;
-use crate::document::{Notebook, Page, PageBackground, Stroke, StylusSample};
+use crate::document::{
+    Notebook, Page, PageBackground, PageLoadWarning, PersistState, Stroke, StylusSample,
+};
 use crate::filter::OneEuroFilter;
 use crate::spline::{self, ControlPoint, SplineConfig};
 
@@ -119,6 +121,20 @@ impl PageData {
     }
 }
 
+/// Metadaten einer einzelnen Seite im Manifest.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PageMeta {
+    pub id: u64,
+    #[serde(default)]
+    pub background: Option<PageBackground>,
+}
+
+impl PageMeta {
+    pub fn new(id: u64, background: Option<PageBackground>) -> Self {
+        Self { id, background }
+    }
+}
+
 /// Metadaten des gesamten Notizbuchs (`manifest.json`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NotebookManifest {
@@ -127,6 +143,9 @@ pub struct NotebookManifest {
     pub created_at: u64,
     pub modified_at: u64,
     pub current_page_index: usize,
+    #[serde(default)]
+    pub pages: Vec<PageMeta>,
+    #[serde(default)]
     pub page_ids: Vec<u64>,
     pub next_stroke_id: u64,
     pub next_page_id: u64,
@@ -144,10 +163,45 @@ impl NotebookManifest {
             created_at: now,
             modified_at: now,
             current_page_index: 0,
+            pages: vec![PageMeta::new(1, Some(PageBackground::Grid5mm))],
             page_ids: vec![1],
             next_stroke_id: 1,
             next_page_id: 2,
         }
+    }
+
+    pub fn page_ids(&self) -> Vec<u64> {
+        if !self.pages.is_empty() {
+            self.pages.iter().map(|p| p.id).collect()
+        } else {
+            self.page_ids.clone()
+        }
+    }
+
+    pub fn background_for_page(&self, page_id: u64) -> Option<PageBackground> {
+        self.pages
+            .iter()
+            .find(|p| p.id == page_id)
+            .and_then(|p| p.background)
+    }
+
+    pub fn sync_from_notebook(&mut self, notebook: &Notebook) {
+        self.pages = notebook
+            .pages
+            .iter()
+            .map(|p| PageMeta {
+                id: p.id,
+                background: Some(p.background),
+            })
+            .collect();
+        self.page_ids = self.pages.iter().map(|p| p.id).collect();
+        self.current_page_index = notebook.current_page_index;
+        self.next_stroke_id = notebook.next_stroke_id;
+        self.next_page_id = notebook.next_page_id;
+        self.modified_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
     }
 }
 
@@ -306,8 +360,41 @@ pub fn load_manifest(notebook_dir: &Path) -> Result<NotebookManifest, StorageErr
     let mut file = File::open(&path)?;
     let mut json_str = String::new();
     file.read_to_string(&mut json_str)?;
-    let manifest: NotebookManifest = serde_json::from_str(&json_str)?;
+    let mut manifest: NotebookManifest = serde_json::from_str(&json_str)?;
+    if manifest.pages.is_empty() && !manifest.page_ids.is_empty() {
+        manifest.pages = manifest
+            .page_ids
+            .iter()
+            .map(|&id| PageMeta::new(id, None))
+            .collect();
+    }
     Ok(manifest)
+}
+
+/// Verschiebt eine defekte Seitendatei nach `page_<id>.json.corrupt-<unix_ts>`.
+/// Nur bei Parse-/Schemafehlern aufrufen, nicht bei I/O-Fehlern!
+pub fn quarantine_corrupted_page(notebook_dir: &Path, page_id: u64) -> Result<PathBuf, io::Error> {
+    let source_path = notebook_dir.join(format!("page_{page_id}.json"));
+    if !source_path.exists() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "Datei existiert nicht",
+        ));
+    }
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let mut target_path = notebook_dir.join(format!("page_{page_id}.json.corrupt-{ts}"));
+    if target_path.exists() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .subsec_nanos();
+        target_path = notebook_dir.join(format!("page_{page_id}.json.corrupt-{ts}-{nanos}"));
+    }
+    fs::rename(&source_path, &target_path)?;
+    Ok(target_path)
 }
 
 /// Speichert eine Seite atomar in `page_<id>.json`.
@@ -347,18 +434,11 @@ pub fn save_notebook(
 ) -> Result<(), StorageError> {
     fs::create_dir_all(notebook_dir)?;
 
-    manifest.page_ids = notebook.pages.iter().map(|p| p.id).collect();
-    manifest.current_page_index = notebook.current_page_index;
-    manifest.next_stroke_id = notebook.next_stroke_id;
-    manifest.next_page_id = notebook.next_page_id;
-    manifest.modified_at = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
+    manifest.sync_from_notebook(notebook);
 
-    // Alle bereits geladenen Seiten speichern
+    // Alle bereits geladenen Seiten speichern, schreibgeschützte Seiten nach Ladefehler überspringen!
     for page in &notebook.pages {
-        if page.is_loaded {
+        if page.is_loaded && page.persist == PersistState::Normal {
             let page_data = PageData::from(page);
             save_page(notebook_dir, &page_data)?;
         }
@@ -371,35 +451,82 @@ pub fn save_notebook(
 /// Lädt ein Notizbuch aus einem Ordner (erste Seite sofort, Folgeseiten als Platzhalter für Lazy Loading).
 pub fn load_notebook(notebook_dir: &Path) -> Result<(Notebook, NotebookManifest), StorageError> {
     let manifest = load_manifest(notebook_dir)?;
-    if manifest.page_ids.is_empty() {
+    let page_ids = manifest.page_ids();
+    if page_ids.is_empty() {
         let nb = Notebook::new();
         return Ok((nb, manifest));
     }
 
-    let mut pages = Vec::with_capacity(manifest.page_ids.len());
+    let mut pages = Vec::with_capacity(page_ids.len());
+    let mut load_warnings = std::collections::HashMap::new();
 
     // Erste Seite sofort laden und initialisieren
-    let first_id = manifest.page_ids[0];
+    let first_id = page_ids[0];
+    let first_bg = manifest
+        .background_for_page(first_id)
+        .unwrap_or(PageBackground::Grid5mm);
+
     let first_page = match load_page(notebook_dir, first_id) {
         Ok(data) => data.to_page(),
+        Err(StorageError::CorruptedPage(id, err_msg)) => {
+            let q_res = quarantine_corrupted_page(notebook_dir, id);
+            let q_path = q_res.ok();
+            eprintln!(
+                "[Storage] Erste Seite {id} ist beschädigt ({err_msg}). Quarantänisiert nach: {:?}",
+                q_path
+            );
+            load_warnings.insert(
+                id,
+                PageLoadWarning {
+                    page_id: id,
+                    message: err_msg,
+                    quarantine_path: q_path,
+                },
+            );
+            let mut page = Page::new(id, first_bg);
+            page.persist = PersistState::ReadOnlyAfterLoadError;
+            page
+        }
+        Err(StorageError::Io(e)) => {
+            eprintln!(
+                "[Storage] I/O-Fehler beim Laden von Seite {first_id}: {e}. Seite wird schreibgeschützt."
+            );
+            load_warnings.insert(
+                first_id,
+                PageLoadWarning {
+                    page_id: first_id,
+                    message: format!("I/O-Fehler: {e}"),
+                    quarantine_path: None,
+                },
+            );
+            let mut page = Page::new(first_id, first_bg);
+            page.persist = PersistState::ReadOnlyAfterLoadError;
+            page
+        }
         Err(e) => {
             eprintln!("[Storage] Konnte erste Seite {first_id} nicht laden: {e}. Erstelle leere Ersatzseite.");
-            Page::new(first_id, PageBackground::Grid5mm)
+            let mut page = Page::new(first_id, first_bg);
+            page.persist = PersistState::ReadOnlyAfterLoadError;
+            page
         }
     };
     pages.push(first_page);
 
     // Folgeseiten als ungeladene Platzhalter anlegen (Lazy Loading)
-    for &page_id in &manifest.page_ids[1..] {
-        pages.push(Page::new_unloaded(page_id, PageBackground::Grid5mm));
+    for &page_id in &page_ids[1..] {
+        let bg = manifest
+            .background_for_page(page_id)
+            .unwrap_or(PageBackground::Grid5mm);
+        pages.push(Page::new_unloaded(page_id, bg));
     }
 
-    let notebook = Notebook::from_pages(
+    let mut notebook = Notebook::from_pages(
         pages,
         manifest.current_page_index,
         manifest.next_stroke_id,
         manifest.next_page_id,
     );
+    notebook.load_warnings = load_warnings;
 
     Ok((notebook, manifest))
 }
@@ -424,10 +551,46 @@ pub fn ensure_page_loaded(
             notebook.pages[page_idx] = data.to_page();
             Ok(())
         }
+        Err(StorageError::CorruptedPage(id, err_msg)) => {
+            let q_res = quarantine_corrupted_page(notebook_dir, id);
+            let q_path = q_res.ok();
+            eprintln!(
+                "[Storage] Lazy Loading von Seite {id} fehlgeschlagen ({err_msg}). Quarantäne: {:?}",
+                q_path
+            );
+            notebook.load_warnings.insert(
+                id,
+                PageLoadWarning {
+                    page_id: id,
+                    message: err_msg.clone(),
+                    quarantine_path: q_path,
+                },
+            );
+            notebook.pages[page_idx].is_loaded = true;
+            notebook.pages[page_idx].persist = PersistState::ReadOnlyAfterLoadError;
+            notebook.pages[page_idx].rebuild_cache_if_dirty();
+            Err(StorageError::CorruptedPage(id, err_msg))
+        }
+        Err(StorageError::Io(e)) => {
+            eprintln!("[Storage] I/O-Fehler beim Lazy Loading von Seite {page_id}: {e}");
+            let err_str = e.to_string();
+            notebook.load_warnings.insert(
+                page_id,
+                PageLoadWarning {
+                    page_id,
+                    message: format!("I/O-Fehler: {err_str}"),
+                    quarantine_path: None,
+                },
+            );
+            notebook.pages[page_idx].is_loaded = true;
+            notebook.pages[page_idx].persist = PersistState::ReadOnlyAfterLoadError;
+            notebook.pages[page_idx].rebuild_cache_if_dirty();
+            Err(StorageError::Io(e))
+        }
         Err(e) => {
             eprintln!("[Storage] Fehler beim Lazy Loading von Seite {page_id}: {e}");
-            // Ersatzseite als geladen markieren, damit die App nicht hängt
             notebook.pages[page_idx].is_loaded = true;
+            notebook.pages[page_idx].persist = PersistState::ReadOnlyAfterLoadError;
             notebook.pages[page_idx].rebuild_cache_if_dirty();
             Err(e)
         }
@@ -772,5 +935,155 @@ mod tests {
         let final_summaries = list_notebooks(base_dir);
         assert_eq!(final_summaries.len(), 1);
         assert_eq!(final_summaries[0].id, m1.id);
+    }
+
+    #[test]
+    fn test_load_corrupted_page_quarantines_and_does_not_overwrite() {
+        use crate::document::PersistState;
+
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let path = temp_dir.path();
+
+        let manifest = NotebookManifest::new("nb_corrupt", "Test Corrupt");
+        save_manifest(path, &manifest).unwrap();
+
+        let corrupted_content = br#"{"id": 1, "background": "Grid5mm", "strokes": INVALID_JSON"#;
+        let page_file = path.join("page_1.json");
+        fs::write(&page_file, corrupted_content).unwrap();
+
+        // Load notebook
+        let (nb, mut m) =
+            load_notebook(path).expect("load_notebook should succeed with fallback page");
+
+        // (1) Check that page_1.json was quarantined
+        let dir_entries: Vec<String> = fs::read_dir(path)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .collect();
+        let corrupt_entry = dir_entries
+            .iter()
+            .find(|name| name.starts_with("page_1.json.corrupt-"));
+        assert!(
+            corrupt_entry.is_some(),
+            "Corrupt file must be renamed to page_1.json.corrupt-<ts>, found entries: {dir_entries:?}"
+        );
+        let corrupt_file = path.join(corrupt_entry.unwrap());
+        assert_eq!(
+            fs::read(&corrupt_file).unwrap(),
+            corrupted_content,
+            "Quarantine file must contain original corrupt content"
+        );
+
+        // (2) The replacement page must be in ReadOnlyAfterLoadError state
+        assert_eq!(
+            nb.pages[0].persist,
+            PersistState::ReadOnlyAfterLoadError,
+            "Page must be marked ReadOnlyAfterLoadError"
+        );
+
+        // (3) Calling save_notebook must NOT overwrite or create a blank page_1.json!
+        save_notebook(path, &nb, &mut m).unwrap();
+
+        assert!(
+            !page_file.exists(),
+            "save_notebook must NOT recreate page_1.json from an unedited/locked replacement page"
+        );
+        assert!(
+            corrupt_file.exists(),
+            "Quarantined file must remain intact after save_notebook"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_io_error_does_not_quarantine_and_does_not_overwrite() {
+        use crate::document::PersistState;
+        use std::os::unix::fs::PermissionsExt;
+
+        // Skip test if running as root
+        if std::env::var("USER").unwrap_or_default() == "root" {
+            return;
+        }
+
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let path = temp_dir.path();
+
+        let manifest = NotebookManifest::new("nb_io", "Test IO");
+        save_manifest(path, &manifest).unwrap();
+
+        let original_content = br#"{"id": 1, "background": "Grid5mm", "strokes": []}"#;
+        let page_file = path.join("page_1.json");
+        fs::write(&page_file, original_content).unwrap();
+
+        // Make file unreadable
+        fs::set_permissions(&page_file, fs::Permissions::from_mode(0o000)).unwrap();
+
+        let (nb, mut m) =
+            load_notebook(path).expect("load_notebook should succeed with fallback page");
+
+        // Restore permissions for inspection
+        fs::set_permissions(&page_file, fs::Permissions::from_mode(0o600)).unwrap();
+
+        let dir_entries: Vec<String> = fs::read_dir(path)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .collect();
+        let corrupt_entry = dir_entries.iter().find(|name| name.contains("corrupt"));
+        assert!(
+            corrupt_entry.is_none(),
+            "I/O error must NOT trigger quarantine, found: {corrupt_entry:?}"
+        );
+
+        assert_eq!(
+            nb.pages[0].persist,
+            PersistState::ReadOnlyAfterLoadError,
+            "Page must be marked ReadOnlyAfterLoadError on I/O error"
+        );
+
+        save_notebook(path, &nb, &mut m).unwrap();
+        assert_eq!(
+            fs::read(&page_file).unwrap(),
+            original_content,
+            "Original file content must not be overwritten"
+        );
+    }
+
+    #[test]
+    fn test_edit_replacement_saves_only_after_unlock() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let path = temp_dir.path();
+
+        let manifest = NotebookManifest::new("nb_unlock", "Test Unlock");
+        save_manifest(path, &manifest).unwrap();
+
+        let corrupted_content = br#"CORRUPTED_JSON_DATA"#;
+        let page_file = path.join("page_1.json");
+        fs::write(&page_file, corrupted_content).unwrap();
+
+        let (mut nb, mut m) = load_notebook(path).expect("load_notebook");
+
+        save_notebook(path, &nb, &mut m).unwrap();
+        assert!(!page_file.exists());
+
+        // Now user explicitly acknowledges and unlocks
+        nb.pages[0].unlock_after_load_error();
+        nb.pages[0].add_stroke(Stroke::new(1, vec![], vec![], [1.0, 0.0, 0.0, 1.0]));
+
+        save_notebook(path, &nb, &mut m).unwrap();
+        assert!(
+            page_file.exists(),
+            "Page must be saved after explicit unlock and edit"
+        );
+
+        let dir_entries: Vec<String> = fs::read_dir(path)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .collect();
+        assert!(dir_entries
+            .iter()
+            .any(|name| name.starts_with("page_1.json.corrupt-")));
     }
 }

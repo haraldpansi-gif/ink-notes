@@ -304,6 +304,22 @@ pub enum PageBackground {
     DotGrid,
 }
 
+/// Persistenzstatus einer Seite zum Schutz vor unbeabsichtigtem Überschreiben bei Ladefehlern.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PersistState {
+    #[default]
+    Normal,
+    ReadOnlyAfterLoadError,
+}
+
+/// Warnung beim Laden einer Seite (beschädigte Datei oder I/O-Fehler).
+#[derive(Debug, Clone, PartialEq)]
+pub struct PageLoadWarning {
+    pub page_id: u64,
+    pub message: String,
+    pub quarantine_path: Option<std::path::PathBuf>,
+}
+
 /// Eine einzelne Notizbuchseite mit Strichen, Hintergrund und gecachten Meshes.
 #[derive(Debug, Clone)]
 pub struct Page {
@@ -314,6 +330,7 @@ pub struct Page {
     pub stroke_ranges: Vec<Range<u32>>,
     pub is_dirty: bool,
     pub is_loaded: bool,
+    pub persist: PersistState,
     pub history: HistoryStack,
 }
 
@@ -327,6 +344,7 @@ impl Page {
             stroke_ranges: Vec::new(),
             is_dirty: false,
             is_loaded: true,
+            persist: PersistState::Normal,
             history: HistoryStack::new(),
         }
     }
@@ -341,8 +359,17 @@ impl Page {
             stroke_ranges: Vec::new(),
             is_dirty: false,
             is_loaded: false,
+            persist: PersistState::Normal,
             history: HistoryStack::new(),
         }
+    }
+
+    pub fn is_readonly(&self) -> bool {
+        self.persist == PersistState::ReadOnlyAfterLoadError
+    }
+
+    pub fn unlock_after_load_error(&mut self) {
+        self.persist = PersistState::Normal;
     }
 
     /// Fügt einen neuen Strich hinzu und registriert ihn im History-Stack.
@@ -587,6 +614,7 @@ pub struct Notebook {
     pub current_page_index: usize,
     pub next_stroke_id: u64,
     pub next_page_id: u64,
+    pub load_warnings: std::collections::HashMap<u64, PageLoadWarning>,
 }
 
 impl Notebook {
@@ -596,6 +624,7 @@ impl Notebook {
             current_page_index: 0,
             next_stroke_id: 1,
             next_page_id: 1,
+            load_warnings: std::collections::HashMap::new(),
         };
         // Erste Standardseite anlegen (5mm Grid)
         nb.add_page(PageBackground::Grid5mm);
@@ -614,6 +643,7 @@ impl Notebook {
             current_page_index,
             next_stroke_id,
             next_page_id,
+            load_warnings: std::collections::HashMap::new(),
         };
         if nb.pages.is_empty() {
             nb.add_page(PageBackground::Grid5mm);

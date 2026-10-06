@@ -2106,6 +2106,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     ui_state.set_export_message("Server-Einstellungen gespeichert");
                                     window.request_redraw();
                                 }
+                                UiAction::UnlockCorruptedPage(page_id) => {
+                                    notebook.load_warnings.remove(&page_id);
+                                    if let Some(page) = notebook.pages.iter_mut().find(|p| p.id == page_id) {
+                                        page.unlock_after_load_error();
+                                    }
+                                    autosave.mark_page_dirty(notebook.current_page(), &manifest);
+                                    window.request_redraw();
+                                }
                             }
                         }
 

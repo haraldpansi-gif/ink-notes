@@ -123,6 +123,8 @@ pub enum UiAction {
         server_url: String,
         auth_token: Option<String>,
     },
+    // Datenintegrität / Quarantäne
+    UnlockCorruptedPage(u64),
 }
 
 /// Zustand der grafischen Benutzeroberfläche.
@@ -1930,6 +1932,94 @@ pub fn render_ui(
         } else {
             state.export_message = None;
         }
+    }
+
+    // 5. Nicht-wegklickbare Warnung bei Ladefehlern / Quarantäne (Block 1)
+    if let Some(warning) = notebook.load_warnings.get(&notebook.current_page().id) {
+        egui::Window::new("⚠️ Datenintegritäts-Warnung")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .frame(
+                egui::Frame::none()
+                    .fill(egui::Color32::from_rgba_premultiplied(35, 20, 20, 245))
+                    .rounding(egui::Rounding::same(12.0))
+                    .stroke(egui::Stroke::new(
+                        1.5_f32,
+                        egui::Color32::from_rgb(235, 87, 87),
+                    ))
+                    .inner_margin(egui::Margin::symmetric(24.0, 20.0))
+                    .shadow(egui::epaint::Shadow {
+                        offset: egui::vec2(0.0, 8.0),
+                        blur: 24.0,
+                        spread: 0.0,
+                        color: egui::Color32::from_black_alpha(180),
+                    }),
+            )
+            .show(ctx, |ui| {
+                ui.set_width(420.0);
+                ui.horizontal(|ui| {
+                    ui.colored_label(egui::Color32::from_rgb(255, 80, 80), "⚠️");
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "Seite {} konnte nicht fehlerfrei geladen werden!",
+                            warning.page_id
+                        ))
+                        .strong()
+                        .size(15.0)
+                        .color(egui::Color32::WHITE),
+                    );
+                });
+                ui.add_space(8.0);
+                ui.label(
+                    egui::RichText::new(format!("Fehlermeldung: {}", warning.message))
+                        .size(12.0)
+                        .color(egui::Color32::from_gray(200)),
+                );
+                ui.add_space(8.0);
+                if let Some(ref q_path) = warning.quarantine_path {
+                    ui.label(
+                        egui::RichText::new("Die beschädigte Originaldatei wurde in Quarantäne gesichert:")
+                            .size(12.0)
+                            .color(egui::Color32::from_gray(220)),
+                    );
+                    ui.add_space(4.0);
+                    ui.monospace(
+                        egui::RichText::new(q_path.display().to_string())
+                            .size(11.0)
+                            .color(egui::Color32::from_rgb(255, 215, 0)),
+                    );
+                    ui.add_space(10.0);
+                    ui.label(
+                        egui::RichText::new(
+                            "Um Datenverlust zu verhindern, ist diese Seite schreibgeschützt.\n\
+                             Wenn Sie diese Seite bearbeiten möchten, können Sie den Schreibschutz aufheben.",
+                        )
+                        .size(11.5)
+                        .color(egui::Color32::from_gray(180)),
+                    );
+                    ui.add_space(12.0);
+                    if ui
+                        .button(
+                            egui::RichText::new("Als leere Seite bearbeiten (Schreibschutz aufheben)")
+                                .color(egui::Color32::WHITE)
+                                .size(12.5),
+                        )
+                        .clicked()
+                    {
+                        actions.push(UiAction::UnlockCorruptedPage(warning.page_id));
+                    }
+                } else {
+                    ui.label(
+                        egui::RichText::new(
+                            "Zugriffsfehler (I/O). Die Datei existiert, kann aber nicht gelesen werden.\n\
+                             Die Seite bleibt schreibgeschützt, um ein Überschreiben zu verhindern.",
+                        )
+                        .size(12.0)
+                        .color(egui::Color32::from_gray(200)),
+                    );
+                }
+            });
     }
 
     actions
