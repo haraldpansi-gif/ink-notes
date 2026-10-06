@@ -1180,7 +1180,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     // 2. Objektauswahl & Transformation im Select-Modus
                                     if ui_state.active_tool == ActiveTool::Select {
                                         let screen_vec = Vec2::new(sx, sy);
-                                        let hit = selection_state.hit_test_handles(notebook.current_page(), &canvas, screen_vec);
+                                        let hit = selection_state.hit_test_handles(notebook.current_page(), &canvas, screen_vec, egui_ctx.pixels_per_point());
                                         match hit {
                                             SelectionHandleHit::RotateHandle { center_page } => {
                                                 if let Some(page_pt) = canvas.screen_to_page(sx, sy) {
@@ -1580,7 +1580,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             }
                                         } else if ui_state.active_tool == ActiveTool::Select {
                                             let screen_vec = Vec2::new(tx, ty);
-                                            let hit = selection_state.hit_test_handles(notebook.current_page(), &canvas, screen_vec);
+                                            let hit = selection_state.hit_test_handles(notebook.current_page(), &canvas, screen_vec, egui_ctx.pixels_per_point());
                                             match hit {
                                                 SelectionHandleHit::RotateHandle { center_page } => {
                                                     if let Some(page_pt) = canvas.screen_to_page(tx, ty) {

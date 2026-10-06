@@ -115,12 +115,15 @@ impl SelectionState {
         Page::selection_aabb(&strokes)
     }
 
-    /// Führt Hit-Testing auf die Auswahlgriffe (Drehen, Ecken, Körper) in Bildschirmkoordinaten durch.
+    /// Führt Hit-Testing auf die Auswahlgriffe (Drehen, Ecken, Körper) in Bildschirmkoordinaten
+    /// (physische Pixel) durch. Abstände und Trefferradien sind in logischen Punkten festgelegt
+    /// und werden mit `pixels_per_point` skaliert, damit sie zur gezeichneten Überlagerung passen.
     pub fn hit_test_handles(
         &self,
         page: &Page,
         canvas: &CanvasState,
         screen_pos: Vec2,
+        pixels_per_point: f32,
     ) -> SelectionHandleHit {
         let Some(aabb) = self.get_selection_aabb(page) else {
             return SelectionHandleHit::None;
@@ -134,9 +137,10 @@ impl SelectionState {
         let screen_center = (screen_min + screen_max) * 0.5;
         let page_center = (aabb.min + aabb.max) * 0.5;
 
-        // 1. Drehgriff testen (26 px oberhalb des oberen Randes)
-        let rot_screen = Vec2::new(screen_center.x, screen_min.y - 26.0);
-        if (screen_pos - rot_screen).length() <= 14.0 {
+        // 1. Drehgriff testen (oberhalb des oberen Randes, wie gezeichnet)
+        let ppp = pixels_per_point;
+        let rot_screen = Vec2::new(screen_center.x, screen_min.y - ROTATE_HANDLE_OFFSET * ppp);
+        if (screen_pos - rot_screen).length() <= HANDLE_HIT_RADIUS * ppp {
             return SelectionHandleHit::RotateHandle {
                 center_page: page_center,
             };
@@ -164,7 +168,7 @@ impl SelectionState {
         ];
 
         for i in 0..4 {
-            if (screen_pos - corners_screen[i]).length() <= 12.0 {
+            if (screen_pos - corners_screen[i]).length() <= HANDLE_HIT_RADIUS * ppp {
                 return SelectionHandleHit::CornerHandle {
                     corner_idx: i,
                     fixed_corner_page: fixed_corners_page[i],
@@ -273,6 +277,16 @@ impl SelectionState {
 }
 
 /// Rendert das Auswahl-Overlay (Bounding Box, Ecken, Dreh-Griff, Marquee Box) über egui.
+/// Abstand des Drehgriffs über dem Auswahlrahmen (logische Punkte).
+const ROTATE_HANDLE_OFFSET: f32 = 24.0;
+/// Trefferradius der Griffe (logische Punkte), groß genug für Finger.
+const HANDLE_HIT_RADIUS: f32 = 18.0;
+
+/// Wandelt Fensterpixel (physisch) in egui-Koordinaten (logische Punkte) um.
+fn to_ui(screen: [f32; 2], pixels_per_point: f32) -> egui::Pos2 {
+    egui::pos2(screen[0] / pixels_per_point, screen[1] / pixels_per_point)
+}
+
 pub fn render_selection_overlay(
     ctx: &egui::Context,
     selection: &SelectionState,
@@ -283,6 +297,8 @@ pub fn render_selection_overlay(
         egui::Order::Foreground,
         egui::Id::new("selection_overlay_layer"),
     ));
+    // Fensterpixel sind physisch, egui zeichnet in logischen Punkten
+    let ppp = ctx.pixels_per_point();
 
     // 1. Wenn aktuell ein Auswahlrahmen gezogen wird (Marquee Box)
     if let DragMode::BoxSelect {
@@ -290,8 +306,8 @@ pub fn render_selection_overlay(
         current_page,
     } = selection.drag_mode
     {
-        let p1 = canvas.page_to_screen(start_page);
-        let p2 = canvas.page_to_screen(current_page);
+        let p1 = to_ui(canvas.page_to_screen(start_page), ppp);
+        let p2 = to_ui(canvas.page_to_screen(current_page), ppp);
         let min_x = p1[0].min(p2[0]);
         let min_y = p1[1].min(p2[1]);
         let max_x = p1[0].max(p2[0]);
@@ -321,8 +337,8 @@ pub fn render_selection_overlay(
         return;
     };
 
-    let p_min = canvas.page_to_screen(aabb.min);
-    let p_max = canvas.page_to_screen(aabb.max);
+    let p_min = to_ui(canvas.page_to_screen(aabb.min), ppp);
+    let p_max = to_ui(canvas.page_to_screen(aabb.max), ppp);
 
     let screen_min = egui::pos2(p_min[0].min(p_max[0]), p_min[1].min(p_max[1]));
     let screen_max = egui::pos2(p_min[0].max(p_max[0]), p_min[1].max(p_max[1]));
@@ -338,7 +354,7 @@ pub fn render_selection_overlay(
 
     // Dreh-Stängel (Stalk) und Drehgriff
     let top_center = egui::pos2(rect.center().x, rect.min.y);
-    let rot_handle = egui::pos2(rect.center().x, rect.min.y - 24.0_f32);
+    let rot_handle = egui::pos2(rect.center().x, rect.min.y - ROTATE_HANDLE_OFFSET);
 
     painter.line_segment(
         [top_center, rot_handle],

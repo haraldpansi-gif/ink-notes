@@ -228,6 +228,17 @@ impl UiState {
     /// Abstand der Werkzeugleiste zum Fensterrand.
     pub const SIDEBAR_MARGIN: f32 = 10.0;
 
+    /// Schließt alle Popover und Dialoge. Wird vor dem Öffnen eines neuen aufgerufen, damit
+    /// sich nie mehrere überlagern.
+    pub fn close_overlays(&mut self) {
+        self.is_pen_menu_open = false;
+        self.is_highlighter_menu_open = false;
+        self.is_more_menu_open = false;
+        self.show_page_jump_popup = false;
+        self.is_document_menu_open = false;
+        self.is_update_dialog_open = false;
+    }
+
     /// Länge der längsten Farbpalette; so viel Platz hält die Leiste immer frei.
     pub const MAX_PALETTE_LEN: usize = 5;
 
@@ -363,47 +374,6 @@ impl UiState {
     }
 }
 
-/// Stilvoller einfacher Werkzeug-Button (für den Radierer).
-fn tool_pill_button(
-    ui: &mut egui::Ui,
-    is_active: bool,
-    text: &str,
-    tooltip: &str,
-) -> egui::Response {
-    let (bg, text_color, stroke) = if is_active {
-        (
-            egui::Color32::from_rgba_premultiplied(45, 80, 145, 230),
-            egui::Color32::WHITE,
-            egui::Stroke::new(
-                1.0_f32,
-                egui::Color32::from_rgba_unmultiplied(110, 165, 255, 190),
-            ),
-        )
-    } else {
-        (
-            egui::Color32::from_rgba_unmultiplied(255, 255, 255, 8),
-            egui::Color32::from_gray(215),
-            egui::Stroke::new(
-                1.0_f32,
-                egui::Color32::from_rgba_unmultiplied(255, 255, 255, 15),
-            ),
-        )
-    };
-
-    let button = egui::Button::new(
-        egui::RichText::new(text)
-            .color(text_color)
-            .size(13.0)
-            .strong(),
-    )
-    .fill(bg)
-    .stroke(stroke)
-    .rounding(egui::Rounding::same(8.0))
-    .min_size(egui::vec2(0.0, 28.0));
-
-    ui.add(button).on_hover_text(tooltip)
-}
-
 /// Dicken-Preset-Button mit visueller Linien-Vorschau in Originalfarbe und Proportion.
 fn stroke_preview_button(
     ui: &mut egui::Ui,
@@ -412,7 +382,7 @@ fn stroke_preview_button(
     label_text: &str,
     color: [f32; 4],
 ) -> egui::Response {
-    let size = egui::vec2(66.0, 34.0);
+    let size = egui::vec2(66.0, 40.0);
     let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
 
     if ui.is_rect_visible(rect) {
@@ -480,46 +450,6 @@ fn stroke_preview_button(
     }
 
     response.on_hover_text(format!("Stärke auf {} setzen", label_text))
-}
-
-/// Abgerundeter Aktions-Button (Undo, Redo, Navigation, PDF).
-fn action_pill_button(
-    ui: &mut egui::Ui,
-    enabled: bool,
-    text: &str,
-    tooltip: &str,
-) -> egui::Response {
-    let text_color = if enabled {
-        egui::Color32::from_gray(230)
-    } else {
-        egui::Color32::from_gray(105)
-    };
-
-    let (bg, stroke) = if enabled {
-        (
-            egui::Color32::from_rgba_unmultiplied(255, 255, 255, 10),
-            egui::Stroke::new(
-                1.0_f32,
-                egui::Color32::from_rgba_unmultiplied(255, 255, 255, 22),
-            ),
-        )
-    } else {
-        (
-            egui::Color32::from_rgba_unmultiplied(255, 255, 255, 3),
-            egui::Stroke::new(
-                1.0_f32,
-                egui::Color32::from_rgba_unmultiplied(255, 255, 255, 8),
-            ),
-        )
-    };
-
-    let button = egui::Button::new(egui::RichText::new(text).color(text_color).size(12.5))
-        .fill(bg)
-        .stroke(stroke)
-        .rounding(egui::Rounding::same(7.0))
-        .min_size(egui::vec2(0.0, 26.0));
-
-    ui.add_enabled(enabled, button).on_hover_text(tooltip)
 }
 
 /// Inhalt eines Symbol-Knopfs der Werkzeugleiste.
@@ -767,6 +697,116 @@ fn color_circle_swatch(
     response.on_hover_text(tooltip)
 }
 
+/// Spalten der Seitenauswahl.
+const PAGE_PICKER_COLUMNS: usize = 4;
+/// Größe einer Kachel der Seitenauswahl.
+const PAGE_TILE: egui::Vec2 = egui::vec2(56.0, 48.0);
+
+/// Rahmen der Popover neben der Werkzeugleiste.
+fn popover_frame() -> egui::Frame {
+    egui::Frame::none()
+        .fill(egui::Color32::from_rgb(30, 30, 34))
+        .rounding(egui::Rounding::same(12.0))
+        .stroke(egui::Stroke::new(
+            1.0_f32,
+            egui::Color32::from_white_alpha(40),
+        ))
+        .inner_margin(egui::Margin::symmetric(14.0, 12.0))
+        .shadow(egui::epaint::Shadow {
+            offset: egui::vec2(0.0, 6.0),
+            blur: 16.0,
+            spread: 0.0,
+            color: egui::Color32::from_black_alpha(120),
+        })
+}
+
+/// Deckender, einheitlicher Rahmen für Dialogfenster (`danger` = rote Warnfenster).
+fn dialog_frame(danger: bool) -> egui::Frame {
+    let (fill, stroke) = if danger {
+        (
+            egui::Color32::from_rgb(44, 24, 26),
+            egui::Stroke::new(1.5_f32, egui::Color32::from_rgb(235, 87, 87)),
+        )
+    } else {
+        (
+            egui::Color32::from_rgb(30, 30, 34),
+            egui::Stroke::new(1.0_f32, egui::Color32::from_white_alpha(40)),
+        )
+    };
+    egui::Frame::none()
+        .fill(fill)
+        .rounding(egui::Rounding::same(14.0))
+        .stroke(stroke)
+        .inner_margin(egui::Margin::symmetric(20.0, 16.0))
+        .shadow(egui::epaint::Shadow {
+            offset: egui::vec2(0.0, 8.0),
+            blur: 24.0,
+            spread: 0.0,
+            color: egui::Color32::from_black_alpha(160),
+        })
+}
+
+/// Dialogfenster ohne egui-Titelleiste (der Titel steht in [`dialog_header`]), zentriert über
+/// dem freien Bereich neben der Werkzeugleiste. Warnfenster sitzen in der Bildschirmmitte.
+fn dialog_window(title: &'static str, state: &UiState, danger: bool) -> egui::Window<'static> {
+    let shift = match state.sidebar_side {
+        SidebarSide::Left => state.sidebar_reserved_width() / 2.0,
+        SidebarSide::Right => -state.sidebar_reserved_width() / 2.0,
+    };
+    let (align, y) = if danger {
+        (egui::Align2::CENTER_CENTER, 0.0)
+    } else {
+        (egui::Align2::CENTER_TOP, 60.0)
+    };
+    egui::Window::new(title)
+        .title_bar(false)
+        .collapsible(false)
+        .resizable(false)
+        .anchor(align, egui::vec2(shift, y))
+        .frame(dialog_frame(danger))
+}
+
+/// Kopfzeile eines Dialogs mit Titel und optionalem Schließen-Knopf.
+/// Gibt `true` zurück, wenn „Schließen“ getippt wurde.
+fn dialog_header(ui: &mut egui::Ui, title: &str, closable: bool) -> bool {
+    let mut close = false;
+    ui.horizontal(|ui| {
+        ui.label(
+            egui::RichText::new(title)
+                .strong()
+                .size(16.0)
+                .color(egui::Color32::WHITE),
+        );
+        if closable {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                close = close_button(ui).clicked();
+            });
+        }
+    });
+    ui.add_space(4.0);
+    ui.separator();
+    ui.add_space(6.0);
+    close
+}
+
+/// Schließen-Knopf mit fingertauglicher Trefferfläche.
+fn close_button(ui: &mut egui::Ui) -> egui::Response {
+    ui.add_sized(
+        [36.0, 36.0],
+        egui::Button::new(egui::RichText::new("🗙").size(16.0)).frame(false),
+    )
+    .on_hover_text("Schließen (Esc)")
+}
+
+/// Größere Knöpfe, Eingabefelder und Schieberegler für Finger und Stift.
+fn touch_friendly_spacing(ui: &mut egui::Ui) {
+    let spacing = ui.spacing_mut();
+    spacing.button_padding = egui::vec2(12.0, 8.0);
+    spacing.interact_size = egui::vec2(40.0, 36.0);
+    spacing.item_spacing = egui::vec2(8.0, 8.0);
+    spacing.slider_width = 200.0;
+}
+
 /// Prüft, ob ein Bildschirmpunkt (physische Pixel) auf einem UI-Element liegt.
 ///
 /// egui arbeitet in logischen Punkten; Touch- und Stift-Positionen kommen in physischen
@@ -802,6 +842,7 @@ pub fn render_ui(
     let mut pen_btn_rect = None;
     let mut high_btn_rect = None;
     let mut more_btn_rect = None;
+    let mut page_btn_rect = None;
 
     // 1. Senkrechte Werkzeugleiste, seitlich oben angedockt. Bewusst nicht vertikal
     //    zentriert: sonst würden alle Knöpfe springen, sobald sich die Höhe ändert.
@@ -872,11 +913,10 @@ pub fn render_ui(
                                 )
                                 .clicked()
                                 {
-                                    state.is_document_menu_open = !state.is_document_menu_open;
-                                    state.is_pen_menu_open = false;
-                                    state.is_highlighter_menu_open = false;
-                                    state.is_more_menu_open = false;
-                                    if state.is_document_menu_open {
+                                    let open = !state.is_document_menu_open;
+                                    state.close_overlays();
+                                    state.is_document_menu_open = open;
+                                    if open {
                                         actions.push(UiAction::RefreshNotebooks);
                                     }
                                 }
@@ -910,7 +950,9 @@ pub fn render_ui(
                                             state.pen_stroke_width_mm,
                                         ));
                                     } else {
-                                        state.is_pen_menu_open = !state.is_pen_menu_open;
+                                        let open = !state.is_pen_menu_open;
+                                        state.close_overlays();
+                                        state.is_pen_menu_open = open;
                                     }
                                 }
 
@@ -940,8 +982,9 @@ pub fn render_ui(
                                             state.highlighter_stroke_width_mm,
                                         ));
                                     } else {
-                                        state.is_highlighter_menu_open =
-                                            !state.is_highlighter_menu_open;
+                                        let open = !state.is_highlighter_menu_open;
+                                        state.close_overlays();
+                                        state.is_highlighter_menu_open = open;
                                     }
                                 }
 
@@ -1098,7 +1141,7 @@ pub fn render_ui(
                                     notebook.current_page_index + 1,
                                     notebook.pages.len()
                                 );
-                                if sidebar_button(
+                                let page_resp = sidebar_button(
                                     ui,
                                     btn,
                                     SidebarIcon::Text(&page_text),
@@ -1106,10 +1149,12 @@ pub fn render_ui(
                                     true,
                                     None,
                                     "Seite wählen",
-                                )
-                                .clicked()
-                                {
-                                    state.show_page_jump_popup = !state.show_page_jump_popup;
+                                );
+                                page_btn_rect = Some(page_resp.rect);
+                                if page_resp.clicked() {
+                                    let open = !state.show_page_jump_popup;
+                                    state.close_overlays();
+                                    state.show_page_jump_popup = open;
                                 }
                                 let is_last = notebook.current_page_index + 1 >= notebook.pages.len();
                                 if sidebar_button(
@@ -1166,9 +1211,9 @@ pub fn render_ui(
                                     );
                                 }
                                 if more_resp.clicked() {
-                                    state.is_more_menu_open = !state.is_more_menu_open;
-                                    state.is_pen_menu_open = false;
-                                    state.is_highlighter_menu_open = false;
+                                    let open = !state.is_more_menu_open;
+                                    state.close_overlays();
+                                    state.is_more_menu_open = open;
                                 }
                             });
                         });
@@ -1193,141 +1238,113 @@ pub fn render_ui(
                 .constrain(true)
                 .order(egui::Order::Foreground)
                 .show(ctx, |ui| {
-                    let frame = egui::Frame::none()
-                        .fill(egui::Color32::from_rgba_premultiplied(24, 24, 28, 235)) // Milchglas-Look
-                        .rounding(egui::Rounding::same(12.0))
-                        .stroke(egui::Stroke::new(
-                            1.0_f32,
-                            egui::Color32::from_rgba_unmultiplied(255, 255, 255, 30),
-                        ))
-                        .inner_margin(egui::Margin::symmetric(14.0, 12.0))
-                        .shadow(egui::epaint::Shadow {
-                            offset: egui::vec2(0.0, 6.0),
-                            blur: 16.0,
-                            spread: 0.0,
-                            color: egui::Color32::from_black_alpha(120),
-                        })
-                        .show(ui, |ui| {
-                            ui.set_width(295.0);
+                    let frame = popover_frame().show(ui, |ui| {
+                        ui.set_width(320.0);
+                        touch_friendly_spacing(ui);
 
-                            // Titelzeile mit Schließen-Button
-                            ui.horizontal(|ui| {
-                                ui.label(
-                                    egui::RichText::new("Stift-Konfiguration")
-                                        .strong()
-                                        .color(egui::Color32::WHITE)
-                                        .size(12.5),
-                                );
-                                ui.with_layout(
-                                    egui::Layout::right_to_left(egui::Align::Center),
-                                    |ui| {
-                                        if ui
-                                            .add(
-                                                egui::Button::new(
-                                                    egui::RichText::new("🗙").size(12.0),
-                                                )
-                                                .frame(false),
-                                            )
-                                            .clicked()
-                                        {
-                                            state.is_pen_menu_open = false;
-                                        }
-                                    },
-                                );
-                            });
-
-                            ui.add_space(8.0);
-
-                            // Zeile 1: Farbauswahl (Color Swatches)
+                        // Titelzeile mit Schließen-Button
+                        ui.horizontal(|ui| {
                             ui.label(
-                                egui::RichText::new("FARBE")
-                                    .size(10.5)
+                                egui::RichText::new("Stift-Konfiguration")
                                     .strong()
-                                    .color(egui::Color32::from_gray(160)),
+                                    .color(egui::Color32::WHITE)
+                                    .size(12.5),
                             );
-                            ui.add_space(3.0);
-                            ui.horizontal(|ui| {
-                                ui.spacing_mut().item_spacing = egui::vec2(8.0, 0.0);
-                                for (color, label) in PEN_COLOR_PRESETS {
-                                    let is_sel = (state.pen_color[0] - color[0]).abs() < 0.05
-                                        && (state.pen_color[1] - color[1]).abs() < 0.05
-                                        && (state.pen_color[2] - color[2]).abs() < 0.05;
-                                    if color_circle_swatch(ui, color, is_sel, label, 22.0).clicked()
-                                    {
-                                        state.pen_color = color;
-                                        actions.push(UiAction::SetColor(color));
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if close_button(ui).clicked() {
+                                        state.is_pen_menu_open = false;
                                     }
-                                }
-
-                                // RGBA-Colorpicker
-                                let mut egui_color = egui::Rgba::from_rgba_premultiplied(
-                                    state.pen_color[0],
-                                    state.pen_color[1],
-                                    state.pen_color[2],
-                                    state.pen_color[3],
-                                );
-                                if egui::color_picker::color_edit_button_rgba(
-                                    ui,
-                                    &mut egui_color,
-                                    egui::color_picker::Alpha::Opaque,
-                                )
-                                .changed()
-                                {
-                                    state.pen_color = egui_color.to_array();
-                                    actions.push(UiAction::SetColor(state.pen_color));
-                                }
-                            });
-
-                            ui.add_space(10.0);
-
-                            // Zeile 2: Dicken-Presets mit visueller Linien-Vorschau
-                            ui.label(
-                                egui::RichText::new("DICKEN-PRESETS")
-                                    .size(10.5)
-                                    .strong()
-                                    .color(egui::Color32::from_gray(160)),
+                                },
                             );
-                            ui.add_space(3.0);
-                            ui.horizontal(|ui| {
-                                ui.spacing_mut().item_spacing = egui::vec2(6.0, 0.0);
-                                for (preset, label) in PEN_WIDTH_PRESETS {
-                                    let is_sel = (state.pen_stroke_width_mm - preset).abs() < 0.05;
-                                    if stroke_preview_button(
-                                        ui,
-                                        is_sel,
-                                        preset,
-                                        label,
-                                        state.pen_color,
-                                    )
-                                    .clicked()
-                                    {
-                                        state.pen_stroke_width_mm = preset;
-                                        actions.push(UiAction::SetStrokeWidthMm(preset));
-                                    }
+                        });
+
+                        ui.add_space(8.0);
+
+                        // Zeile 1: Farbauswahl (Color Swatches)
+                        ui.label(
+                            egui::RichText::new("FARBE")
+                                .size(10.5)
+                                .strong()
+                                .color(egui::Color32::from_gray(160)),
+                        );
+                        ui.add_space(3.0);
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing = egui::vec2(8.0, 0.0);
+                            for (color, label) in PEN_COLOR_PRESETS {
+                                let is_sel = (state.pen_color[0] - color[0]).abs() < 0.05
+                                    && (state.pen_color[1] - color[1]).abs() < 0.05
+                                    && (state.pen_color[2] - color[2]).abs() < 0.05;
+                                if color_circle_swatch(ui, color, is_sel, label, 30.0).clicked() {
+                                    state.pen_color = color;
+                                    actions.push(UiAction::SetColor(color));
                                 }
-                            });
+                            }
 
-                            ui.add_space(10.0);
-
-                            // Zeile 3: Feinjustierung (Slider)
-                            ui.label(
-                                egui::RichText::new("STUFENLOSE STÄRKE")
-                                    .size(10.5)
-                                    .strong()
-                                    .color(egui::Color32::from_gray(160)),
+                            // RGBA-Colorpicker
+                            let mut egui_color = egui::Rgba::from_rgba_premultiplied(
+                                state.pen_color[0],
+                                state.pen_color[1],
+                                state.pen_color[2],
+                                state.pen_color[3],
                             );
-                            ui.add_space(2.0);
-                            if ui
-                                .add(
-                                    egui::Slider::new(&mut state.pen_stroke_width_mm, 0.15..=5.0)
-                                        .suffix(" mm")
-                                        .step_by(0.05),
-                                )
-                                .changed()
+                            if egui::color_picker::color_edit_button_rgba(
+                                ui,
+                                &mut egui_color,
+                                egui::color_picker::Alpha::Opaque,
+                            )
+                            .changed()
                             {
-                                actions.push(UiAction::SetStrokeWidthMm(state.pen_stroke_width_mm));
+                                state.pen_color = egui_color.to_array();
+                                actions.push(UiAction::SetColor(state.pen_color));
                             }
                         });
+
+                        ui.add_space(10.0);
+
+                        // Zeile 2: Dicken-Presets mit visueller Linien-Vorschau
+                        ui.label(
+                            egui::RichText::new("DICKEN-PRESETS")
+                                .size(10.5)
+                                .strong()
+                                .color(egui::Color32::from_gray(160)),
+                        );
+                        ui.add_space(3.0);
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing = egui::vec2(6.0, 0.0);
+                            for (preset, label) in PEN_WIDTH_PRESETS {
+                                let is_sel = (state.pen_stroke_width_mm - preset).abs() < 0.05;
+                                if stroke_preview_button(ui, is_sel, preset, label, state.pen_color)
+                                    .clicked()
+                                {
+                                    state.pen_stroke_width_mm = preset;
+                                    actions.push(UiAction::SetStrokeWidthMm(preset));
+                                }
+                            }
+                        });
+
+                        ui.add_space(10.0);
+
+                        // Zeile 3: Feinjustierung (Slider)
+                        ui.label(
+                            egui::RichText::new("STUFENLOSE STÄRKE")
+                                .size(10.5)
+                                .strong()
+                                .color(egui::Color32::from_gray(160)),
+                        );
+                        ui.add_space(2.0);
+                        if ui
+                            .add(
+                                egui::Slider::new(&mut state.pen_stroke_width_mm, 0.15..=5.0)
+                                    .suffix(" mm")
+                                    .step_by(0.05),
+                            )
+                            .changed()
+                        {
+                            actions.push(UiAction::SetStrokeWidthMm(state.pen_stroke_width_mm));
+                        }
+                    });
 
                     frame.response.rect
                 });
@@ -1344,146 +1361,123 @@ pub fn render_ui(
                 .constrain(true)
                 .order(egui::Order::Foreground)
                 .show(ctx, |ui| {
-                    let frame = egui::Frame::none()
-                        .fill(egui::Color32::from_rgba_premultiplied(24, 24, 28, 235))
-                        .rounding(egui::Rounding::same(12.0))
-                        .stroke(egui::Stroke::new(
-                            1.0_f32,
-                            egui::Color32::from_rgba_unmultiplied(255, 255, 255, 30),
-                        ))
-                        .inner_margin(egui::Margin::symmetric(14.0, 12.0))
-                        .shadow(egui::epaint::Shadow {
-                            offset: egui::vec2(0.0, 6.0),
-                            blur: 16.0,
-                            spread: 0.0,
-                            color: egui::Color32::from_black_alpha(120),
-                        })
-                        .show(ui, |ui| {
-                            ui.set_width(280.0);
+                    let frame = popover_frame().show(ui, |ui| {
+                        ui.set_width(320.0);
+                        touch_friendly_spacing(ui);
 
-                            ui.horizontal(|ui| {
-                                ui.label(
-                                    egui::RichText::new("Textmarker-Konfiguration")
-                                        .strong()
-                                        .color(egui::Color32::WHITE)
-                                        .size(12.5),
-                                );
-                                ui.with_layout(
-                                    egui::Layout::right_to_left(egui::Align::Center),
-                                    |ui| {
-                                        if ui
-                                            .add(
-                                                egui::Button::new(
-                                                    egui::RichText::new("🗙").size(12.0),
-                                                )
-                                                .frame(false),
-                                            )
-                                            .clicked()
-                                        {
-                                            state.is_highlighter_menu_open = false;
-                                        }
-                                    },
-                                );
-                            });
-
-                            ui.add_space(8.0);
-
-                            // Zeile 1: Farbauswahl
+                        ui.horizontal(|ui| {
                             ui.label(
-                                egui::RichText::new("MARKER-FARBE")
-                                    .size(10.5)
+                                egui::RichText::new("Textmarker-Konfiguration")
                                     .strong()
-                                    .color(egui::Color32::from_gray(160)),
+                                    .color(egui::Color32::WHITE)
+                                    .size(12.5),
                             );
-                            ui.add_space(3.0);
-                            ui.horizontal(|ui| {
-                                ui.spacing_mut().item_spacing = egui::vec2(8.0, 0.0);
-                                for (color, label) in HIGHLIGHTER_COLOR_PRESETS {
-                                    let is_sel = (state.highlighter_color[0] - color[0]).abs()
-                                        < 0.05
-                                        && (state.highlighter_color[1] - color[1]).abs() < 0.05
-                                        && (state.highlighter_color[2] - color[2]).abs() < 0.05;
-                                    if color_circle_swatch(ui, color, is_sel, label, 22.0).clicked()
-                                    {
-                                        state.highlighter_color = color;
-                                        actions.push(UiAction::SetColor(color));
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if close_button(ui).clicked() {
+                                        state.is_highlighter_menu_open = false;
                                     }
-                                }
-
-                                let mut egui_color = egui::Rgba::from_rgba_premultiplied(
-                                    state.highlighter_color[0],
-                                    state.highlighter_color[1],
-                                    state.highlighter_color[2],
-                                    state.highlighter_color[3],
-                                );
-                                if egui::color_picker::color_edit_button_rgba(
-                                    ui,
-                                    &mut egui_color,
-                                    egui::color_picker::Alpha::OnlyBlend,
-                                )
-                                .changed()
-                                {
-                                    state.highlighter_color = egui_color.to_array();
-                                    actions.push(UiAction::SetColor(state.highlighter_color));
-                                }
-                            });
-
-                            ui.add_space(10.0);
-
-                            // Zeile 2: Dicken-Presets
-                            ui.label(
-                                egui::RichText::new("DICKEN-PRESETS")
-                                    .size(10.5)
-                                    .strong()
-                                    .color(egui::Color32::from_gray(160)),
+                                },
                             );
-                            ui.add_space(3.0);
-                            ui.horizontal(|ui| {
-                                ui.spacing_mut().item_spacing = egui::vec2(6.0, 0.0);
-                                for (preset, label) in HIGHLIGHTER_WIDTH_PRESETS {
-                                    let is_sel =
-                                        (state.highlighter_stroke_width_mm - preset).abs() < 0.1;
-                                    if stroke_preview_button(
-                                        ui,
-                                        is_sel,
-                                        preset,
-                                        label,
-                                        state.highlighter_color,
-                                    )
-                                    .clicked()
-                                    {
-                                        state.highlighter_stroke_width_mm = preset;
-                                        actions.push(UiAction::SetStrokeWidthMm(preset));
-                                    }
+                        });
+
+                        ui.add_space(8.0);
+
+                        // Zeile 1: Farbauswahl
+                        ui.label(
+                            egui::RichText::new("MARKER-FARBE")
+                                .size(10.5)
+                                .strong()
+                                .color(egui::Color32::from_gray(160)),
+                        );
+                        ui.add_space(3.0);
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing = egui::vec2(8.0, 0.0);
+                            for (color, label) in HIGHLIGHTER_COLOR_PRESETS {
+                                let is_sel = (state.highlighter_color[0] - color[0]).abs() < 0.05
+                                    && (state.highlighter_color[1] - color[1]).abs() < 0.05
+                                    && (state.highlighter_color[2] - color[2]).abs() < 0.05;
+                                if color_circle_swatch(ui, color, is_sel, label, 30.0).clicked() {
+                                    state.highlighter_color = color;
+                                    actions.push(UiAction::SetColor(color));
                                 }
-                            });
+                            }
 
-                            ui.add_space(10.0);
-
-                            // Zeile 3: Slider
-                            ui.label(
-                                egui::RichText::new("STUFENLOSE STÄRKE")
-                                    .size(10.5)
-                                    .strong()
-                                    .color(egui::Color32::from_gray(160)),
+                            let mut egui_color = egui::Rgba::from_rgba_premultiplied(
+                                state.highlighter_color[0],
+                                state.highlighter_color[1],
+                                state.highlighter_color[2],
+                                state.highlighter_color[3],
                             );
-                            ui.add_space(2.0);
-                            if ui
-                                .add(
-                                    egui::Slider::new(
-                                        &mut state.highlighter_stroke_width_mm,
-                                        2.0..=16.0,
-                                    )
-                                    .suffix(" mm")
-                                    .step_by(0.5),
-                                )
-                                .changed()
+                            if egui::color_picker::color_edit_button_rgba(
+                                ui,
+                                &mut egui_color,
+                                egui::color_picker::Alpha::OnlyBlend,
+                            )
+                            .changed()
                             {
-                                actions.push(UiAction::SetStrokeWidthMm(
-                                    state.highlighter_stroke_width_mm,
-                                ));
+                                state.highlighter_color = egui_color.to_array();
+                                actions.push(UiAction::SetColor(state.highlighter_color));
                             }
                         });
+
+                        ui.add_space(10.0);
+
+                        // Zeile 2: Dicken-Presets
+                        ui.label(
+                            egui::RichText::new("DICKEN-PRESETS")
+                                .size(10.5)
+                                .strong()
+                                .color(egui::Color32::from_gray(160)),
+                        );
+                        ui.add_space(3.0);
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing = egui::vec2(6.0, 0.0);
+                            for (preset, label) in HIGHLIGHTER_WIDTH_PRESETS {
+                                let is_sel =
+                                    (state.highlighter_stroke_width_mm - preset).abs() < 0.1;
+                                if stroke_preview_button(
+                                    ui,
+                                    is_sel,
+                                    preset,
+                                    label,
+                                    state.highlighter_color,
+                                )
+                                .clicked()
+                                {
+                                    state.highlighter_stroke_width_mm = preset;
+                                    actions.push(UiAction::SetStrokeWidthMm(preset));
+                                }
+                            }
+                        });
+
+                        ui.add_space(10.0);
+
+                        // Zeile 3: Slider
+                        ui.label(
+                            egui::RichText::new("STUFENLOSE STÄRKE")
+                                .size(10.5)
+                                .strong()
+                                .color(egui::Color32::from_gray(160)),
+                        );
+                        ui.add_space(2.0);
+                        if ui
+                            .add(
+                                egui::Slider::new(
+                                    &mut state.highlighter_stroke_width_mm,
+                                    2.0..=16.0,
+                                )
+                                .suffix(" mm")
+                                .step_by(0.5),
+                            )
+                            .changed()
+                        {
+                            actions.push(UiAction::SetStrokeWidthMm(
+                                state.highlighter_stroke_width_mm,
+                            ));
+                        }
+                    });
 
                     frame.response.rect
                 });
@@ -1508,23 +1502,10 @@ pub fn render_ui(
                 .constrain(true)
                 .order(egui::Order::Foreground)
                 .show(ctx, |ui| {
-                    egui::Frame::none()
-                        .fill(egui::Color32::from_rgba_premultiplied(24, 24, 28, 235))
-                        .rounding(egui::Rounding::same(12.0))
-                        .stroke(egui::Stroke::new(
-                            1.0_f32,
-                            egui::Color32::from_rgba_unmultiplied(255, 255, 255, 30),
-                        ))
-                        .inner_margin(egui::Margin::symmetric(14.0, 12.0))
-                        .shadow(egui::epaint::Shadow {
-                            offset: egui::vec2(0.0, 6.0),
-                            blur: 16.0,
-                            spread: 0.0,
-                            color: egui::Color32::from_black_alpha(120),
-                        })
+                    popover_frame()
                         .show(ui, |ui| {
-                            ui.set_width(250.0);
-                            ui.spacing_mut().button_padding = egui::vec2(10.0, 7.0);
+                            ui.set_width(260.0);
+                            touch_friendly_spacing(ui);
                             let section = |ui: &mut egui::Ui, title: &str| {
                                 ui.add_space(8.0);
                                 ui.label(
@@ -1546,10 +1527,7 @@ pub fn render_ui(
                                 ui.with_layout(
                                     egui::Layout::right_to_left(egui::Align::Center),
                                     |ui| {
-                                        if ui
-                                            .add(egui::Button::new("🗙").frame(false))
-                                            .on_hover_text("Schließen")
-                                            .clicked()
+                                        if close_button(ui).clicked()
                                         {
                                             state.is_more_menu_open = false;
                                         }
@@ -1688,9 +1666,75 @@ pub fn render_ui(
                                 .add_sized([ui.available_width(), 30.0], egui::Button::new(update_label))
                                 .clicked()
                             {
+                                state.close_overlays();
                                 state.is_update_dialog_open = true;
-                                state.is_more_menu_open = false;
-                                state.is_document_menu_open = false;
+                            }
+                        })
+                        .response
+                        .rect
+                });
+            popover_rect = Some(pop_response.inner);
+        }
+    }
+
+    // 2c. SEITENAUSWAHL als Kacheln neben dem Seitenknopf
+    if state.show_page_jump_popup {
+        if let Some(btn_rect) = page_btn_rect {
+            let (pos, pivot) = popover_placement(state.sidebar_side, area_response.inner, btn_rect);
+            let pop_response = egui::Area::new(egui::Id::new("page_picker_popover"))
+                .fixed_pos(pos)
+                .pivot(pivot)
+                .constrain(true)
+                .order(egui::Order::Foreground)
+                .show(ctx, |ui| {
+                    popover_frame()
+                        .show(ui, |ui| {
+                            // Breite = Kachelraster; sonst nimmt die Kopfzeile die ganze Fensterbreite ein
+                            ui.set_width(PAGE_PICKER_COLUMNS as f32 * (PAGE_TILE.x + 8.0) - 8.0);
+                            touch_friendly_spacing(ui);
+                            let title = format!("Seiten ({})", notebook.pages.len());
+                            if dialog_header(ui, &title, true) {
+                                state.show_page_jump_popup = false;
+                            }
+                            egui::ScrollArea::vertical()
+                                .max_height(320.0)
+                                .show(ui, |ui| {
+                                    egui::Grid::new("page_picker_grid")
+                                        .spacing([8.0, 8.0])
+                                        .show(ui, |ui| {
+                                            for idx in 0..notebook.pages.len() {
+                                                let is_current = idx == notebook.current_page_index;
+                                                let label =
+                                                    egui::RichText::new(format!("{}", idx + 1))
+                                                        .size(16.0);
+                                                if ui
+                                                    .add_sized(
+                                                        [56.0, 48.0],
+                                                        egui::SelectableLabel::new(
+                                                            is_current, label,
+                                                        ),
+                                                    )
+                                                    .clicked()
+                                                {
+                                                    actions.push(UiAction::GoToPage(idx));
+                                                    state.show_page_jump_popup = false;
+                                                }
+                                                if (idx + 1) % PAGE_PICKER_COLUMNS == 0 {
+                                                    ui.end_row();
+                                                }
+                                            }
+                                        });
+                                });
+                            ui.add_space(4.0);
+                            if ui
+                                .add_sized(
+                                    [ui.available_width(), 36.0],
+                                    egui::Button::new("➕  Neue Seite anhängen"),
+                                )
+                                .clicked()
+                            {
+                                actions.push(UiAction::AddPage);
+                                state.show_page_jump_popup = false;
                             }
                         })
                         .response
@@ -1703,7 +1747,10 @@ pub fn render_ui(
     state.popover_rect = popover_rect;
 
     // Automatisches Schließen der Popover bei Klick außerhalb von Leiste und Popover
-    if (state.is_pen_menu_open || state.is_highlighter_menu_open || state.is_more_menu_open)
+    if (state.is_pen_menu_open
+        || state.is_highlighter_menu_open
+        || state.is_more_menu_open
+        || state.show_page_jump_popup)
         && ctx.input(|i| i.pointer.any_pressed())
     {
         if let Some(pos) = ctx.input(|i| i.pointer.press_origin()) {
@@ -1713,106 +1760,20 @@ pub fn render_ui(
                 state.is_pen_menu_open = false;
                 state.is_highlighter_menu_open = false;
                 state.is_more_menu_open = false;
+                state.show_page_jump_popup = false;
             }
         }
     }
 
-    // 3. Schnellauswahl-Fenster für Seiten (im gleichen Milchglas-Look)
-    if state.show_page_jump_popup {
-        egui::Window::new("Seiten-Schnellauswahl")
-            .collapsible(false)
-            .resizable(false)
-            .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 70.0))
-            .frame(
-                egui::Frame::none()
-                    .fill(egui::Color32::from_rgba_premultiplied(24, 24, 28, 235))
-                    .rounding(egui::Rounding::same(12.0))
-                    .stroke(egui::Stroke::new(
-                        1.0_f32,
-                        egui::Color32::from_rgba_unmultiplied(255, 255, 255, 30),
-                    ))
-                    .inner_margin(egui::Margin::symmetric(14.0, 12.0))
-                    .shadow(egui::epaint::Shadow {
-                        offset: egui::vec2(0.0, 6.0),
-                        blur: 16.0,
-                        spread: 0.0,
-                        color: egui::Color32::from_black_alpha(120),
-                    }),
-            )
-            .show(ctx, |ui| {
-                ui.label(
-                    egui::RichText::new(format!("Notizbuch: {} Seite(n)", notebook.pages.len()))
-                        .strong()
-                        .color(egui::Color32::WHITE),
-                );
-                ui.separator();
-
-                egui::ScrollArea::vertical()
-                    .max_height(220.0)
-                    .show(ui, |ui| {
-                        for idx in 0..notebook.pages.len() {
-                            let is_current = idx == notebook.current_page_index;
-                            let text = format!("Seite {}", idx + 1);
-                            if tool_pill_button(ui, is_current, &text, "").clicked() {
-                                actions.push(UiAction::GoToPage(idx));
-                                state.show_page_jump_popup = false;
-                            }
-                        }
-                    });
-
-                ui.separator();
-                if action_pill_button(ui, true, "Schließen", "Fenster schließen").clicked() {
-                    state.show_page_jump_popup = false;
-                }
-            });
-    }
-
     // 3b. Dokumenten-Manager (Notizbücher wechseln, anlegen, umbenennen, löschen)
     if state.is_document_menu_open {
-        let doc_win = egui::Window::new("Dokumenten-Manager")
-            .collapsible(false)
-            .resizable(false)
-            .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 70.0))
-            .frame(
-                egui::Frame::none()
-                    .fill(egui::Color32::from_rgba_premultiplied(24, 24, 28, 242))
-                    .rounding(egui::Rounding::same(14.0))
-                    .stroke(egui::Stroke::new(
-                        1.0_f32,
-                        egui::Color32::from_rgba_unmultiplied(255, 255, 255, 30),
-                    ))
-                    .inner_margin(egui::Margin::symmetric(18.0, 16.0))
-                    .shadow(egui::epaint::Shadow {
-                        offset: egui::vec2(0.0, 8.0),
-                        blur: 20.0,
-                        spread: 0.0,
-                        color: egui::Color32::from_black_alpha(140),
-                    }),
-            )
+        let doc_win = dialog_window("Dokumenten-Manager", state, false)
             .show(ctx, |ui| {
-                ui.set_width(380.0);
-
-                // Kopfzeile
-                ui.horizontal(|ui| {
-                    ui.label(
-                        egui::RichText::new("📚 Notizbücher verwalten")
-                            .strong()
-                            .size(15.0)
-                            .color(egui::Color32::WHITE),
-                    );
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui
-                            .add(egui::Button::new(egui::RichText::new("🗙").size(12.0)).frame(false))
-                            .clicked()
-                        {
-                            state.is_document_menu_open = false;
-                        }
-                    });
-                });
-
-                ui.add_space(8.0);
-                ui.separator();
-                ui.add_space(8.0);
+                ui.set_width(420.0);
+                touch_friendly_spacing(ui);
+                if dialog_header(ui, "📚 Notizbücher", true) {
+                    state.is_document_menu_open = false;
+                }
 
                 // Neues Dokument anlegen
                 ui.label(
@@ -1825,8 +1786,9 @@ pub fn render_ui(
                 ui.horizontal(|ui| {
                     let text_edit = ui.add(
                         egui::TextEdit::singleline(&mut state.new_notebook_title_input)
-                            .hint_text("Titel des Notizbuchs...")
-                            .desired_width(260.0),
+                            .hint_text("Titel des neuen Notizbuchs …")
+                            .margin(egui::vec2(8.0, 8.0))
+                            .desired_width(270.0),
                     );
                     let create_btn = ui.button(egui::RichText::new("➕ Erstellen").strong());
                     let submit = create_btn.clicked()
@@ -1863,7 +1825,8 @@ pub fn render_ui(
                             if state.renaming_notebook_id.as_deref() == Some(&summary.id) {
                                 let edit = ui.add(
                                     egui::TextEdit::singleline(&mut state.renaming_title_input)
-                                        .desired_width(230.0),
+                                        .margin(egui::vec2(8.0, 8.0))
+                                        .desired_width(260.0),
                                 );
                                 if ui.button("✔").clicked()
                                     || (edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)))
@@ -1929,14 +1892,14 @@ pub fn render_ui(
                                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                                 if summary.status == crate::storage::NotebookStatus::Damaged {
                                                     if ui
-                                                        .button(egui::RichText::new("🔄 Backup").size(11.0).color(egui::Color32::from_rgb(100, 200, 255)))
+                                                        .button(egui::RichText::new("🔄 Backup").size(13.0).color(egui::Color32::from_rgb(100, 200, 255)))
                                                         .on_hover_text("Aus manifest.json.bak wiederherstellen")
                                                         .clicked()
                                                     {
                                                         actions.push(UiAction::RestoreNotebookBackup(summary.id.clone()));
                                                     }
                                                     if ui
-                                                        .button(egui::RichText::new("📁 Ordner").size(11.0))
+                                                        .button(egui::RichText::new("📁 Ordner").size(13.0))
                                                         .on_hover_text("Pfad in Statusleiste anzeigen")
                                                         .clicked()
                                                     {
@@ -1945,14 +1908,14 @@ pub fn render_ui(
                                                 } else {
                                                     if state.available_notebooks.len() > 1
                                                         && ui
-                                                            .button(egui::RichText::new("🗑").size(11.0).color(egui::Color32::from_rgb(255, 120, 120)))
+                                                            .button(egui::RichText::new("🗑").size(16.0).color(egui::Color32::from_rgb(255, 120, 120)))
                                                             .on_hover_text("Notizbuch in Papierkorb verschieben")
                                                             .clicked()
                                                     {
                                                         actions.push(UiAction::DeleteNotebook(summary.id.clone()));
                                                     }
 
-                                                    if ui.button(egui::RichText::new("✏").size(11.0))
+                                                    if ui.button(egui::RichText::new("✏").size(16.0))
                                                         .on_hover_text("Titel umbenennen")
                                                         .clicked()
                                                     {
@@ -1986,22 +1949,13 @@ pub fn render_ui(
                                 .color(egui::Color32::from_rgb(255, 180, 100)),
                         );
                         if ui
-                            .button(egui::RichText::new("↩ Rückgängig").size(11.0).color(egui::Color32::from_rgb(100, 200, 255)))
+                            .button(egui::RichText::new("↩ Rückgängig").size(13.0).color(egui::Color32::from_rgb(100, 200, 255)))
                             .clicked()
                         {
                             actions.push(UiAction::UndoDeleteNotebook);
                         }
                     });
                 }
-
-                ui.add_space(8.0);
-                ui.separator();
-                ui.add_space(4.0);
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if action_pill_button(ui, true, "Schließen", "Dokumenten-Manager schließen").clicked() {
-                        state.is_document_menu_open = false;
-                    }
-                });
             });
         state.document_modal_rect = doc_win.map(|w| w.response.rect);
     } else {
@@ -2010,50 +1964,13 @@ pub fn render_ui(
 
     // 3c. Release- & Update-Center (Gitea Releases)
     if state.is_update_dialog_open {
-        let win = egui::Window::new("Release- & Update-Center")
-            .collapsible(false)
-            .resizable(false)
-            .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 70.0))
-            .frame(
-                egui::Frame::none()
-                    .fill(egui::Color32::from_rgba_premultiplied(24, 24, 28, 245))
-                    .rounding(egui::Rounding::same(14.0))
-                    .stroke(egui::Stroke::new(
-                        1.0_f32,
-                        egui::Color32::from_rgba_unmultiplied(255, 255, 255, 30),
-                    ))
-                    .inner_margin(egui::Margin::symmetric(20.0, 16.0))
-                    .shadow(egui::epaint::Shadow {
-                        offset: egui::vec2(0.0, 8.0),
-                        blur: 24.0,
-                        spread: 0.0,
-                        color: egui::Color32::from_black_alpha(150),
-                    }),
-            )
+        let win = dialog_window("Release- & Update-Center", state, false)
             .show(ctx, |ui| {
-                ui.set_width(450.0);
-
-                // Kopfzeile mit Schließen-Button
-                ui.horizontal(|ui| {
-                    ui.label(
-                        egui::RichText::new("🚀 Gitea Release- & Update-Center")
-                            .strong()
-                            .size(16.0)
-                            .color(egui::Color32::WHITE),
-                    );
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui
-                            .add(egui::Button::new(egui::RichText::new("🗙").size(13.0)).frame(false))
-                            .clicked()
-                        {
-                            state.is_update_dialog_open = false;
-                        }
-                    });
-                });
-
-                ui.add_space(8.0);
-                ui.separator();
-                ui.add_space(8.0);
+                ui.set_width(460.0);
+                touch_friendly_spacing(ui);
+                if dialog_header(ui, "🚀 Updates & Versionen", true) {
+                    state.is_update_dialog_open = false;
+                }
 
                 // Info über lokale Installation
                 let current_ver = env!("CARGO_PKG_VERSION");
@@ -2275,13 +2192,6 @@ pub fn render_ui(
                             });
                         }
                     });
-
-                ui.add_space(6.0);
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if action_pill_button(ui, true, "Schließen", "Fenster schließen").clicked() {
-                        state.is_update_dialog_open = false;
-                    }
-                });
             });
         state.update_modal_rect = win.map(|w| w.response.rect);
     } else {
@@ -2339,28 +2249,10 @@ pub fn render_ui(
 
     // 5. Nicht-wegklickbare Warnung bei Ladefehlern / Quarantäne (Block 1)
     if let Some(warning) = notebook.load_warnings.get(&notebook.current_page().id) {
-        egui::Window::new("⚠ Datenintegritäts-Warnung")
-            .collapsible(false)
-            .resizable(false)
-            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
-            .frame(
-                egui::Frame::none()
-                    .fill(egui::Color32::from_rgba_premultiplied(35, 20, 20, 245))
-                    .rounding(egui::Rounding::same(12.0))
-                    .stroke(egui::Stroke::new(
-                        1.5_f32,
-                        egui::Color32::from_rgb(235, 87, 87),
-                    ))
-                    .inner_margin(egui::Margin::symmetric(24.0, 20.0))
-                    .shadow(egui::epaint::Shadow {
-                        offset: egui::vec2(0.0, 8.0),
-                        blur: 24.0,
-                        spread: 0.0,
-                        color: egui::Color32::from_black_alpha(180),
-                    }),
-            )
+        dialog_window("⚠ Datenintegritäts-Warnung", state, true)
             .show(ctx, |ui| {
                 ui.set_width(420.0);
+                touch_friendly_spacing(ui);
                 ui.horizontal(|ui| {
                     ui.colored_label(egui::Color32::from_rgb(255, 80, 80), "⚠");
                     ui.label(
@@ -2428,87 +2320,66 @@ pub fn render_ui(
     // Notfall-/Sicherheits-Dialog bei Fehlschlag des Speicherns vor dem Beenden
     if let Some(err) = &state.shutdown_error {
         let mut dismiss = false;
-        egui::Window::new("⚠ Ungespeicherte Änderungen")
-            .collapsible(false)
-            .resizable(false)
-            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
-            .frame(
-                egui::Frame::none()
-                    .fill(egui::Color32::from_rgba_premultiplied(35, 20, 20, 250))
-                    .rounding(egui::Rounding::same(12.0))
-                    .stroke(egui::Stroke::new(
-                        1.5_f32,
-                        egui::Color32::from_rgb(235, 87, 87),
-                    ))
-                    .inner_margin(egui::Margin::symmetric(24.0, 20.0))
-                    .shadow(egui::epaint::Shadow {
-                        offset: egui::vec2(0.0, 8.0),
-                        blur: 24.0,
-                        spread: 0.0,
-                        color: egui::Color32::from_black_alpha(200),
-                    }),
-            )
-            .show(ctx, |ui| {
-                ui.set_width(460.0);
-                ui.horizontal(|ui| {
-                    ui.colored_label(egui::Color32::from_rgb(255, 80, 80), "⚠");
-                    ui.label(
-                        egui::RichText::new("Fehler beim Beenden")
-                            .color(egui::Color32::from_rgb(255, 100, 100))
-                            .size(16.0)
-                            .strong(),
-                    );
-                });
-                ui.add_space(8.0);
+        dialog_window("⚠ Ungespeicherte Änderungen", state, true).show(ctx, |ui| {
+            ui.set_width(460.0);
+            touch_friendly_spacing(ui);
+            ui.horizontal(|ui| {
+                ui.colored_label(egui::Color32::from_rgb(255, 80, 80), "⚠");
                 ui.label(
-                    egui::RichText::new(
-                        "Ungespeicherte Änderungen konnten nicht gesichert werden:",
-                    )
+                    egui::RichText::new("Fehler beim Beenden")
+                        .color(egui::Color32::from_rgb(255, 100, 100))
+                        .size(16.0)
+                        .strong(),
+                );
+            });
+            ui.add_space(8.0);
+            ui.label(
+                egui::RichText::new("Ungespeicherte Änderungen konnten nicht gesichert werden:")
                     .size(13.0)
                     .color(egui::Color32::WHITE),
-                );
-                ui.add_space(6.0);
-                egui::Frame::none()
-                    .fill(egui::Color32::from_black_alpha(100))
-                    .rounding(egui::Rounding::same(6.0))
-                    .inner_margin(egui::Margin::same(8.0))
-                    .show(ui, |ui| {
-                        for msg in &err.messages {
-                            ui.label(
-                                egui::RichText::new(msg)
-                                    .size(11.5)
-                                    .color(egui::Color32::from_rgb(255, 180, 180)),
-                            );
-                        }
-                    });
-                ui.add_space(8.0);
-                ui.label(
-                    egui::RichText::new("Trotzdem beenden?")
-                        .size(13.0)
-                        .color(egui::Color32::WHITE),
-                );
-                ui.add_space(12.0);
-                ui.horizontal_wrapped(|ui| {
-                    if ui.button("Abbrechen").clicked() {
-                        dismiss = true;
-                    }
-                    if ui.button("Wiederholen").clicked() {
-                        actions.push(UiAction::RetryShutdown);
-                    }
-                    if ui.button("Notfall-Export").clicked() {
-                        actions.push(UiAction::ExportRecoveryAndExit);
-                    }
-                    if ui
-                        .button(
-                            egui::RichText::new("Trotzdem beenden")
-                                .color(egui::Color32::from_rgb(255, 100, 100)),
-                        )
-                        .clicked()
-                    {
-                        actions.push(UiAction::ForceExit);
+            );
+            ui.add_space(6.0);
+            egui::Frame::none()
+                .fill(egui::Color32::from_black_alpha(100))
+                .rounding(egui::Rounding::same(6.0))
+                .inner_margin(egui::Margin::same(8.0))
+                .show(ui, |ui| {
+                    for msg in &err.messages {
+                        ui.label(
+                            egui::RichText::new(msg)
+                                .size(11.5)
+                                .color(egui::Color32::from_rgb(255, 180, 180)),
+                        );
                     }
                 });
+            ui.add_space(8.0);
+            ui.label(
+                egui::RichText::new("Trotzdem beenden?")
+                    .size(13.0)
+                    .color(egui::Color32::WHITE),
+            );
+            ui.add_space(12.0);
+            ui.horizontal_wrapped(|ui| {
+                if ui.button("Abbrechen").clicked() {
+                    dismiss = true;
+                }
+                if ui.button("Wiederholen").clicked() {
+                    actions.push(UiAction::RetryShutdown);
+                }
+                if ui.button("Notfall-Export").clicked() {
+                    actions.push(UiAction::ExportRecoveryAndExit);
+                }
+                if ui
+                    .button(
+                        egui::RichText::new("Trotzdem beenden")
+                            .color(egui::Color32::from_rgb(255, 100, 100)),
+                    )
+                    .clicked()
+                {
+                    actions.push(UiAction::ForceExit);
+                }
             });
+        });
         if dismiss {
             state.shutdown_error = None;
         }
@@ -3031,5 +2902,107 @@ mod tests {
                 "Leiste muss UI sein (Skalierung {scale})"
             );
         }
+    }
+
+    /// Simuliert einen Klick (Drücken und Loslassen) über rohe Eingabe-Ereignisse.
+    fn click_at(
+        ctx: &egui::Context,
+        state: &mut UiState,
+        notebook: &Notebook,
+        pos: egui::Pos2,
+    ) -> Vec<UiAction> {
+        let updater = crate::updater::UpdaterController::new();
+        let screen = Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(1280.0, 850.0),
+        ));
+        let mut actions = Vec::new();
+        for pressed in [true, false] {
+            let mut events = vec![egui::Event::PointerMoved(pos)];
+            events.push(egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::default(),
+            });
+            ctx.begin_frame(egui::RawInput {
+                screen_rect: screen,
+                events,
+                ..Default::default()
+            });
+            actions.extend(render_ui(
+                ctx,
+                state,
+                notebook,
+                AutosaveStatus::Saved,
+                &updater,
+            ));
+            let _ = ctx.end_frame();
+        }
+        actions
+    }
+
+    #[test]
+    fn test_only_one_dialog_or_popover_is_open() {
+        let notebook = Notebook::new();
+        let mut state = UiState::new();
+        state.show_page_jump_popup = true;
+        let ctx = render_frames(&mut state, &notebook, 10);
+        let bar = state.toolbar_rect.unwrap();
+        // Erster Knopf der Leiste (Notizbücher): Rahmenrand 6 px + halbe Knopfhöhe (≥ 28 px)
+        let books = egui::pos2(bar.center().x, bar.min.y + 6.0 + 14.0);
+        let actions = click_at(&ctx, &mut state, &notebook, books);
+        assert!(
+            state.is_document_menu_open,
+            "Dokumenten-Manager muss offen sein"
+        );
+        assert!(
+            !state.show_page_jump_popup,
+            "Seitenauswahl muss geschlossen sein"
+        );
+        assert!(actions
+            .iter()
+            .any(|a| matches!(a, UiAction::RefreshNotebooks)));
+
+        state.close_overlays();
+        assert!(!state.is_document_menu_open && !state.show_page_jump_popup);
+    }
+
+    #[test]
+    fn test_page_picker_jumps_to_every_page() {
+        let mut notebook = Notebook::new();
+        for _ in 0..5 {
+            notebook.add_page(PageBackground::Grid5mm);
+        }
+        let mut probe = UiState::new();
+        probe.show_page_jump_popup = true;
+        render_frames(&mut probe, &notebook, 10);
+        let bar = probe.toolbar_rect.unwrap();
+        let pop = probe.popover_rect.expect("Seitenauswahl muss offen sein");
+        assert!(pop.min.x > bar.max.x, "öffnet zur Blattseite hin: {pop:?}");
+        assert!(
+            pop.width() < 320.0,
+            "so breit wie das Kachelraster: {pop:?}"
+        );
+
+        let mut reached = std::collections::BTreeSet::new();
+        let mut y = pop.min.y + 4.0;
+        while y < pop.max.y {
+            let mut x = pop.min.x + 4.0;
+            while x < pop.max.x {
+                let mut state = UiState::new();
+                state.show_page_jump_popup = true;
+                let ctx = render_frames(&mut state, &notebook, 10);
+                for a in click_at(&ctx, &mut state, &notebook, egui::pos2(x, y)) {
+                    if let UiAction::GoToPage(idx) = a {
+                        reached.insert(idx);
+                        assert!(!state.show_page_jump_popup, "schließt nach der Auswahl");
+                    }
+                }
+                x += 14.0;
+            }
+            y += 14.0;
+        }
+        assert_eq!(reached, (0..6).collect(), "alle Seiten erreichbar");
     }
 }
