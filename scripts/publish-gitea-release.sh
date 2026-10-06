@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # Veröffentlicht ein Release auf dem Gitea-Server (gitea.pansi.eu)
-# Lädt .deb, .AppImage und SHA256SUMS.txt als Release-Assets hoch.
+# Lädt .deb, .AppImage und SHA256SUMS.txt idempotent als Release-Assets hoch.
 # ==============================================================================
 set -euo pipefail
 
@@ -14,13 +14,15 @@ GITEA_SERVER="${GITEA_SERVER:-https://gitea.pansi.eu}"
 REPO_OWNER="${REPO_OWNER:-harald}"
 REPO_NAME="${REPO_NAME:-ink-notes}"
 
-# Token aus Argument oder Umgebungsvariablen ermitteln
-TOKEN="${1:-${INK_NOTES_GITEA_TOKEN:-${GITEA_TOKEN:-${GITHUB_TOKEN:-}}}}"
+# Token ausschließlich aus Umgebungsvariablen ermitteln (Fallback für Legacy-Aufruf mit Argument)
+TOKEN="${INK_NOTES_GITEA_TOKEN:-${GITEA_TOKEN:-${GITHUB_TOKEN:-}}}"
+if [ -z "${TOKEN}" ] && [ -n "${1:-}" ]; then
+    TOKEN="$1"
+fi
 
 if [ -z "${TOKEN}" ]; then
     echo "FEHLER: Kein Gitea-API-Token angegeben."
-    echo "Verwendung: $0 <GITEA_API_TOKEN>"
-    echo "Oder setze die Umgebungsvariable INK_NOTES_GITEA_TOKEN."
+    echo "Bitte setze die Umgebungsvariable GITEA_TOKEN oder INK_NOTES_GITEA_TOKEN."
     exit 1
 fi
 
@@ -31,6 +33,12 @@ RELEASE_TITLE="ink-notes ${TAG_NAME}"
 DEB_FILE="${ROOT_DIR}/target/ink-notes_${VERSION}_amd64.deb"
 APPIMAGE_FILE="${ROOT_DIR}/target/ink-notes_${VERSION}_x86_64.AppImage"
 CHECKSUMS_FILE="${ROOT_DIR}/target/SHA256SUMS.txt"
+TEMPLATE_FILE="${ROOT_DIR}/packaging/release-notes.md.tmpl"
+
+if [ ! -f "${TEMPLATE_FILE}" ]; then
+    echo "FEHLER: Release-Template '${TEMPLATE_FILE}' nicht gefunden."
+    exit 1
+fi
 
 # Sicherstellen, dass die Artefakte existieren
 if [ ! -f "${DEB_FILE}" ] || [ ! -f "${APPIMAGE_FILE}" ] || [ ! -f "${CHECKSUMS_FILE}" ]; then
@@ -42,92 +50,180 @@ echo "======================================================================"
 echo "Veröffentliche Release ${TAG_NAME} auf ${GITEA_SERVER}/${REPO_OWNER}/${REPO_NAME}"
 echo "======================================================================"
 
-RELEASE_BODY=$(cat <<EOF
-## ink-notes ${TAG_NAME}
-
-Latenzoptimierte Vektor-Notizbuch- und Inking-Anwendung für Linux (Zorin OS 18 / Ubuntu 24.04).
-
-### Highlights:
-- **Zwei-Stufen-Inking-Modell**: Kausale Echtzeit-Glättung via 1€-Filter & akausale Ecken-Erhaltung (Corner Preservation)
-- **Geometrie- und Formerkennung**: Geraden, Rechtecke, Kreise, Rauten, Polygone & Koordinatensysteme (Draw-and-Hold)
-- **Viewport**: Stufenloser Zoom (25% - 500%) und Panning
-- **Multi-Dokumenten-Manager**: Unbegrenzte Notizbücher mit atomarem Autosave
-- **In-App Updater**: Automatische Versionsprüfung und Aktualisierung via Gitea Releases
-- **Vektor-PDF-Export**: Verluste freie Ausgabe für Druck und Weitergabe
-
-### Installation:
-- **Zorin OS / Ubuntu / Debian (.deb)**:
-  \`\`\`bash
-  sudo dpkg -i ink-notes_${VERSION}_amd64.deb
-  \`\`\`
-- **Portables AppImage (Alle Linux-Distributionen)**:
-  \`\`\`bash
-  chmod +x ink-notes_${VERSION}_x86_64.AppImage
-  ./ink-notes_${VERSION}_x86_64.AppImage
-  \`\`\`
-EOF
-)
-
-# 1. Release via Gitea REST API erstellen (oder ID abfragen, falls bereits existent)
-CREATE_PAYLOAD=$(python3 -c "
-import json, sys
-data = {
-    'tag_name': '${TAG_NAME}',
-    'target_commitish': 'main',
-    'name': '${RELEASE_TITLE}',
-    'body': '''${RELEASE_BODY}''',
-    'draft': False,
-    'prerelease': False
+# 1. Payload robust per Python aus Template erzeugen (verhindert Shell-Escaping-Probleme)
+PAYLOAD_FILE="$(mktemp)"
+CLEANUP_FILES=("${PAYLOAD_FILE}")
+cleanup() {
+    for f in "${CLEANUP_FILES[@]}"; do
+        rm -f "${f}"
+    done
 }
-print(json.dumps(data))
-")
+trap cleanup EXIT
+
+RELEASE_VERSION="${VERSION}" RELEASE_TAG="${TAG_NAME}" RELEASE_TITLE="${RELEASE_TITLE}" \
+python3 -c '
+import json, os, sys
+
+template_path = sys.argv[1]
+with open(template_path, "r", encoding="utf-8") as f:
+    template_content = f.read()
+
+version = os.environ.get("RELEASE_VERSION", "")
+tag = os.environ.get("RELEASE_TAG", "")
+title = os.environ.get("RELEASE_TITLE", "")
+
+body = template_content.replace("{{VERSION}}", version).replace("{{TAG_NAME}}", tag)
+
+payload = {
+    "tag_name": tag,
+    "target_commitish": "main",
+    "name": title,
+    "body": body,
+    "draft": False,
+    "prerelease": False
+}
+print(json.dumps(payload))
+' "${TEMPLATE_FILE}" > "${PAYLOAD_FILE}"
 
 API_BASE="${GITEA_SERVER}/api/v1/repos/${REPO_OWNER}/${REPO_NAME}"
 
-echo "Erstelle Release über Gitea API..."
-HTTP_RESPONSE=$(curl -s -w "\nHTTP_STATUS:%{http_code}" \
-    -X POST "${API_BASE}/releases" \
-    -H "Accept: application/json" \
-    -H "Content-Type: application/json" \
-    -H "Authorization: token ${TOKEN}" \
-    -d "${CREATE_PAYLOAD}")
+# 2. Prüfen, ob Release bereits existiert (Idempotenz)
+echo "Prüfe bestehende Releases auf ${GITEA_SERVER}..."
+TAG_RESP_FILE="$(mktemp)"
+CLEANUP_FILES+=("${TAG_RESP_FILE}")
 
-HTTP_STATUS=$(echo "${HTTP_RESPONSE}" | grep "HTTP_STATUS:" | cut -d':' -f2)
-RESPONSE_BODY=$(echo "${HTTP_RESPONSE}" | sed '/HTTP_STATUS:/d')
+HTTP_STATUS=$(curl -s -S -o "${TAG_RESP_FILE}" -w "%{http_code}" \
+    -X GET "${API_BASE}/releases/tags/${TAG_NAME}" \
+    -H "Accept: application/json" \
+    -H "Authorization: token ${TOKEN}" || echo "000")
 
 RELEASE_ID=""
-if [ "${HTTP_STATUS}" -eq 201 ]; then
-    RELEASE_ID=$(echo "${RESPONSE_BODY}" | python3 -c "import sys, json; print(json.load(sys.stdin)['id'])")
-    echo "Release erfolgreich angelegt (ID: ${RELEASE_ID})!"
-else
-    echo "Release existiert womöglich bereits (Status ${HTTP_STATUS}). Suche bestehendes Release..."
-    EXISTING_RELEASE=$(curl -fsSL \
-        -H "Accept: application/json" \
-        -H "Authorization: token ${TOKEN}" \
-        "${API_BASE}/releases/tags/${TAG_NAME}" || true)
-    if [ -n "${EXISTING_RELEASE}" ]; then
-        RELEASE_ID=$(echo "${EXISTING_RELEASE}" | python3 -c "import sys, json; print(json.load(sys.stdin).get('id', ''))")
-    fi
-fi
 
-if [ -z "${RELEASE_ID}" ]; then
-    echo "FEHLER: Konnte Release nicht erstellen oder abfragen. Serverantwort:"
-    echo "${RESPONSE_BODY}"
+if [ "${HTTP_STATUS}" = "200" ]; then
+    RELEASE_ID=$(python3 -c '
+import sys, json
+try:
+    data = json.load(open(sys.argv[1]))
+    print(data.get("id", ""))
+except Exception:
+    pass
+' "${TAG_RESP_FILE}")
+    echo "Release ${TAG_NAME} existiert bereits (ID: ${RELEASE_ID}). Aktualisiere Release-Notizen..."
+    PATCH_STATUS=$(curl -s -S -o /dev/null -w "%{http_code}" \
+        -X PATCH "${API_BASE}/releases/${RELEASE_ID}" \
+        -H "Accept: application/json" \
+        -H "Content-Type: application/json" \
+        -H "Authorization: token ${TOKEN}" \
+        -d @"${PAYLOAD_FILE}" || echo "000")
+    if [ "${PATCH_STATUS}" != "200" ]; then
+        echo "Hinweis: Aktualisierung der Metadaten ergab HTTP ${PATCH_STATUS}."
+    fi
+elif [ "${HTTP_STATUS}" = "404" ]; then
+    echo "Release existiert noch nicht. Erstelle neues Release ${TAG_NAME}..."
+    CREATE_RESP_FILE="$(mktemp)"
+    CLEANUP_FILES+=("${CREATE_RESP_FILE}")
+    CREATE_STATUS=$(curl -s -S -o "${CREATE_RESP_FILE}" -w "%{http_code}" \
+        -X POST "${API_BASE}/releases" \
+        -H "Accept: application/json" \
+        -H "Content-Type: application/json" \
+        -H "Authorization: token ${TOKEN}" \
+        -d @"${PAYLOAD_FILE}" || echo "000")
+
+    if [ "${CREATE_STATUS}" = "201" ]; then
+        RELEASE_ID=$(python3 -c '
+import sys, json
+try:
+    data = json.load(open(sys.argv[1]))
+    print(data.get("id", ""))
+except Exception:
+    pass
+' "${CREATE_RESP_FILE}")
+        echo "Release erfolgreich angelegt (ID: ${RELEASE_ID})!"
+    else
+        echo "FEHLER: Release konnte nicht angelegt werden (HTTP ${CREATE_STATUS})."
+        cat "${CREATE_RESP_FILE}"
+        exit 1
+    fi
+else
+    echo "FEHLER: Unerwartete Serverantwort beim Abfragen des Release-Tags (HTTP ${HTTP_STATUS})."
+    cat "${TAG_RESP_FILE}"
     exit 1
 fi
 
-# 2. Assets hochladen
+if [ -z "${RELEASE_ID}" ]; then
+    echo "FEHLER: Keine gültige Release-ID ermittelt."
+    exit 1
+fi
+
+# 3. Vorhandene Assets auflisten (um Dubletten vor Upload sauber zu löschen)
+ASSETS_LIST_FILE="$(mktemp)"
+CLEANUP_FILES+=("${ASSETS_LIST_FILE}")
+
+LIST_STATUS=$(curl -s -S -o "${ASSETS_LIST_FILE}" -w "%{http_code}" \
+    -X GET "${API_BASE}/releases/${RELEASE_ID}/assets" \
+    -H "Accept: application/json" \
+    -H "Authorization: token ${TOKEN}" || echo "000")
+
+if [ "${LIST_STATUS}" != "200" ]; then
+    echo "Hinweis: Konnte bestehende Assets nicht abrufen (HTTP ${LIST_STATUS})."
+fi
+
 upload_asset() {
     local file_path="$1"
-    local filename="$(basename "${file_path}")"
+    local filename
+    filename="$(basename "${file_path}")"
+
+    # Asset-Namen in URL URL-kodieren
+    local encoded_name
+    encoded_name=$(python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1]))' "${filename}")
+
+    # Prüfen, ob bereits ein Asset mit demselben Namen existiert
+    local existing_id=""
+    if [ -f "${ASSETS_LIST_FILE}" ] && [ -s "${ASSETS_LIST_FILE}" ]; then
+        existing_id=$(python3 -c '
+import sys, json
+try:
+    assets = json.load(open(sys.argv[1]))
+    target = sys.argv[2]
+    for a in assets:
+        if a.get("name") == target:
+            print(a.get("id", ""))
+            break
+except Exception:
+    pass
+' "${ASSETS_LIST_FILE}" "${filename}")
+    fi
+
+    if [ -n "${existing_id}" ]; then
+        echo "Lösche bestehendes Asset '${filename}' (ID: ${existing_id}) vor Re-Upload..."
+        local del_status
+        del_status=$(curl -s -S -o /dev/null -w "%{http_code}" \
+            -X DELETE "${API_BASE}/releases/${RELEASE_ID}/assets/${existing_id}" \
+            -H "Authorization: token ${TOKEN}" || echo "000")
+        if [ "${del_status}" != "204" ] && [ "${del_status}" != "200" ]; then
+            echo "Warnung: Löschen von bestehendem Asset '${filename}' ergab HTTP ${del_status}."
+        fi
+    fi
+
     echo "Lade Asset hoch: ${filename}..."
-    curl -fsSL \
-        -X POST "${API_BASE}/releases/${RELEASE_ID}/assets?name=${filename}" \
+    local upload_res_file="$(mktemp)"
+    CLEANUP_FILES+=("${upload_res_file}")
+
+    local upload_status
+    upload_status=$(curl -s -S -o "${upload_res_file}" -w "%{http_code}" \
+        -X POST "${API_BASE}/releases/${RELEASE_ID}/assets?name=${encoded_name}" \
         -H "Accept: application/json" \
         -H "Authorization: token ${TOKEN}" \
         -H "Content-Type: application/octet-stream" \
-        --data-binary "@${file_path}" > /dev/null
-    echo "✓ ${filename} erfolgreich hochgeladen."
+        --data-binary "@${file_path}" || echo "000")
+
+    if [ "${upload_status}" = "201" ]; then
+        echo "✓ ${filename} erfolgreich hochgeladen."
+    else
+        echo "FEHLER: Asset-Upload für '${filename}' fehlgeschlagen (HTTP ${upload_status})."
+        cat "${upload_res_file}"
+        exit 1
+    fi
 }
 
 upload_asset "${DEB_FILE}"

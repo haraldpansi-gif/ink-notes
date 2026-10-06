@@ -1,0 +1,22 @@
+## ink-notes {{TAG_NAME}}
+
+Latenzoptimierte Vektor-Notizbuch- und Inking-Anwendung für Linux (Zorin OS 18 / Ubuntu 24.04).
+
+### Highlights:
+- **Zwei-Stufen-Inking-Modell**: Kausale Echtzeit-Glättung via 1€-Filter & akausale Ecken-Erhaltung (Corner Preservation)
+- **Geometrie- und Formerkennung**: Geraden, Rechtecke, Kreise, Rauten, Polygone & Koordinatensysteme (Draw-and-Hold)
+- **Viewport**: Stufenloser Zoom (25% - 500%) und Panning
+- **Multi-Dokumenten-Manager**: Unbegrenzte Notizbücher mit atomarem Autosave
+- **In-App Updater**: Automatische Versionsprüfung und Aktualisierung via Gitea Releases
+- **Vektor-PDF-Export**: Verlustfreie Ausgabe für Druck und Weitergabe
+
+### Installation:
+- **Zorin OS / Ubuntu / Debian (.deb)**:
+  ```bash
+  sudo dpkg -i ink-notes_{{VERSION}}_amd64.deb
+  ```
+- **Portables AppImage (Alle Linux-Distributionen)**:
+  ```bash
+  chmod +x ink-notes_{{VERSION}}_x86_64.AppImage
+  ./ink-notes_{{VERSION}}_x86_64.AppImage
+  ```
