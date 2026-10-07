@@ -1012,6 +1012,10 @@ impl Page {
     }
 }
 
+/// Höhe des Bereichs am unteren Rand der letzten Seite, in dem Schreiben in der
+/// durchgehenden Ansicht automatisch eine neue Seite anhängt.
+pub const AUTO_APPEND_ZONE: f32 = PAGE_HEIGHT * 0.2;
+
 /// Das Notizbuch mit diskreter Seitenverwaltung und Navigation.
 #[derive(Debug, Clone)]
 pub struct Notebook {
@@ -1101,6 +1105,20 @@ impl Notebook {
         self.next_page_id += 1;
         self.pages.push(Page::new(id, background));
         self.pages.len() - 1
+    }
+
+    /// Durchgehende Ansicht: Reicht ein neuer Strich auf der letzten Seite bis in deren
+    /// unteres Fünftel ([`AUTO_APPEND_ZONE`]), wird darunter eine leere Seite mit gleichem
+    /// Hintergrund angehängt. `true`, wenn eine Seite angehängt wurde.
+    pub fn append_page_if_writing_at_end(&mut self, stroke_bottom: f32) -> bool {
+        if self.current_page_index + 1 != self.pages.len()
+            || stroke_bottom < PAGE_HEIGHT - AUTO_APPEND_ZONE
+        {
+            return false;
+        }
+        let background = self.current_page().background;
+        self.add_page(background);
+        true
     }
 
     /// Wechselt zur nächsten Seite (PageDown / N). Hängt automatisch eine neue Seite an, falls am Ende.
@@ -1747,6 +1765,23 @@ mod tests {
             12.0,
             EraserMode::Partial
         ));
+    }
+
+    #[test]
+    fn test_append_page_when_writing_at_bottom_of_last_page() {
+        let mut nb = Notebook::new();
+        nb.current_page_mut().background = PageBackground::Lined;
+        // Oben auf der Seite: nichts
+        assert!(!nb.append_page_if_writing_at_end(PAGE_HEIGHT * 0.5));
+        assert_eq!(nb.pages.len(), 1);
+        // Unten: neue Seite mit gleichem Hintergrund, die aktuelle Seite bleibt
+        assert!(nb.append_page_if_writing_at_end(PAGE_HEIGHT - 10.0));
+        assert_eq!(nb.pages.len(), 2);
+        assert_eq!(nb.current_page_index, 0);
+        assert_eq!(nb.pages[1].background, PageBackground::Lined);
+        // Nicht auf der letzten Seite: nichts
+        assert!(!nb.append_page_if_writing_at_end(PAGE_HEIGHT - 10.0));
+        assert_eq!(nb.pages.len(), 2);
     }
 
     #[test]

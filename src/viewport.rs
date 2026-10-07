@@ -3,12 +3,53 @@
 //! Berechnet die affine Transformation zwischen Bildschirmkoordinaten (Window-Pixel),
 //! virtuellen DIN-A4-Seitenkoordinaten ([0, 2100] x [0, 2970]) und dem GPU-NDC-Raum ([-1, 1]).
 
-use crate::document::{PageViewport, PAGE_HEIGHT, PAGE_WIDTH};
+use crate::document::{PageViewport, PAGE_HEIGHT, PAGE_WIDTH, UNITS_PER_MM};
 use glam::{Mat4, Vec2, Vec4};
 
 /// Minimaler und maximaler Zoomfaktor.
 pub const MIN_ZOOM: f32 = 0.25;
 pub const MAX_ZOOM: f32 = 5.0;
+
+/// Abstand zwischen zwei Seiten in der durchgehenden Ansicht (8 mm).
+pub const PAGE_GAP: f32 = 8.0 * UNITS_PER_MM;
+/// Vertikaler Abstand gleicher Punkte zweier aufeinanderfolgender Seiten.
+pub const PAGE_PITCH: f32 = PAGE_HEIGHT + PAGE_GAP;
+/// Höchstens so viele Nachbarseiten werden gleichzeitig dargestellt.
+pub const MAX_NEIGHBOR_PAGES: usize = 12;
+
+/// Durchgehende Ansicht: Die Seiten hängen untereinander, Koordinaten beziehen sich auf die
+/// aktuelle Seite. Liefert den Versatz (in Seiten) der Seite, auf der die Höhe `y` liegt,
+/// oder `None` im Zwischenraum zweier Seiten.
+pub fn page_offset_at(y: f32) -> Option<i64> {
+    let k = (y / PAGE_PITCH).floor();
+    (y - k * PAGE_PITCH <= PAGE_HEIGHT).then_some(k as i64)
+}
+
+/// Versätze der Seiten, die zwischen den Höhen `top` und `bottom` (Koordinaten der aktuellen
+/// Seite) sichtbar sind, begrenzt auf die Seitenindizes `0..page_count` und ohne die aktuelle
+/// Seite selbst.
+pub fn visible_neighbor_offsets(
+    top: f32,
+    bottom: f32,
+    current: usize,
+    page_count: usize,
+) -> Vec<i64> {
+    if !(top.is_finite() && bottom.is_finite()) || bottom < top {
+        return Vec::new();
+    }
+    let first = (top / PAGE_PITCH).floor().max(-(current as f32)) as i64;
+    let last = (bottom / PAGE_PITCH)
+        .floor()
+        .min((page_count as f32) - 1.0 - current as f32) as i64;
+    let mut offsets: Vec<i64> = (first..=last).filter(|&k| k != 0).collect();
+    // Sehr weit herausgezoomt: nur die nächstgelegenen Seiten
+    if offsets.len() > MAX_NEIGHBOR_PAGES {
+        offsets.sort_by_key(|k| k.unsigned_abs());
+        offsets.truncate(MAX_NEIGHBOR_PAGES);
+        offsets.sort_unstable();
+    }
+    offsets
+}
 
 /// Verwaltet den Viewport-Kamerazustand für stufenlosen Zoom und Pan.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -37,6 +78,35 @@ impl ViewportState {
     pub fn reset(&mut self) {
         self.zoom = 1.0;
         self.pan_offset = [0.0, 0.0];
+    }
+
+    /// Durchgehende Ansicht: Die Seite `k` Seiten weiter wird zur Bezugsseite, ohne dass sich
+    /// der Bildausschnitt bewegt.
+    pub fn shift_reference_page(&mut self, k: i64) {
+        self.pan_offset[1] += k as f32 * PAGE_PITCH;
+    }
+
+    /// Durchgehende Ansicht: Verschiebt den Ausschnitt so, dass der Bildschirmpunkt `center`
+    /// über dem Notizbuch liegt (zwischen Oberkante der ersten und Unterkante der letzten
+    /// Seite, waagerecht innerhalb der Seitenbreite). `true`, wenn korrigiert wurde.
+    pub fn clamp_continuous_center(
+        &mut self,
+        center: [f32; 2],
+        current: usize,
+        page_count: usize,
+        page_viewport: &PageViewport,
+    ) -> bool {
+        let c = self.screen_to_page_unclamped(center[0], center[1], page_viewport);
+        let top = -(current as f32) * PAGE_PITCH;
+        let bottom = page_count.saturating_sub(1 + current) as f32 * PAGE_PITCH + PAGE_HEIGHT;
+        let clamped = Vec2::new(c.x.clamp(0.0, PAGE_WIDTH), c.y.clamp(top, bottom.max(top)));
+        if (clamped - c).length() < 1e-3 {
+            return false;
+        }
+        // Bildschirm = Viewport + (Seite + Pan) · Maßstab: der Pan gleicht die Differenz aus
+        self.pan_offset[0] += c.x - clamped.x;
+        self.pan_offset[1] += c.y - clamped.y;
+        true
     }
 
     /// Passt den Pan-Offset um eine Bildschirmverschiebung (in Fensterpixeln) an.
@@ -189,6 +259,67 @@ impl ViewportState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_continuous_layout() {
+        assert_eq!(page_offset_at(100.0), Some(0));
+        assert_eq!(page_offset_at(PAGE_HEIGHT + PAGE_GAP / 2.0), None);
+        assert_eq!(page_offset_at(PAGE_PITCH + 5.0), Some(1));
+        assert_eq!(page_offset_at(-5.0), None);
+        assert_eq!(page_offset_at(-PAGE_GAP - 5.0), Some(-1));
+
+        // Ende von Seite 2 und Anfang von Seite 3 sichtbar (aktuell: Seite 2 von 5)
+        assert_eq!(
+            visible_neighbor_offsets(PAGE_HEIGHT - 500.0, PAGE_PITCH + 500.0, 1, 5),
+            vec![1]
+        );
+        // Ganz oben im Notizbuch: keine Seite vor der ersten
+        assert!(visible_neighbor_offsets(-PAGE_PITCH * 3.0, 500.0, 0, 5).is_empty());
+        // Hinter der letzten Seite: keine weiteren
+        assert_eq!(
+            visible_neighbor_offsets(-PAGE_PITCH, PAGE_PITCH * 4.0, 3, 5),
+            vec![-1, 1]
+        );
+        // Weit herausgezoomt: auf die nächstgelegenen Seiten begrenzt
+        let many = visible_neighbor_offsets(-PAGE_PITCH * 50.0, PAGE_PITCH * 50.0, 50, 200);
+        assert_eq!(many.len(), MAX_NEIGHBOR_PAGES);
+        assert!(many.iter().all(|k| k.unsigned_abs() <= 6));
+    }
+
+    #[test]
+    fn test_shift_reference_page_keeps_view() {
+        let mut vp = ViewportState::new();
+        let page_vp = PageViewport::calculate(1920.0, 1080.0, 24.0);
+        vp.pan_by_screen_delta(0.0, -900.0, &page_vp);
+        // Punkt oben auf der nächsten Seite, in Koordinaten der aktuellen Seite
+        let before = vp.page_to_screen(300.0, PAGE_PITCH + 200.0, &page_vp);
+        vp.shift_reference_page(1);
+        let after = vp.page_to_screen(300.0, 200.0, &page_vp);
+        assert!((before[0] - after[0]).abs() < 0.01 && (before[1] - after[1]).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_continuous_scroll_stays_on_the_notebook() {
+        let page_vp = PageViewport::calculate(1280.0, 850.0, 24.0);
+        let center = [640.0, 425.0];
+        let mut vp = ViewportState::new();
+        // Mitte der Seite: nichts zu korrigieren
+        assert!(!vp.clamp_continuous_center(center, 1, 3, &page_vp));
+        // Weit über die erste Seite hinaus nach oben gescrollt (aktuell: Seite 2 von 3)
+        vp.pan_by_screen_delta(0.0, 5000.0, &page_vp);
+        assert!(vp.clamp_continuous_center(center, 1, 3, &page_vp));
+        let c = vp.screen_to_page_unclamped(center[0], center[1], &page_vp);
+        assert!(
+            (c.y + PAGE_PITCH).abs() < 0.1,
+            "Oberkante der ersten Seite: {c:?}"
+        );
+        // Weit nach unten: Unterkante der letzten Seite
+        vp.pan_by_screen_delta(-3000.0, -20000.0, &page_vp);
+        assert!(vp.clamp_continuous_center(center, 1, 3, &page_vp));
+        let c = vp.screen_to_page_unclamped(center[0], center[1], &page_vp);
+        assert!((c.y - (PAGE_PITCH + PAGE_HEIGHT)).abs() < 0.1, "{c:?}");
+        assert!((c.x - PAGE_WIDTH).abs() < 0.1, "{c:?}");
+    }
 
     #[test]
     fn test_viewport_zoom_limits() {

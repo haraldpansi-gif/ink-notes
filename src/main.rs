@@ -32,6 +32,7 @@ use ink_notes::settings::{SidebarSide, UiSettings};
 use ink_notes::storage::{self, NotebookManifest};
 use ink_notes::ui::{self, ActiveTool, UiAction, UiState};
 use ink_notes::updater::UpdaterController;
+use ink_notes::viewport::PAGE_PITCH;
 
 /// Aktualisiert den Fenstertitel als minimales On-Screen-Display (OSD) inklusive Autosave-Status.
 /// Speichert die UI-Einstellungen; ein Fehler wird gemeldet, bricht aber nichts ab.
@@ -151,11 +152,19 @@ fn commit_stroke_to_notebook(
 
     if let Some(mut stroke) = stroke_opt {
         stroke.tool = ui_state.active_tool.stroke_tool(stroke.shape.is_some());
+        let stroke_bottom = stroke.aabb.max.y;
         let page = notebook.current_page_mut();
         page.add_stroke(stroke);
         canvas.sync_page(page);
         manifest.next_stroke_id = notebook.next_stroke_id;
         autosave.mark_dirty(notebook, manifest);
+        // Durchgehende Ansicht: unten auf der letzten Seite geht es auf einer neuen weiter
+        if ui_state.continuous_scroll && notebook.append_page_if_writing_at_end(stroke_bottom) {
+            manifest.sync_from_notebook(notebook);
+            if let Some(new_page) = notebook.pages.last() {
+                autosave.mark_page_dirty(new_page, manifest);
+            }
+        }
         update_window_title(
             window,
             notebook,
@@ -165,6 +174,83 @@ fn commit_stroke_to_notebook(
         );
         window.request_redraw();
     }
+}
+
+/// Macht die Seite `index` zur aktuellen: lädt sie bei Bedarf und aktualisiert GPU-Puffer,
+/// Manifest und Fenstertitel. Mit `keep_view` (durchgehende Ansicht) bleibt der Bildausschnitt
+/// samt Lineal stehen, sonst erscheint die neue Seite an der Stelle der alten.
+#[allow(clippy::too_many_arguments)]
+fn switch_to_page(
+    index: usize,
+    keep_view: bool,
+    canvas: &mut CanvasState,
+    notebook: &mut Notebook,
+    manifest: &mut NotebookManifest,
+    autosave: &mut AutosaveController,
+    storage_dir: &Path,
+    selection_state: &mut SelectionState,
+    ui_state: &mut UiState,
+    window: &Window,
+) {
+    let current = notebook.current_page_index;
+    if index >= notebook.pages.len() || index == current {
+        return;
+    }
+    if keep_view {
+        let k = index as i64 - current as i64;
+        canvas.shift_reference_page(k);
+        if let Some(ruler) = &mut ui_state.ruler {
+            ruler.center.y -= k as f32 * PAGE_PITCH;
+        }
+        canvas.ruler = ui_state.ruler;
+    }
+    selection_state.clear();
+    notebook.current_page_index = index;
+    let _ = storage::ensure_page_loaded(storage_dir, notebook, index);
+    canvas.sync_page(notebook.current_page_mut());
+    manifest.sync_from_notebook(notebook);
+    autosave.mark_manifest_dirty(manifest);
+    update_window_title(
+        window,
+        notebook,
+        manifest,
+        ui_state.active_tool,
+        autosave.status(),
+    );
+    window.request_redraw();
+}
+
+/// Durchgehende Ansicht: Index der Seite unter dem Bildschirmpunkt, falls dort eine andere
+/// als die aktuelle Seite liegt und kein Griff der Auswahl getroffen wird. Zeichnen,
+/// Radieren und Auswählen wechseln dann zuerst auf diese Seite.
+fn page_to_focus(
+    canvas: &CanvasState,
+    notebook: &Notebook,
+    ui_state: &UiState,
+    selection_state: &SelectionState,
+    pixels_per_point: f32,
+    (sx, sy): (f32, f32),
+) -> Option<usize> {
+    if !ui_state.continuous_scroll {
+        return None;
+    }
+    let k = canvas.page_offset_at_screen(sx, sy).filter(|&k| k != 0)?;
+    let index = usize::try_from(notebook.current_page_index as i64 + k).ok()?;
+    if index >= notebook.pages.len() {
+        return None;
+    }
+    let grabs_selection = ui_state.active_tool == ActiveTool::Select
+        && !selection_state.is_empty()
+        && !matches!(
+            selection_state.hit_test_handles(
+                notebook.current_page(),
+                canvas,
+                Vec2::new(sx, sy),
+                pixels_per_point
+            ),
+            SelectionHandleHit::None
+        );
+    (!grabs_selection).then_some(index)
 }
 
 /// Zwischenablage: interne Objekte (Strg+C in ink-notes) und Bilder aus der
@@ -618,6 +704,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ui_state.paper_theme = ui_settings.paper_theme;
     ui_state.adapt_ink_colors = ui_settings.adapt_ink_colors;
     ui_state.pressure_curve = ui_settings.pressure_curve;
+    ui_state.continuous_scroll = ui_settings.continuous_scroll;
     ui_state.current_notebook_id = manifest.id.clone();
     ui_state.document_title = manifest.title.clone();
     ui_state.available_notebooks = available_notebooks;
@@ -727,7 +814,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  Strg + C / V   : Ausgewählte Objekte kopieren & einfügen");
     println!("  Entf/Backspace : Ausgewählte Objekte löschen (Undo mit Strg+Z)");
     println!("Tastatur- & Maus-Shortcuts:");
-    println!("  Mausrad        : Stufenloser Zoom zentriert auf Cursor");
+    println!("  Mausrad        : Scrollen (durchgehende Ansicht), sonst Zoom");
+    println!("  Strg + Mausrad : Stufenloser Zoom zentriert auf Cursor");
     println!("  Mittlere Taste : Canvas verschieben (Pan)");
     println!("  Leertaste+Drag : Canvas verschieben (Pan)");
     println!("  Strg + 0       : Zoom zurücksetzen (100% zentriert)");
@@ -737,6 +825,38 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  Strg + S       : Jetzt speichern (Disk Flush)");
     println!("  ESC            : Dialoge / Menüs schließen oder Selektion aufheben");
     println!("  Strg + Q       : Beenden (mit sicherem Disk-Flush)");
+
+    // Durchgehende Ansicht: Scrollposition beim letzten Abgleich der aktuellen Seite (Zoom,
+    // Pan unabhängig von der Bezugsseite)
+    let mut last_scroll: Option<[f32; 3]> = None;
+
+    // Durchgehende Ansicht: vor Zeichnen, Radieren oder Auswählen auf die Seite unter dem
+    // Bildschirmpunkt wechseln
+    macro_rules! focus_page_at {
+        ($pos:expr) => {
+            if let Some(index) = page_to_focus(
+                &canvas,
+                &notebook,
+                &ui_state,
+                &selection_state,
+                egui_ctx.pixels_per_point(),
+                $pos,
+            ) {
+                switch_to_page(
+                    index,
+                    true,
+                    &mut canvas,
+                    &mut notebook,
+                    &mut manifest,
+                    &mut autosave,
+                    &storage_dir,
+                    &mut selection_state,
+                    &mut ui_state,
+                    &window,
+                );
+            }
+        };
+    }
 
     event_loop.run(move |event, target| {
         match event {
@@ -860,6 +980,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         }
 
                                         if is_erasing {
+                                            focus_page_at!((sx, sy));
                                             if let Some(page_pt) = canvas.screen_to_page(sx, sy) {
                                                 if notebook.erase_at(page_pt,
                                                     eraser_radius,
@@ -918,6 +1039,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             continue;
                                         }
 
+                                        focus_page_at!((sx, sy));
                                         let should_erase = tool_is_hardware_eraser
                                             || stylus_barrel_pressed
                                             || ui_state.active_tool == ActiveTool::Eraser;
@@ -1563,6 +1685,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     return;
                                 }
 
+                                focus_page_at!(cursor_screen_pos);
                                 if is_eraser_action {
                                     is_erasing = true;
                                     let (sx, sy) = cursor_screen_pos;
@@ -1832,6 +1955,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     }
                                 }
                             } else if is_erasing {
+                                focus_page_at!((sx, sy));
                                 if let Some(page_pt) = canvas.screen_to_page(sx, sy) {
                                     if notebook.erase_at(page_pt, eraser_radius, stroke_max_radius, ui_state.eraser_mode) {
                                         canvas.sync_page(notebook.current_page_mut());
@@ -1861,6 +1985,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                     WindowEvent::MouseWheel { delta, .. } => {
                         if is_pointer_in_ui {
+                            return;
+                        }
+                        // Durchgehende Ansicht: Mausrad scrollt (mit Umschalt waagerecht),
+                        // Strg + Mausrad zoomt
+                        if ui_state.continuous_scroll && !modifiers.control_key() {
+                            let (mut dx, mut dy) = match delta {
+                                MouseScrollDelta::LineDelta(x, y) => {
+                                    let line = 60.0 * window.scale_factor() as f32;
+                                    (x * line, y * line)
+                                }
+                                MouseScrollDelta::PixelDelta(pos) => (pos.x as f32, pos.y as f32),
+                            };
+                            if modifiers.shift_key() && dx == 0.0 {
+                                (dx, dy) = (dy, 0.0);
+                            }
+                            canvas.pan(dx, dy);
+                            window.request_redraw();
                             return;
                         }
                         let zoom_factor = match delta {
@@ -1967,6 +2108,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         touch_pan_last_pos = (tx, ty);
                                     } else {
                                         // Modus Finger-Zeichnen aktiv
+                                        focus_page_at!((tx, ty));
                                         if is_eraser_action {
                                             is_erasing = true;
                                             if let Some(page_pt) = canvas.screen_to_page(tx, ty) {
@@ -2108,6 +2250,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             window.request_redraw();
                                         }
                                     } else if is_erasing {
+                                        focus_page_at!((tx, ty));
                                         if let Some(page_pt) = canvas.screen_to_page(tx, ty) {
                                             if notebook.erase_at(page_pt, eraser_radius, stroke_max_radius, ui_state.eraser_mode) {
                                                 canvas.sync_page(notebook.current_page_mut());
@@ -2248,6 +2391,48 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
 
                     WindowEvent::RedrawRequested => {
+                        // 0. Durchgehende Ansicht: Nach dem Scrollen oder Zoomen wird die Seite in
+                        //    der Fenstermitte zur aktuellen (nicht während eines Strichs, einer
+                        //    Auswahl oder beim Ziehen des Lineals). Wer auf einer Nachbarseite
+                        //    schreibt, bleibt dort, bis wieder gescrollt wird (Undo betrifft sie).
+                        if ui_state.continuous_scroll {
+                            canvas.clamp_scroll(notebook.current_page_index, notebook.pages.len());
+                            let scroll = [
+                                canvas.camera.zoom,
+                                canvas.camera.pan_offset[0],
+                                canvas.camera.pan_offset[1]
+                                    - notebook.current_page_index as f32 * PAGE_PITCH,
+                            ];
+                            let scrolled = last_scroll
+                                .is_none_or(|last: [f32; 3]| last.iter().zip(scroll).any(|(a, b)| (a - b).abs() > 1e-3));
+                            let busy = is_drawing
+                                || is_erasing
+                                || !selection_state.is_empty()
+                                || selection_state.drag_mode != DragMode::None
+                                || ui_state.ruler_drag.is_some();
+                            if scrolled && !busy {
+                                last_scroll = Some(scroll);
+                                let target = canvas
+                                    .page_offset_at_view_center()
+                                    .filter(|&k| k != 0)
+                                    .and_then(|k| usize::try_from(notebook.current_page_index as i64 + k).ok());
+                                if let Some(index) = target {
+                                    switch_to_page(
+                                        index,
+                                        true,
+                                        &mut canvas,
+                                        &mut notebook,
+                                        &mut manifest,
+                                        &mut autosave,
+                                        &storage_dir,
+                                        &mut selection_state,
+                                        &mut ui_state,
+                                        &window,
+                                    );
+                                }
+                            }
+                        }
+
                         // 1. egui Eingabe erfassen und Frame starten
                         let raw_input = egui_winit_state.take_egui_input(&window);
                         egui_ctx.begin_frame(raw_input);
@@ -2851,6 +3036,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     save_ui_settings(&ui_settings, ui_settings_path.as_deref(), &mut ui_state);
                                     window.request_redraw();
                                 }
+                                UiAction::SetContinuousScroll(on) => {
+                                    ui_settings.continuous_scroll = on;
+                                    save_ui_settings(&ui_settings, ui_settings_path.as_deref(), &mut ui_state);
+                                    window.request_redraw();
+                                }
                                 UiAction::SavePressureCurve(curve) => {
                                     ui_settings.pressure_curve = curve;
                                     save_ui_settings(&ui_settings, ui_settings_path.as_deref(), &mut ui_state);
@@ -2893,6 +3083,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
 
                         // 5. Canvas (Pass 1) und egui UI (Pass 2) in Surface-Textur rendern
+                        //    Durchgehende Ansicht: sichtbare Nachbarseiten laden und mitzeichnen
+                        if ui_state.continuous_scroll {
+                            let current = notebook.current_page_index;
+                            let visible: Vec<(i64, usize)> = canvas
+                                .visible_neighbor_offsets(current, notebook.pages.len())
+                                .into_iter()
+                                .map(|k| (k, (current as i64 + k) as usize))
+                                .collect();
+                            for &(_, index) in &visible {
+                                let _ = storage::ensure_page_loaded(&storage_dir, &mut notebook, index);
+                                notebook.pages[index].rebuild_cache_if_dirty();
+                            }
+                            let neighbors: Vec<(i64, &ink_notes::document::Page)> = visible
+                                .iter()
+                                .map(|&(k, index)| (k, &notebook.pages[index]))
+                                .collect();
+                            canvas.set_neighbor_pages(&neighbors);
+                        } else {
+                            canvas.set_neighbor_pages(&[]);
+                        }
                         let assets = AssetStore::new(&storage_dir);
                         canvas.prepare_images(&mut |key| texture_for(key, &assets, &mut pdf_renderer));
                         // Nächste PDF-Seite vorab rendern, damit Blättern sofort klappt

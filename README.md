@@ -21,7 +21,8 @@ Eine latenzoptimierte, hardwarebeschleunigte Inking- und Notizbuch-Anwendung fü
 
 ### 🔍 Stufenloser Zoom & Pan (Kamera)
 - **Viewport-Transformation:** 2D-Projektionsmatrix im WGSL-Vertex-Shader.
-- **Cursor-zentrierter Zoom:** Stufenloses Zoomen von **25 % bis 500 %** zentriert auf die Cursor-Position via Mausrad, Trackpad-Pinch oder Tastenkürzel (`Strg +` / `Strg -` / `Strg 0`).
+- **Durchgehendes Scrollen:** Seiten hängen untereinander und werden mit Mausrad, Finger oder Touchpad fließend gescrollt; wer im unteren Fünftel der letzten Seite schreibt, bekommt automatisch eine neue Seite angehängt. Abschaltbar im ☰-Menü unter „Ansicht“ (dann Seite für Seite blättern).
+- **Cursor-zentrierter Zoom:** Stufenloses Zoomen von **25 % bis 500 %** zentriert auf die Cursor-Position via `Strg + Mausrad` (ohne durchgehende Ansicht: Mausrad), Trackpad-Pinch oder Tastenkürzel (`Strg +` / `Strg -` / `Strg 0`).
 - **Pan:** Verschieben des Canvas per mittlerer Maustaste, `Leertaste + Drag` oder Trackpad-Pan.
 - **Inverse Koordinatentransformation:** Präzise Umrechnung von Bildschirm- in DIN-A4-Dokumentkoordinaten (`screen_to_page`).
 
@@ -219,7 +220,8 @@ cargo run --release
 | :--- | :--- |
 | **Zeichnen** | Linke Maustaste / Stiftspitze |
 | **Canvas verschieben (Pan)** | Mittlere Maustaste **oder** `Leertaste + Drag` |
-| **Zoom zentriert auf Cursor** | Mausrad / Touchpad-Pinch |
+| **Scrollen (durchgehende Ansicht)** | Mausrad (`Umschalt` = waagerecht) / ein Finger |
+| **Zoom zentriert auf Cursor** | `Strg + Mausrad` / Touchpad-Pinch (Einzelseiten-Ansicht: Mausrad) |
 | **Zoom zurücksetzen (100 %)** | `Strg + 0` |
 | **Zoom In / Out** | `Strg + +` / `Strg + -` |
 | **Auswahlwerkzeug (Lasso)** | `V` |

@@ -112,6 +112,44 @@ pub fn choose_present_mode(available: &[wgpu::PresentMode]) -> Option<wgpu::Pres
         .or_else(|| available.first().copied())
 }
 
+/// Erkennt, ob die GPU-Daten einer Nachbarseite noch zur Seite passen. Änderungen an der
+/// aktuellen Seite verwerfen deren Eintrag ohnehin (siehe [`CanvasState::sync_page`]).
+#[derive(Debug, Clone, PartialEq)]
+struct NeighborFingerprint {
+    page_id: u64,
+    background: PageBackground,
+    paper_theme: PaperTheme,
+    vertex_count: usize,
+    stroke_count: usize,
+    last_stroke_id: Option<u64>,
+}
+
+impl NeighborFingerprint {
+    fn of(page: &Page, paper_theme: PaperTheme) -> Self {
+        Self {
+            page_id: page.id,
+            background: page.background,
+            paper_theme,
+            vertex_count: page.vertex_cache.len(),
+            stroke_count: page.strokes.len(),
+            last_stroke_id: page.strokes.last().map(|s| s.id),
+        }
+    }
+}
+
+/// GPU-Daten einer in der durchgehenden Ansicht sichtbaren Nachbarseite.
+struct NeighborPage {
+    fingerprint: NeighborFingerprint,
+    /// Lage relativ zur aktuellen Seite (in Seiten, negativ = darüber)
+    offset: i64,
+    camera_buffer: wgpu::Buffer,
+    camera_bind_group: wgpu::BindGroup,
+    background_buffer: Option<wgpu::Buffer>,
+    background_vertex_count: u32,
+    vertex_buffer: Option<wgpu::Buffer>,
+    stroke_ranges: Vec<Range<u32>>,
+}
+
 pub struct CanvasState {
     pub surface: wgpu::Surface<'static>,
     /// Verwendeter Grafikadapter (für erneute Abfrage der Surface-Fähigkeiten bei Größenänderung)
@@ -167,6 +205,10 @@ pub struct CanvasState {
 
     // Eingefügte Bilder der aktuellen Seite
     image_layer: crate::image_layer::ImageLayer,
+
+    /// Durchgehende Ansicht: sichtbare Nachbarseiten der aktuellen Seite
+    neighbors: Vec<NeighborPage>,
+    camera_layout: wgpu::BindGroupLayout,
 
     /// Eingeblendetes Lineal (Striche nahe einer Kante rasten ein)
     pub ruler: Option<crate::ruler::Ruler>,
@@ -466,6 +508,8 @@ impl CanvasState {
             committed_vertex_count: 0,
             committed_strokes: Vec::with_capacity(128),
             image_layer,
+            neighbors: Vec::new(),
+            camera_layout: bind_group_layout,
             ruler: None,
             ruler_lock: None,
             egui_renderer,
@@ -475,8 +519,26 @@ impl CanvasState {
 
     /// Aktualisiert die 2D-Kamera Uniforms (Scale & Offset im NDC-Raum) basierend auf Viewport und Kamera.
     pub fn update_uniforms(&mut self) {
-        let (scale, offset) = self.camera.ndc_transform(&self.viewport);
-        let camera_uniforms = CameraUniforms {
+        let camera_uniforms = self.camera_uniforms(0);
+        self.queue.write_buffer(
+            &self.camera_buffer,
+            0,
+            bytemuck::cast_slice(&[camera_uniforms]),
+        );
+        for neighbor in &self.neighbors {
+            self.queue.write_buffer(
+                &neighbor.camera_buffer,
+                0,
+                bytemuck::cast_slice(&[self.camera_uniforms(neighbor.offset)]),
+            );
+        }
+    }
+
+    /// Kamera für die Seite `page_offset` Seiten unter (negativ: über) der aktuellen.
+    fn camera_uniforms(&self, page_offset: i64) -> CameraUniforms {
+        let (scale, mut offset) = self.camera.ndc_transform(&self.viewport);
+        offset[1] += page_offset as f32 * crate::viewport::PAGE_PITCH * scale[1];
+        CameraUniforms {
             transform_scale: scale,
             transform_offset: offset,
             ink_params: [
@@ -489,12 +551,7 @@ impl CanvasState {
                 0.0,
                 0.0,
             ],
-        };
-        self.queue.write_buffer(
-            &self.camera_buffer,
-            0,
-            bytemuck::cast_slice(&[camera_uniforms]),
-        );
+        }
     }
 
     /// Setzt die von seitlicher UI belegten Streifen (physische Pixel), damit die Seite
@@ -585,6 +642,63 @@ impl CanvasState {
         self.camera.page_to_screen_vec2(page_pt, &self.viewport)
     }
 
+    /// Durchgehende Ansicht: Versatz (in Seiten) der Seite unter dem Bildschirmpunkt,
+    /// `None` neben den Seiten und zwischen zwei Seiten.
+    pub fn page_offset_at_screen(&self, screen_x: f32, screen_y: f32) -> Option<i64> {
+        let p = self
+            .camera
+            .screen_to_page_unclamped(screen_x, screen_y, &self.viewport);
+        if !(0.0..=crate::document::PAGE_WIDTH).contains(&p.x) {
+            return None;
+        }
+        crate::viewport::page_offset_at(p.y)
+    }
+
+    /// Durchgehende Ansicht: Versatz (in Seiten) der Seite in der Mitte des Fensters.
+    pub fn page_offset_at_view_center(&self) -> Option<i64> {
+        let p = self.camera.screen_to_page_unclamped(
+            0.0,
+            self.size.height as f32 / 2.0,
+            &self.viewport,
+        );
+        crate::viewport::page_offset_at(p.y)
+    }
+
+    /// Durchgehende Ansicht: Versätze der sichtbaren Nachbarseiten der aktuellen Seite.
+    pub fn visible_neighbor_offsets(&self, current: usize, page_count: usize) -> Vec<i64> {
+        let top = self
+            .camera
+            .screen_to_page_unclamped(0.0, 0.0, &self.viewport);
+        let bottom =
+            self.camera
+                .screen_to_page_unclamped(0.0, self.size.height as f32, &self.viewport);
+        crate::viewport::visible_neighbor_offsets(top.y, bottom.y, current, page_count)
+    }
+
+    /// Durchgehende Ansicht: Hält die Fenstermitte über dem Notizbuch (von der Oberkante der
+    /// ersten bis zur Unterkante der letzten Seite, waagerecht innerhalb der Seitenbreite), damit
+    /// man nicht ins Leere scrollt. `true`, wenn der Ausschnitt korrigiert wurde.
+    pub fn clamp_scroll(&mut self, current: usize, page_count: usize) -> bool {
+        let center = [
+            self.viewport.page_x + self.viewport.page_width / 2.0,
+            self.size.height as f32 / 2.0,
+        ];
+        let changed =
+            self.camera
+                .clamp_continuous_center(center, current, page_count, &self.viewport);
+        if changed {
+            self.update_uniforms();
+        }
+        changed
+    }
+
+    /// Durchgehende Ansicht: Die Seite `k` Seiten weiter wird zur Bezugsseite, ohne dass sich
+    /// der Bildausschnitt bewegt. Die Nachbarseiten sind danach neu zu setzen.
+    pub fn shift_reference_page(&mut self, k: i64) {
+        self.camera.shift_reference_page(k);
+        self.update_uniforms();
+    }
+
     /// Ersetzt die Live-Vertices des aktiven Strichs durch ein bereinigtes Form-Mesh (für Draw-and-Hold).
     pub fn set_live_shape_mesh(&mut self, samples: Vec<StylusSample>, vertices: Vec<InkVertex>) {
         self.live_samples = samples;
@@ -672,19 +786,10 @@ impl CanvasState {
     /// Synchronisiert die GPU-Puffer mit den Daten der aktiven Seite.
     pub fn sync_page(&mut self, page: &mut Page) {
         page.rebuild_cache_if_dirty();
+        // Die aktuelle Seite kann sich jetzt ändern: als Nachbarseite später neu hochladen
+        self.neighbors.retain(|n| n.fingerprint.page_id != page.id);
         self.set_background(page.background);
-        // PDF-Seite zuerst, darüber die eingefügten Bilder
-        self.image_layer.set_quads(
-            page.pdf_background
-                .iter()
-                .map(|pdf| (pdf.key(), pdf.corners()))
-                .chain(
-                    page.strokes
-                        .iter()
-                        .filter_map(|s| Some((s.image.clone()?, s.image_corners()?))),
-                )
-                .collect(),
-        );
+        self.image_layer.set_quads(page_image_quads(page));
 
         self.committed_vertex_count = page.vertex_cache.len() as u32;
         self.committed_strokes = page.stroke_ranges.clone();
@@ -709,6 +814,74 @@ impl CanvasState {
             0,
             bytemuck::cast_slice(&page.vertex_cache),
         );
+    }
+
+    /// Durchgehende Ansicht: übernimmt die sichtbaren Nachbarseiten mit ihrem Versatz zur
+    /// aktuellen Seite (in Seiten). Die Vertex-Caches der Seiten müssen aktuell sein
+    /// ([`Page::rebuild_cache_if_dirty`]); unveränderte Seiten werden nicht erneut hochgeladen.
+    /// Eine leere Liste schaltet die Nachbarseiten ab.
+    pub fn set_neighbor_pages(&mut self, pages: &[(i64, &Page)]) {
+        let mut old = std::mem::take(&mut self.neighbors);
+        let mut image_groups = Vec::with_capacity(pages.len());
+        for &(offset, page) in pages {
+            let fingerprint = NeighborFingerprint::of(page, self.paper_theme);
+            let mut neighbor = match old.iter().position(|n| n.fingerprint == fingerprint) {
+                Some(i) => old.swap_remove(i),
+                None => self.upload_neighbor(page, fingerprint),
+            };
+            neighbor.offset = offset;
+            self.queue.write_buffer(
+                &neighbor.camera_buffer,
+                0,
+                bytemuck::cast_slice(&[self.camera_uniforms(offset)]),
+            );
+            self.neighbors.push(neighbor);
+            image_groups.push(page_image_quads(page));
+        }
+        self.image_layer.set_neighbor_quads(image_groups);
+    }
+
+    /// Lädt Raster und Striche einer Nachbarseite auf die GPU.
+    fn upload_neighbor(&self, page: &Page, fingerprint: NeighborFingerprint) -> NeighborPage {
+        let camera_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Neighbor Camera Uniform Buffer"),
+            size: std::mem::size_of::<CameraUniforms>() as wgpu::BufferAddress,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let camera_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Neighbor Camera Bind Group"),
+            layout: &self.camera_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: camera_buffer.as_entire_binding(),
+            }],
+        });
+        let vertex_buffer_with = |label: &str, vertices: &[InkVertex]| {
+            (!vertices.is_empty()).then(|| {
+                let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some(label),
+                    size: std::mem::size_of_val(vertices) as u64,
+                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+                self.queue
+                    .write_buffer(&buffer, 0, bytemuck::cast_slice(vertices));
+                buffer
+            })
+        };
+        let background =
+            generate_background_mesh(page.background, self.paper_theme.pattern_color());
+        NeighborPage {
+            fingerprint,
+            offset: 0,
+            camera_buffer,
+            camera_bind_group,
+            background_buffer: vertex_buffer_with("Neighbor Background Buffer", &background),
+            background_vertex_count: background.len() as u32,
+            vertex_buffer: vertex_buffer_with("Neighbor Strokes Buffer", &page.vertex_cache),
+            stroke_ranges: page.stroke_ranges.clone(),
+        }
     }
 
     /// Lädt Bilder und PDF-Seiten der aktuellen Seite, die noch nicht auf der GPU liegen.
@@ -931,6 +1104,28 @@ impl CanvasState {
                 occlusion_query_set: None,
             });
 
+            // 0. Nachbarseiten der durchgehenden Ansicht (je mit eigener Kamera)
+            for (i, neighbor) in self.neighbors.iter().enumerate() {
+                render_pass.set_bind_group(0, &neighbor.camera_bind_group, &[]);
+                render_pass.set_pipeline(&self.triangle_pipeline);
+                render_pass.set_vertex_buffer(0, self.paper_buffer.slice(..));
+                render_pass.draw(0..6, 0..1);
+                if let Some(buffer) = &neighbor.background_buffer {
+                    render_pass.set_vertex_buffer(0, buffer.slice(..));
+                    render_pass.draw(0..neighbor.background_vertex_count, 0..1);
+                }
+                self.image_layer.draw(&mut render_pass, i + 1);
+                if let Some(buffer) = &neighbor.vertex_buffer {
+                    render_pass.set_pipeline(&self.strip_pipeline);
+                    render_pass.set_vertex_buffer(0, buffer.slice(..));
+                    for range in &neighbor.stroke_ranges {
+                        if range.end > range.start {
+                            render_pass.draw(range.clone(), 0..1);
+                        }
+                    }
+                }
+            }
+
             // 2D-Kamera Uniforms (Scale & Offset) binden
             render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
 
@@ -946,7 +1141,7 @@ impl CanvasState {
             }
 
             // 3. Eingefügte Bilder (unter der Tinte)
-            self.image_layer.draw(&mut render_pass);
+            self.image_layer.draw(&mut render_pass, 0);
 
             // 4. Abgeschlossene Striche der aktiven Seite rendern (TriangleStrip mit Vertex-Farben)
             render_pass.set_pipeline(&self.strip_pipeline);
@@ -1008,6 +1203,19 @@ impl CanvasState {
         };
         self.render(&[], &dummy_screen, &dummy_delta)
     }
+}
+
+/// Bilder einer Seite für die Bildebene: zuerst die PDF-Seite, darüber die eingefügten Bilder.
+fn page_image_quads(page: &Page) -> Vec<(String, [glam::Vec2; 4])> {
+    page.pdf_background
+        .iter()
+        .map(|pdf| (pdf.key(), pdf.corners()))
+        .chain(
+            page.strokes
+                .iter()
+                .filter_map(|s| Some((s.image.clone()?, s.image_corners()?))),
+        )
+        .collect()
 }
 
 #[cfg(test)]

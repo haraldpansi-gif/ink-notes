@@ -192,6 +192,8 @@ pub enum UiAction {
     },
     /// Druckkurve speichern (gilt während des Ziehens bereits über `UiState::pressure_curve`)
     SavePressureCurve(PressureCurve),
+    /// Seiten durchgehend untereinander statt einzeln anzeigen (wird gespeichert)
+    SetContinuousScroll(bool),
     /// Bilddatei auf der aktuellen Seite einfügen
     InsertImageFile(std::path::PathBuf),
     /// PDF als neues Notizbuch importieren
@@ -260,6 +262,8 @@ pub struct UiState {
     pub paper_theme: PaperTheme,
     /// Dunkle Tinte auf dunklem Papier aufhellen
     pub adapt_ink_colors: bool,
+    /// Seiten hängen untereinander und werden durchgehend gescrollt
+    pub continuous_scroll: bool,
     /// Druckkurve des Stifts
     pub pressure_curve: PressureCurve,
     /// Zuletzt gemessener Rohdruck des Stifts (Anzeige in der Druckkurve)
@@ -321,6 +325,7 @@ impl Default for UiState {
             eraser_mode: EraserMode::All,
             paper_theme: PaperTheme::White,
             adapt_ink_colors: true,
+            continuous_scroll: true,
             pressure_curve: PressureCurve::default(),
             last_raw_pressure: None,
             file_picker: None,
@@ -2458,6 +2463,19 @@ pub fn render_ui(
                                     theme: state.paper_theme,
                                     adapt_ink: state.adapt_ink_colors,
                                 });
+                            }
+
+                            section(ui, "ANSICHT");
+                            if ui
+                                .checkbox(&mut state.continuous_scroll, "Seiten durchgehend scrollen")
+                                .on_hover_text(
+                                    "An: Seiten hängen untereinander, Mausrad und Finger scrollen \
+                                     (Strg+Mausrad zoomt); wer unten auf der letzten Seite schreibt, \
+                                     bekommt automatisch eine neue Seite.\nAus: Seite für Seite blättern.",
+                                )
+                                .changed()
+                            {
+                                actions.push(UiAction::SetContinuousScroll(state.continuous_scroll));
                             }
 
                             section(ui, "ZOOM");

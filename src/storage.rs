@@ -792,6 +792,14 @@ pub fn ensure_page_loaded(
             notebook.pages[page_idx] = page;
             Ok(())
         }
+        // Angehängt, aber nie gespeichert (noch leer): leere Seite statt Ladefehler
+        Err(StorageError::PageNotFound(_)) => {
+            let placeholder = &mut notebook.pages[page_idx];
+            let mut page = Page::new(page_id, placeholder.background);
+            page.title = placeholder.title.take();
+            *placeholder = page;
+            Ok(())
+        }
         Err(StorageError::CorruptedPage(id, err_msg)) => {
             let q_res = quarantine_corrupted_page(notebook_dir, id);
             let q_path = q_res.ok();
@@ -2316,6 +2324,26 @@ mod tests {
 
         let (reloaded, _) = load_notebook(&dir).unwrap();
         assert_eq!(reloaded.current_page().strokes.len(), 2);
+    }
+
+    #[test]
+    fn test_never_saved_page_loads_as_empty_page() {
+        // Angehängte, nie beschriebene Seite: steht im Manifest, hat aber keine Datei
+        let temp_dir = tempfile::tempdir().unwrap();
+        let (mut notebook, mut manifest, dir) =
+            create_new_notebook(temp_dir.path(), "Angehängt").unwrap();
+        notebook.add_page(PageBackground::Lined);
+        save_notebook(&dir, &notebook, &mut manifest).unwrap();
+        let _ = fs::remove_file(dir.join(format!("page_{}.json", notebook.pages[1].id)));
+
+        let (mut loaded, _) = load_notebook(&dir).unwrap();
+        assert!(!loaded.pages[1].is_loaded);
+        ensure_page_loaded(&dir, &mut loaded, 1).unwrap();
+        let page = &loaded.pages[1];
+        assert!(page.is_loaded && !page.is_readonly());
+        assert_eq!(page.background, PageBackground::Lined);
+        assert!(page.strokes.is_empty());
+        assert!(loaded.load_warnings.is_empty());
     }
 
     #[test]

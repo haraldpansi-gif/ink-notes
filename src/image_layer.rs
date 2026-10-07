@@ -86,8 +86,9 @@ pub struct ImageLayer {
     /// Texturen nach Schlüssel (Asset-Name bzw. `<pdf>#<seite>`) mit belegtem Speicher
     textures: HashMap<String, (wgpu::BindGroup, u64)>,
     texture_bytes: u64,
-    /// Bilder der aktuellen Seite: Asset-Name und Ecken
-    quads: Vec<(String, [glam::Vec2; 4])>,
+    /// Bilder je Seite (Gruppe 0: aktuelle Seite, danach die sichtbaren Nachbarseiten):
+    /// Asset-Name und Ecken in Koordinaten der jeweiligen Seite
+    groups: Vec<Vec<(String, [glam::Vec2; 4])>>,
     vertex_buffer: Option<wgpu::Buffer>,
     vertices_dirty: bool,
 }
@@ -166,7 +167,7 @@ impl ImageLayer {
             sampler,
             textures: HashMap::new(),
             texture_bytes: 0,
-            quads: Vec::new(),
+            groups: vec![Vec::new()],
             vertex_buffer: None,
             vertices_dirty: false,
         }
@@ -174,10 +175,23 @@ impl ImageLayer {
 
     /// Übernimmt die Bilder der aktuellen Seite (Asset-Name und Ecken in Seitenkoordinaten).
     pub fn set_quads(&mut self, quads: Vec<(String, [glam::Vec2; 4])>) {
-        if quads != self.quads {
-            self.quads = quads;
+        if quads != self.groups[0] {
+            self.groups[0] = quads;
             self.vertices_dirty = true;
         }
+    }
+
+    /// Übernimmt die Bilder der sichtbaren Nachbarseiten (Gruppen 1, 2, …).
+    pub fn set_neighbor_quads(&mut self, neighbors: Vec<Vec<(String, [glam::Vec2; 4])>>) {
+        if neighbors[..] != self.groups[1..] {
+            self.groups.truncate(1);
+            self.groups.extend(neighbors);
+            self.vertices_dirty = true;
+        }
+    }
+
+    fn all_quads(&self) -> impl Iterator<Item = &(String, [glam::Vec2; 4])> {
+        self.groups.iter().flatten()
     }
 
     /// Lädt fehlende Texturen und den Vertex-Puffer hoch. Vor jedem Zeichnen aufrufen;
@@ -189,8 +203,7 @@ impl ImageLayer {
         load: &mut dyn FnMut(&str) -> TextureSource,
     ) {
         let missing: Vec<String> = self
-            .quads
-            .iter()
+            .all_quads()
             .map(|(key, _)| key)
             .filter(|key| !self.textures.contains_key(*key))
             .cloned()
@@ -217,7 +230,7 @@ impl ImageLayer {
 
         // Nicht mehr benötigte Texturen freigeben, wenn der Grafikspeicher knapp wird
         if self.texture_bytes > TEXTURE_CACHE_BYTES {
-            let used: HashSet<&String> = self.quads.iter().map(|(a, _)| a).collect();
+            let used: HashSet<&String> = self.groups.iter().flatten().map(|(a, _)| a).collect();
             self.textures.retain(|name, _| used.contains(name));
             self.texture_bytes = self.textures.values().map(|(_, b)| b).sum();
         }
@@ -227,8 +240,7 @@ impl ImageLayer {
         }
         self.vertices_dirty = false;
         let vertices: Vec<ImageVertex> = self
-            .quads
-            .iter()
+            .all_quads()
             .flat_map(|(_, corners)| quad_vertices(corners))
             .collect();
         if vertices.is_empty() {
@@ -252,29 +264,33 @@ impl ImageLayer {
         }
     }
 
-    /// Fehlen noch Texturen der aktuellen Seite (z. B. PDF-Seite im Hintergrund-Rendering)?
+    /// Fehlen noch Texturen sichtbarer Seiten (z. B. PDF-Seite im Hintergrund-Rendering)?
     pub fn is_waiting(&self) -> bool {
-        self.quads
-            .iter()
+        self.all_quads()
             .any(|(key, _)| !self.textures.contains_key(key))
     }
 
-    /// Zeichnet die Bilder der aktuellen Seite. Bind Group 0 (Kamera) muss gesetzt sein.
-    pub fn draw<'a>(&'a self, render_pass: &mut wgpu::RenderPass<'a>) {
+    /// Zeichnet die Bilder einer Seite (Gruppe 0: aktuelle Seite). Bind Group 0 (Kamera der
+    /// Seite) muss gesetzt sein.
+    pub fn draw<'a>(&'a self, render_pass: &mut wgpu::RenderPass<'a>, group: usize) {
         let Some(buffer) = &self.vertex_buffer else {
             return;
         };
-        if self.quads.is_empty() || self.vertices_dirty {
+        let Some(quads) = self.groups.get(group) else {
+            return;
+        };
+        if quads.is_empty() || self.vertices_dirty {
             return;
         }
+        let first: usize = self.groups[..group].iter().map(Vec::len).sum();
         render_pass.set_pipeline(&self.pipeline);
         render_pass.set_vertex_buffer(0, buffer.slice(..));
-        for (i, (asset, _)) in self.quads.iter().enumerate() {
+        for (i, (asset, _)) in quads.iter().enumerate() {
             let Some((bind_group, _)) = self.textures.get(asset) else {
                 continue;
             };
             render_pass.set_bind_group(1, bind_group, &[]);
-            let start = (i * 6) as u32;
+            let start = ((first + i) * 6) as u32;
             render_pass.draw(start..start + 6, 0..1);
         }
     }

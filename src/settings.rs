@@ -84,6 +84,8 @@ pub struct UiSettings {
     pub adapt_ink_colors: bool,
     /// Druckkennlinie des Stifts
     pub pressure_curve: PressureCurve,
+    /// Seiten durchgehend untereinander anzeigen (sonst einzeln blättern)
+    pub continuous_scroll: bool,
 }
 
 impl Default for UiSettings {
@@ -93,6 +95,7 @@ impl Default for UiSettings {
             paper_theme: PaperTheme::default(),
             adapt_ink_colors: true,
             pressure_curve: PressureCurve::default(),
+            continuous_scroll: true,
         }
     }
 }
@@ -149,6 +152,7 @@ mod tests {
                 exponent: 1.8,
                 threshold: 0.1,
             },
+            continuous_scroll: false,
         };
         settings.save_to(&path).unwrap();
         assert_eq!(UiSettings::load_from(&path), settings);
@@ -173,6 +177,7 @@ mod tests {
         assert_eq!(settings.paper_theme, PaperTheme::White);
         assert!(settings.adapt_ink_colors);
         assert_eq!(settings.pressure_curve, PressureCurve::default());
+        assert!(settings.continuous_scroll);
 
         // Unsinnige Werte aus einer von Hand bearbeiteten Datei werden begrenzt
         std::fs::write(
