@@ -312,7 +312,12 @@ impl AutosaveController {
 
     /// Markiert eine Seite als geändert und startet/erneuert das Debounce-Fenster.
     pub fn mark_page_dirty(&mut self, page: &Page, manifest: &NotebookManifest) {
-        if self.read_only || page.persist == crate::document::PersistState::ReadOnlyAfterLoadError {
+        // Nicht geladene Platzhalter nie schreiben: Sie sind leer und würden den Inhalt
+        // der Seitendatei überschreiben
+        if self.read_only
+            || !page.is_loaded
+            || page.persist == crate::document::PersistState::ReadOnlyAfterLoadError
+        {
             return;
         }
         let page_data = PageData::from(page);

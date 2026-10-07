@@ -697,6 +697,15 @@ pub fn load_notebook(notebook_dir: &Path) -> Result<(Notebook, NotebookManifest)
     );
     notebook.load_warnings = load_warnings;
 
+    // Die zuletzt geöffnete Seite sofort laden: Sie ist nach dem Start die aktuelle Seite,
+    // und ein leerer Platzhalter würde beim Weiterschreiben ihren Inhalt überschreiben.
+    let current = notebook.current_page_index;
+    if !notebook.pages[current].is_loaded {
+        if let Err(e) = ensure_page_loaded(notebook_dir, &mut notebook, current) {
+            eprintln!("[Storage] Aktuelle Seite {current} konnte nicht geladen werden: {e}");
+        }
+    }
+
     Ok((notebook, manifest))
 }
 
@@ -2166,5 +2175,62 @@ mod tests {
         assert_eq!(loaded.pages[1].strokes.len(), 1);
         assert_eq!(loaded.pages[1].background, PageBackground::Lined);
         assert!(crate::export::generate_pdf_document(&loaded, Default::default()).is_ok());
+    }
+
+    #[test]
+    fn test_restart_on_later_page_keeps_its_content() {
+        // Regression: Beim Start wurde nur Seite 1 geladen; war zuletzt eine spätere Seite
+        // offen, war sie ein leerer Platzhalter, und Weiterschreiben überschrieb ihren Inhalt.
+        let temp_dir = tempfile::tempdir().unwrap();
+        let (mut notebook, mut manifest, dir) =
+            create_new_notebook(temp_dir.path(), "Neustart").unwrap();
+        notebook.add_page(PageBackground::Lined);
+        notebook.pages[1] = page_with_one_stroke(notebook.pages[1].id, PageBackground::Lined);
+        notebook.current_page_index = 1;
+        save_notebook(&dir, &notebook, &mut manifest).unwrap();
+
+        let (mut loaded, mut loaded_manifest) = load_notebook(&dir).unwrap();
+        assert_eq!(loaded.current_page_index, 1);
+        assert!(
+            loaded.current_page().is_loaded,
+            "aktuelle Seite muss geladen sein"
+        );
+        assert_eq!(loaded.current_page().strokes.len(), 1);
+
+        // Weiterschreiben und speichern darf den bisherigen Inhalt nicht verlieren
+        let extra = page_with_one_stroke(99, PageBackground::Lined).strokes[0].clone();
+        loaded.current_page_mut().strokes.push(extra);
+        let mut autosave = AutosaveController::new(dir.clone(), Duration::from_secs(60));
+        autosave.mark_dirty(&loaded, &mut loaded_manifest);
+        autosave.flush().unwrap();
+        autosave.shutdown().unwrap();
+
+        let (reloaded, _) = load_notebook(&dir).unwrap();
+        assert_eq!(reloaded.current_page().strokes.len(), 2);
+    }
+
+    #[test]
+    fn test_autosave_never_writes_unloaded_placeholder() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let (mut notebook, mut manifest, dir) =
+            create_new_notebook(temp_dir.path(), "Platzhalter").unwrap();
+        notebook.add_page(PageBackground::Lined);
+        notebook.pages[1] = page_with_one_stroke(notebook.pages[1].id, PageBackground::Lined);
+        save_notebook(&dir, &notebook, &mut manifest).unwrap();
+        let page_file = dir.join(format!("page_{}.json", notebook.pages[1].id));
+        let before = fs::read(&page_file).unwrap();
+
+        // Platzhalter (nicht geladen) als aktuelle Seite markieren und speichern
+        let placeholder = Page::new_unloaded(notebook.pages[1].id, PageBackground::Lined);
+        let mut autosave = AutosaveController::new(dir.clone(), Duration::from_secs(60));
+        autosave.mark_page_dirty(&placeholder, &manifest);
+        autosave.flush().unwrap();
+        autosave.shutdown().unwrap();
+
+        assert_eq!(
+            fs::read(&page_file).unwrap(),
+            before,
+            "Seitendatei wurde überschrieben"
+        );
     }
 }
