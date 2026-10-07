@@ -62,10 +62,16 @@ fn update_window_title(
         PageBackground::DotGrid => "Punktraster (5mm)",
     };
 
+    let page_title = page
+        .title
+        .as_deref()
+        .map(|t| format!(" – {t}"))
+        .unwrap_or_default();
     let title = format!(
-        "ink-notes | [{}] {} | [{}] | {} | Hintergrund: {} | [Ctrl+Z] Undo [Ctrl+Y] Redo [E] Radierer [Ctrl+E/S] PDF-Export",
+        "ink-notes | [{}] {}{} | [{}] | {} | Hintergrund: {} | [Ctrl+Z] Undo [Ctrl+Y] Redo [E] Radierer [Ctrl+E/S] PDF-Export",
         manifest.title,
         notebook.osd_text(),
+        page_title,
         status.display_text(),
         tool.name(),
         bg_name
@@ -203,6 +209,44 @@ impl ClipboardBridge {
         self.image_hash_at_copy = self.system_image().map(|(_, hash)| hash);
         self.source_dir = Some(storage_dir.to_path_buf());
     }
+
+    /// Internes Kopieren: die Auswahl zusätzlich als Bild in die Systemzwischenablage legen,
+    /// damit sie sich in Chat, Mail oder Office einfügen lässt. In ink-notes selbst fügt
+    /// Strg+V weiterhin die Objekte (verlustfrei) ein.
+    fn copy_selection(
+        &mut self,
+        page: &ink_notes::document::Page,
+        ids: &[u64],
+        storage_dir: &Path,
+    ) -> bool {
+        let assets = AssetStore::new(storage_dir);
+        let image = match ink_notes::page_export::selection_image(page, ids, Some(&assets)) {
+            Ok(Some(image)) => image,
+            Ok(None) => return false,
+            Err(err) => {
+                eprintln!("[Zwischenablage] Auswahl nicht als Bild darstellbar: {err}");
+                return false;
+            }
+        };
+        if self.system.is_none() {
+            self.system = arboard::Clipboard::new().ok();
+        }
+        let Some(system) = self.system.as_mut() else {
+            return false;
+        };
+        let data = arboard::ImageData {
+            width: image.width as usize,
+            height: image.height as usize,
+            bytes: std::borrow::Cow::Owned(image.pixels),
+        };
+        match system.set_image(data) {
+            Ok(()) => true,
+            Err(err) => {
+                eprintln!("[Zwischenablage] Bild nicht gesetzt: {err}");
+                false
+            }
+        }
+    }
 }
 
 /// Fügt ein importiertes Bild um `center` (Seitenkoordinaten) auf der aktuellen Seite ein,
@@ -263,6 +307,51 @@ fn texture_for(
         Ok(image) => TextureSource::Ready(image),
         Err(err) => TextureSource::Failed(err),
     }
+}
+
+fn copy_message(count: usize, as_image: bool) -> String {
+    if as_image {
+        format!("{count} Objekt(e) kopiert – auch als Bild für andere Programme")
+    } else {
+        format!("{count} Objekt(e) kopiert")
+    }
+}
+
+/// Exportiert die aktuelle Seite im Hintergrund als PNG oder SVG nach ~/Documents.
+fn start_page_export(
+    kind: ui::PageExportKind,
+    notebook: &Notebook,
+    storage_dir: &Path,
+    title: &str,
+    result_tx: Sender<Result<PathBuf, String>>,
+    window: Arc<Window>,
+) {
+    use ink_notes::page_export::{page_png, page_svg, ImageBackground};
+    let page = notebook.current_page().clone();
+    let number = notebook.current_page_index + 1;
+    let storage_dir = storage_dir.to_path_buf();
+    let (suffix, ext) = match kind {
+        ui::PageExportKind::Png => ("", "png"),
+        ui::PageExportKind::PngTransparent => ("_transparent", "png"),
+        ui::PageExportKind::Svg => ("", "svg"),
+    };
+    let path = export::resolve_export_path(&format!("{title}_Seite_{number}{suffix}"), ext);
+    std::thread::spawn(move || {
+        let assets = AssetStore::new(&storage_dir);
+        let bytes = match kind {
+            ui::PageExportKind::Png => page_png(&page, Some(&assets), ImageBackground::Paper),
+            ui::PageExportKind::PngTransparent => {
+                page_png(&page, Some(&assets), ImageBackground::Transparent)
+            }
+            ui::PageExportKind::Svg => page_svg(&page, Some(&assets)).map(String::into_bytes),
+        };
+        let result = bytes
+            .map_err(|e| e.to_string())
+            .and_then(|bytes| std::fs::write(&path, bytes).map_err(|e| e.to_string()))
+            .map(|()| path);
+        let _ = result_tx.send(result);
+        window.request_redraw();
+    });
 }
 
 /// Seitenmitte des sichtbaren Bereichs (Ziel für eingefügte Bilder).
@@ -650,8 +739,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 while let Ok(result) = export_rx.try_recv() {
                     match result {
-                        Ok(path) => ui_state.set_export_message(format!("PDF gespeichert: {}", path.display())),
-                        Err(err) => ui_state.set_export_message(format!("PDF-Export fehlgeschlagen: {err}")),
+                        Ok(path) => ui_state.set_export_message(format!("Gespeichert: {}", path.display())),
+                        Err(err) => ui_state.set_export_message(format!("Export fehlgeschlagen: {err}")),
                     }
                     window.request_redraw();
                 }
@@ -762,13 +851,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                                         if is_erasing {
                                             if let Some(page_pt) = canvas.screen_to_page(sx, sy) {
-                                                let page = notebook.current_page_mut();
-                                                let removed = page.erase_at(
-                                                    page_pt,
+                                                if notebook.erase_at(page_pt,
                                                     eraser_radius,
-                                                    stroke_max_radius, ui_state.eraser_mode);
-                                                if !removed.is_empty() {
-                                                    canvas.sync_page(page);
+                                                    stroke_max_radius, ui_state.eraser_mode) {
+                                                    canvas.sync_page(notebook.current_page_mut());
                                                     autosave.mark_dirty(&notebook, &mut manifest);
                                                     update_window_title(
                                                         &window,
@@ -829,13 +915,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         if should_erase {
                                             is_erasing = true;
                                             if let Some(page_pt) = canvas.screen_to_page(sx, sy) {
-                                                let page = notebook.current_page_mut();
-                                                let removed = page.erase_at(
-                                                    page_pt,
+                                                if notebook.erase_at(page_pt,
                                                     eraser_radius,
-                                                    stroke_max_radius, ui_state.eraser_mode);
-                                                if !removed.is_empty() {
-                                                    canvas.sync_page(page);
+                                                    stroke_max_radius, ui_state.eraser_mode) {
+                                                    canvas.sync_page(notebook.current_page_mut());
                                                     autosave.mark_dirty(&notebook, &mut manifest);
                                                     update_window_title(
                                                         &window,
@@ -1146,8 +1229,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             Key::Character(c) if c.eq_ignore_ascii_case("c") && ctrl => {
                                 let count = selection_state.copy_to_clipboard(notebook.current_page());
                                 if count > 0 {
+                                    let as_image = clipboard.copy_selection(notebook.current_page(), &selection_state.selected_ids, &storage_dir);
                                     clipboard.note_internal_copy(&storage_dir);
-                                    ui_state.set_export_message(format!("{count} Objekt(e) kopiert"));
+                                    ui_state.set_export_message(copy_message(count, as_image));
                                     window.request_redraw();
                                 }
                             }
@@ -1466,10 +1550,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     is_erasing = true;
                                     let (sx, sy) = cursor_screen_pos;
                                     if let Some(page_pt) = canvas.screen_to_page(sx, sy) {
-                                        let page = notebook.current_page_mut();
-                                        let removed = page.erase_at(page_pt, eraser_radius, stroke_max_radius, ui_state.eraser_mode);
-                                        if !removed.is_empty() {
-                                            canvas.sync_page(page);
+                                        if notebook.erase_at(page_pt, eraser_radius, stroke_max_radius, ui_state.eraser_mode) {
+                                            canvas.sync_page(notebook.current_page_mut());
                                             autosave.mark_dirty(&notebook, &mut manifest);
                                             update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
                                             window.request_redraw();
@@ -1734,10 +1816,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                             } else if is_erasing {
                                 if let Some(page_pt) = canvas.screen_to_page(sx, sy) {
-                                    let page = notebook.current_page_mut();
-                                    let removed = page.erase_at(page_pt, eraser_radius, stroke_max_radius, ui_state.eraser_mode);
-                                    if !removed.is_empty() {
-                                        canvas.sync_page(page);
+                                    if notebook.erase_at(page_pt, eraser_radius, stroke_max_radius, ui_state.eraser_mode) {
+                                        canvas.sync_page(notebook.current_page_mut());
                                         autosave.mark_dirty(&notebook, &mut manifest);
                                         update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
                                         window.request_redraw();
@@ -1873,10 +1953,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         if is_eraser_action {
                                             is_erasing = true;
                                             if let Some(page_pt) = canvas.screen_to_page(tx, ty) {
-                                                let page = notebook.current_page_mut();
-                                                let removed = page.erase_at(page_pt, eraser_radius, stroke_max_radius, ui_state.eraser_mode);
-                                                if !removed.is_empty() {
-                                                    canvas.sync_page(page);
+                                                if notebook.erase_at(page_pt, eraser_radius, stroke_max_radius, ui_state.eraser_mode) {
+                                                    canvas.sync_page(notebook.current_page_mut());
                                                     autosave.mark_dirty(&notebook, &mut manifest);
                                                     update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
                                                     window.request_redraw();
@@ -2014,10 +2092,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         }
                                     } else if is_erasing {
                                         if let Some(page_pt) = canvas.screen_to_page(tx, ty) {
-                                            let page = notebook.current_page_mut();
-                                            let removed = page.erase_at(page_pt, eraser_radius, stroke_max_radius, ui_state.eraser_mode);
-                                            if !removed.is_empty() {
-                                                canvas.sync_page(page);
+                                            if notebook.erase_at(page_pt, eraser_radius, stroke_max_radius, ui_state.eraser_mode) {
+                                                canvas.sync_page(notebook.current_page_mut());
                                                 autosave.mark_dirty(&notebook, &mut manifest);
                                                 update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
                                                 window.request_redraw();
@@ -2247,8 +2323,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 UiAction::CopySelected => {
                                     let count = selection_state.copy_to_clipboard(notebook.current_page());
                                     if count > 0 {
+                                        let as_image = clipboard.copy_selection(notebook.current_page(), &selection_state.selected_ids, &storage_dir);
                                         clipboard.note_internal_copy(&storage_dir);
-                                        ui_state.set_export_message(format!("{count} Objekt(e) kopiert"));
+                                        ui_state.set_export_message(copy_message(count, as_image));
                                         window.request_redraw();
                                     }
                                 }
@@ -2342,6 +2419,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         .map(|p| storage::PageMeta {
                                             id: p.id,
                                             background: Some(p.background),
+                                            title: p.title.clone(),
                                         })
                                         .collect();
                                     manifest.sync_from_notebook(&notebook);
@@ -2349,6 +2427,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     autosave.mark_dirty(&notebook, &mut manifest);
                                     update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
                                     window.request_redraw();
+                                }
+                                UiAction::ExportPage(kind) => {
+                                    start_page_export(kind, &notebook, &storage_dir, &manifest.title, export_tx.clone(), window.clone());
+                                    ui_state.set_export_message("Seite wird exportiert …".to_string());
+                                    window.request_redraw();
+                                }
+                                UiAction::SetPageTitle { page_id, title } => {
+                                    if notebook.set_page_title(page_id, &title) {
+                                        if let Some(page) = notebook.pages.iter().find(|p| p.id == page_id) {
+                                            manifest.sync_from_notebook(&notebook);
+                                            autosave.mark_page_dirty(page, &manifest);
+                                        }
+                                        update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
+                                    }
                                 }
                                 UiAction::AddPage => {
                                     selection_state.clear();
@@ -2362,6 +2454,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         .map(|p| storage::PageMeta {
                                             id: p.id,
                                             background: Some(p.background),
+                                            title: p.title.clone(),
                                         })
                                         .collect();
                                     canvas.sync_page(notebook.current_page_mut());

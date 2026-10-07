@@ -79,6 +79,20 @@ pub fn resolve_pdf_export_path_in_dir(dir: &Path, title: &str) -> PathBuf {
     }
 }
 
+/// Kollisionsfreier Pfad `~/Documents/<name>.<ext>` (Verzeichnis wird angelegt).
+pub fn resolve_export_path(name: &str, ext: &str) -> PathBuf {
+    let dir = default_documents_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    let base = sanitize_filename_component(name);
+    let mut candidate = dir.join(format!("{base}.{ext}"));
+    let mut counter = 1;
+    while candidate.exists() {
+        candidate = dir.join(format!("{base}_{counter}.{ext}"));
+        counter += 1;
+    }
+    candidate
+}
+
 /// Ermittelt das Ziel für den PDF-Export unter Berücksichtigung von XDG_DOCUMENTS_DIR
 /// und automatischer Namenskollisionsvermeidung. Erstellt das Verzeichnis, falls nötig.
 pub fn resolve_pdf_export_path(title: &str) -> PathBuf {
@@ -132,7 +146,7 @@ pub fn export_notebook_to_bytes(
     assets: Option<&AssetStore>,
 ) -> Result<Vec<u8>, Box<dyn Error>> {
     let doc = generate_pdf_document(notebook, strategy, assets)?;
-    let bytes = doc.save_to_bytes()?;
+    let bytes = fix_text_encoding(doc.save_to_bytes()?, notebook)?;
 
     // Importierte PDF-Seiten als Vektorgrafik unterlegen
     let underlays = pdf_underlays(notebook);
@@ -158,7 +172,7 @@ pub fn export_notebook_to_bytes(
         raster.insert(underlay.target_page);
     }
     let doc = generate_pdf_document_with(notebook, strategy, assets, &raster)?;
-    let bytes = doc.save_to_bytes()?;
+    let bytes = fix_text_encoding(doc.save_to_bytes()?, notebook)?;
     let remaining: Vec<_> = underlays
         .into_iter()
         .filter(|u| !raster.contains(&u.target_page))
@@ -168,6 +182,49 @@ pub fn export_notebook_to_bytes(
     }
     let (merged, _) = crate::pdf_merge::apply_underlays(&bytes, &remaining, &sources)?;
     Ok(merged)
+}
+
+/// printpdf schreibt Lesezeichen-Titel als rohes UTF-8, PDF-Betrachter lesen Textstrings aber
+/// als PDFDocEncoding oder UTF-16BE: Umlaute und Gedankenstriche würden verstümmelt. Titel
+/// mit Nicht-ASCII-Zeichen werden deshalb nach UTF-16BE (mit BOM) umgeschrieben.
+fn fix_text_encoding(bytes: Vec<u8>, notebook: &Notebook) -> Result<Vec<u8>, Box<dyn Error>> {
+    let needs_fix = notebook
+        .pages
+        .iter()
+        .filter_map(|p| p.title.as_deref())
+        .any(|t| !t.is_ascii());
+    if !needs_fix {
+        return Ok(bytes);
+    }
+    let mut doc = printpdf::lopdf::Document::load_mem(&bytes)?;
+    for object in doc.objects.values_mut() {
+        let Ok(dict) = object.as_dict_mut() else {
+            continue;
+        };
+        if let Ok(printpdf::lopdf::Object::String(raw, format)) = dict.get_mut(b"Title") {
+            if let Some(utf16) = utf16be_text(raw) {
+                *raw = utf16;
+                *format = printpdf::lopdf::StringFormat::Hexadecimal;
+            }
+        }
+    }
+    let mut out = Vec::new();
+    doc.save_to(&mut out)?;
+    Ok(out)
+}
+
+/// UTF-8-Text als PDF-Textstring in UTF-16BE mit BOM; `None` bei reinem ASCII oder
+/// ungültigem UTF-8.
+fn utf16be_text(raw: &[u8]) -> Option<Vec<u8>> {
+    let text = std::str::from_utf8(raw).ok()?;
+    if text.is_ascii() {
+        return None;
+    }
+    let mut out = vec![0xFE, 0xFF];
+    for unit in text.encode_utf16() {
+        out.extend_from_slice(&unit.to_be_bytes());
+    }
+    Some(out)
 }
 
 /// Unterlagen für alle Seiten mit importierter PDF-Seite.
@@ -235,6 +292,11 @@ fn generate_pdf_document_with(
     let (doc, page1_idx, layer1_bg) =
         PdfDocument::new(title, Mm(A4_WIDTH_MM), Mm(A4_HEIGHT_MM), "Background");
 
+    // Seitentitel werden zu Lesezeichen (Inhaltsverzeichnis im PDF-Betrachter)
+    if let Some(title) = &notebook.pages[0].title {
+        doc.add_bookmark(title.clone(), page1_idx);
+    }
+
     // Seite 1 befüllen
     let page1_ref = doc.get_page(page1_idx);
     let layer1_bg_ref = page1_ref.get_layer(layer1_bg);
@@ -252,6 +314,9 @@ fn generate_pdf_document_with(
     // 2. Alle nachfolgenden Seiten hinzufügen
     for (i, page) in notebook.pages.iter().enumerate().skip(1) {
         let (page_idx, layer_bg) = doc.add_page(Mm(A4_WIDTH_MM), Mm(A4_HEIGHT_MM), "Background");
+        if let Some(title) = &page.title {
+            doc.add_bookmark(title.clone(), page_idx);
+        }
         let page_ref = doc.get_page(page_idx);
         let layer_bg_ref = page_ref.get_layer(layer_bg);
         render_background_layer(&layer_bg_ref, page.background);
@@ -1396,6 +1461,48 @@ mod tests {
 
         // Ohne Zugriff auf das PDF: Export klappt trotzdem (graue Ersatzfläche)
         assert!(export_notebook_to_bytes(&notebook, ExportStrategy::FilledPolygon, None).is_ok());
+    }
+
+    #[test]
+    fn test_page_titles_become_pdf_bookmarks() {
+        let mut notebook = Notebook::new();
+        notebook.add_page(PageBackground::Blank);
+        notebook.add_page(PageBackground::Blank);
+        let ids: Vec<u64> = notebook.pages.iter().map(|p| p.id).collect();
+        notebook.set_page_title(ids[0], "Einleitung");
+        notebook.set_page_title(ids[2], "Übung 2 – Integrale");
+        let bytes =
+            export_notebook_to_bytes(&notebook, ExportStrategy::FilledPolygon, None).unwrap();
+        let doc = printpdf::lopdf::Document::load_mem(&bytes).unwrap();
+        let catalog = doc.catalog().unwrap();
+        assert!(catalog.has(b"Outlines"), "Lesezeichen fehlen");
+
+        // Titel als PDF-Textstrings: ASCII unverändert, Umlaute als UTF-16BE mit BOM
+        let titles: Vec<String> = doc
+            .objects
+            .values()
+            .filter_map(|o| o.as_dict().ok())
+            .filter(|d| d.has(b"Parent"))
+            .filter_map(|d| match d.get(b"Title") {
+                Ok(printpdf::lopdf::Object::String(raw, _)) => {
+                    Some(if raw.starts_with(&[0xFE, 0xFF]) {
+                        let units: Vec<u16> = raw[2..]
+                            .chunks(2)
+                            .map(|c| u16::from_be_bytes([c[0], c[1]]))
+                            .collect();
+                        String::from_utf16(&units).unwrap()
+                    } else {
+                        String::from_utf8(raw.clone()).unwrap()
+                    })
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(titles.contains(&"Einleitung".to_string()), "{titles:?}");
+        assert!(
+            titles.contains(&"Übung 2 – Integrale".to_string()),
+            "{titles:?}"
+        );
     }
 
     #[test]

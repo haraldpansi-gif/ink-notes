@@ -46,6 +46,7 @@ arboard = { version = "3", default-features = false, features = ["image-data"] }
 minisign-verify = "0.3.0"
 fs2 = "0.4"
 hayro = "0.8"
+hayro-svg = "0.8"
 
 [profile.dev]
 opt-level = 1 # Erhöht Rendering-Performance auch im Debug-Modus

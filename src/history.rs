@@ -18,6 +18,13 @@ pub enum HistoryAction {
         before: Vec<Stroke>,
         after: Vec<Stroke>,
     },
+    /// Teilradierer: Striche wurden durch ihre übrig gebliebenen Stücke ersetzt.
+    SplitStrokes {
+        removed: Vec<Stroke>,
+        added: Vec<Stroke>,
+        /// Zeitpunkt des letzten Schnitts (zum Zusammenfassen eines Radierzugs)
+        at: std::time::Instant,
+    },
 }
 
 /// History-Stack für Transaktionsverwaltung (Undo / Redo).
@@ -39,6 +46,40 @@ impl HistoryStack {
     pub fn push(&mut self, action: HistoryAction) {
         self.undo_stack.push(action);
         self.redo_stack.clear();
+    }
+
+    /// Registriert einen Teilradier-Schnitt. Folgt er innerhalb von
+    /// [`crate::document::PARTIAL_ERASE_MERGE_WINDOW`] auf einen vorherigen, werden beide zu
+    /// einem Undo-Schritt zusammengefasst: Stücke, die im selben Zug wieder zerschnitten
+    /// wurden, verschwinden aus der Bilanz.
+    pub fn push_split(&mut self, removed: Vec<Stroke>, added: Vec<Stroke>) {
+        let now = std::time::Instant::now();
+        if let Some(HistoryAction::SplitStrokes {
+            removed: prev_removed,
+            added: prev_added,
+            at,
+        }) = self.undo_stack.last_mut()
+        {
+            if now.duration_since(*at) <= crate::document::PARTIAL_ERASE_MERGE_WINDOW
+                && self.redo_stack.is_empty()
+            {
+                for stroke in removed {
+                    if let Some(pos) = prev_added.iter().position(|s| s.id == stroke.id) {
+                        prev_added.remove(pos);
+                    } else {
+                        prev_removed.push(stroke);
+                    }
+                }
+                prev_added.extend(added);
+                *at = now;
+                return;
+            }
+        }
+        self.push(HistoryAction::SplitStrokes {
+            removed,
+            added,
+            at: now,
+        });
     }
 
     /// Gibt zurück, ob Undo verfügbar ist.
@@ -95,6 +136,12 @@ impl HistoryStack {
                 self.redo_stack
                     .push(HistoryAction::ModifyStrokes { before, after });
             }
+            HistoryAction::SplitStrokes { removed, added, at } => {
+                strokes.retain(|s| !added.iter().any(|a| a.id == s.id));
+                strokes.extend(removed.iter().cloned());
+                self.redo_stack
+                    .push(HistoryAction::SplitStrokes { removed, added, at });
+            }
         }
 
         true
@@ -139,6 +186,12 @@ impl HistoryStack {
                 }
                 self.undo_stack
                     .push(HistoryAction::ModifyStrokes { before, after });
+            }
+            HistoryAction::SplitStrokes { removed, added, at } => {
+                strokes.retain(|s| !removed.iter().any(|r| r.id == s.id));
+                strokes.extend(added.iter().cloned());
+                self.undo_stack
+                    .push(HistoryAction::SplitStrokes { removed, added, at });
             }
         }
 

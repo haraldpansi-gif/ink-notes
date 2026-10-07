@@ -97,6 +97,14 @@ pub const PEN_WIDTH_PRESETS: [(f32, &str); 4] = [
 pub const HIGHLIGHTER_WIDTH_PRESETS: [(f32, &str); 3] =
     [(4.0, "4.0 mm"), (6.0, "6.0 mm"), (8.0, "8.0 mm")];
 
+/// Format für den Export der aktuellen Seite.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PageExportKind {
+    Png,
+    PngTransparent,
+    Svg,
+}
+
 /// Aktionen, die von der UI an die Anwendungslogik signalisiert werden.
 #[derive(Debug, Clone, PartialEq)]
 pub enum UiAction {
@@ -156,6 +164,13 @@ pub enum UiAction {
     InsertImageFile(std::path::PathBuf),
     /// PDF als neues Notizbuch importieren
     ImportPdf(std::path::PathBuf),
+    /// Aktuelle Seite als Bild oder SVG exportieren
+    ExportPage(PageExportKind),
+    /// Titel einer Seite setzen (leer = entfernen)
+    SetPageTitle {
+        page_id: u64,
+        title: String,
+    },
     // Beenden-Sicherheit bei Fehlschlag
     RetryShutdown,
     ExportRecoveryAndExit,
@@ -219,6 +234,11 @@ pub struct UiState {
     pub last_raw_pressure: Option<f32>,
     /// Geöffnete Dateiauswahl („Bild einfügen“ oder „PDF importieren“)
     pub file_picker: Option<FilePicker>,
+    /// Eingabefeld „Titel dieser Seite“ in der Seitenübersicht und die Seite, zu der es gehört
+    pub page_title_input: String,
+    pub page_title_for: Option<u64>,
+    /// Seitenübersicht als Liste mit Titeln (Inhaltsverzeichnis) statt Kacheln
+    pub page_picker_list: bool,
     /// Aktionen, die außerhalb der Oberfläche ausgelöst wurden (z. B. ins Fenster gezogene
     /// PDF-Datei); `render_ui` gibt sie beim nächsten Bild mit aus
     pub queued_actions: Vec<UiAction>,
@@ -266,6 +286,9 @@ impl Default for UiState {
             last_raw_pressure: None,
             file_picker: None,
             queued_actions: Vec::new(),
+            page_title_input: String::new(),
+            page_title_for: None,
+            page_picker_list: false,
             last_picker_dir: None,
         }
     }
@@ -875,6 +898,19 @@ fn page_thumbnail(
                 egui::Color32::from_gray(140),
             );
         }
+        // Lesezeichen-Ecke für benannte Seiten
+        if page.title.is_some() {
+            let corner = thumb.right_top();
+            painter.add(egui::Shape::convex_polygon(
+                vec![
+                    corner + egui::vec2(-14.0, 0.0),
+                    corner,
+                    corner + egui::vec2(0.0, 14.0),
+                ],
+                egui::Color32::from_rgb(90, 150, 255),
+                egui::Stroke::NONE,
+            ));
+        }
         let border = if is_current {
             egui::Stroke::new(2.5_f32, egui::Color32::from_rgb(90, 150, 255))
         } else if response.hovered() {
@@ -895,7 +931,43 @@ fn page_thumbnail(
             },
         );
     }
-    response.on_hover_text(format!("Seite {number}"))
+    match &page.title {
+        Some(title) => response.on_hover_text(format!("Seite {number} – {title}")),
+        None => response.on_hover_text(format!("Seite {number}")),
+    }
+}
+
+/// Inhaltsverzeichnis der Seitenübersicht: alle Seiten mit Nummer und Titel, benannte
+/// Seiten hervorgehoben. Gibt die angetippte Seite zurück.
+fn page_title_list(ui: &mut egui::Ui, notebook: &Notebook) -> Option<usize> {
+    let mut chosen = None;
+    if notebook.pages.iter().all(|p| p.title.is_none()) {
+        ui.label(
+            egui::RichText::new(
+                "Noch keine Seite hat einen Titel. Gib oben einen Titel für die aktuelle Seite ein.",
+            )
+            .color(egui::Color32::from_gray(150)),
+        );
+        ui.add_space(4.0);
+    }
+    for (idx, page) in notebook.pages.iter().enumerate() {
+        let is_current = idx == notebook.current_page_index;
+        let text = match &page.title {
+            Some(title) => egui::RichText::new(format!("{:>3}   {title}", idx + 1))
+                .strong()
+                .color(egui::Color32::WHITE),
+            None => egui::RichText::new(format!("{:>3}   –", idx + 1))
+                .color(egui::Color32::from_gray(130)),
+        };
+        let response = ui.add_sized(
+            [ui.available_width(), 32.0],
+            egui::SelectableLabel::new(is_current, text),
+        );
+        if response.clicked() {
+            chosen = Some(idx);
+        }
+    }
+    chosen
 }
 
 /// Auswahlknopf für eine Papierfarbe: Farbmuster und Name.
@@ -1420,7 +1492,7 @@ pub fn render_ui(
                                     (
                                         ActiveTool::Eraser,
                                         SidebarIcon::Eraser,
-                                        "Radierer (E oder rechte Maustaste) – darunter: alles oder nur Textmarker",
+                                        "Radierer (E oder rechte Maustaste) – darunter: ganze Striche, Teilstrich oder nur Textmarker",
                                     ),
                                     (
                                         ActiveTool::Select,
@@ -1491,6 +1563,12 @@ pub fn render_ui(
                                             SidebarIcon::Text("Alle"),
                                             None,
                                             "Alle Striche radieren",
+                                        ),
+                                        (
+                                            EraserMode::Partial,
+                                            SidebarIcon::Glyph("✂"),
+                                            None,
+                                            "Teilstrich radieren – nur den überstrichenen Teil entfernen (Formen ganz)",
                                         ),
                                         (
                                             EraserMode::HighlighterOnly,
@@ -2004,6 +2082,19 @@ pub fn render_ui(
                                 actions.push(UiAction::ExportPdf);
                                 state.is_more_menu_open = false;
                             }
+                            ui.horizontal(|ui| {
+                                ui.label(egui::RichText::new("Seite als").color(egui::Color32::from_gray(190)));
+                                for (label, kind, hint) in [
+                                    ("PNG", PageExportKind::Png, "Bild mit Papier und Raster (200 dpi)"),
+                                    ("PNG transp.", PageExportKind::PngTransparent, "Bild mit transparentem Hintergrund, nur Inhalt"),
+                                    ("SVG", PageExportKind::Svg, "Vektorgrafik, z. B. für Inkscape oder LaTeX"),
+                                ] {
+                                    if ui.button(label).on_hover_text(hint).clicked() {
+                                        actions.push(UiAction::ExportPage(kind));
+                                        state.is_more_menu_open = false;
+                                    }
+                                }
+                            });
                             if ui
                                 .add_sized([ui.available_width(), 30.0], egui::Button::new("➕  Neue Seite anhängen"))
                                 .clicked()
@@ -2217,36 +2308,99 @@ pub fn render_ui(
                             if dialog_header(ui, &title, true) {
                                 state.show_page_jump_popup = false;
                             }
+                            // Titel der aktuellen Seite
+                            let current = notebook.current_page();
+                            if state.page_title_for != Some(current.id) {
+                                state.page_title_for = Some(current.id);
+                                state.page_title_input = current.title.clone().unwrap_or_default();
+                            }
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "TITEL VON SEITE {}",
+                                    notebook.current_page_index + 1
+                                ))
+                                .size(10.5)
+                                .strong()
+                                .color(egui::Color32::from_gray(160)),
+                            );
+                            let field = ui.add(
+                                egui::TextEdit::singleline(&mut state.page_title_input)
+                                    .hint_text("z. B. Kapitel 2 – Integrale")
+                                    .margin(egui::vec2(8.0, 8.0))
+                                    .desired_width(f32::INFINITY),
+                            );
+                            // Bei jeder Änderung übernehmen: schließt sich die Übersicht, geht nichts verloren
+                            if field.changed() {
+                                actions.push(UiAction::SetPageTitle {
+                                    page_id: current.id,
+                                    title: state.page_title_input.clone(),
+                                });
+                            }
+                            ui.add_space(2.0);
+                            ui.horizontal(|ui| {
+                                for (list, label) in [(false, "🖼  Kacheln"), (true, "📑  Inhalt")]
+                                {
+                                    if ui
+                                        .add_sized(
+                                            [140.0, 30.0],
+                                            egui::SelectableLabel::new(
+                                                state.page_picker_list == list,
+                                                label,
+                                            ),
+                                        )
+                                        .clicked()
+                                    {
+                                        state.page_picker_list = list;
+                                    }
+                                }
+                            });
+                            ui.add_space(2.0);
                             // Noch nicht geladene Seiten für die Vorschau nachladen lassen
-                            if notebook.pages.iter().any(|p| !p.is_loaded) {
+                            if !state.page_picker_list
+                                && notebook.pages.iter().any(|p| !p.is_loaded)
+                            {
                                 actions.push(UiAction::LoadAllPages);
                             }
-                            egui::ScrollArea::vertical()
-                                .max_height(420.0)
-                                .show(ui, |ui| {
-                                    egui::Grid::new("page_picker_grid")
-                                        .spacing([8.0, 8.0])
-                                        .show(ui, |ui| {
-                                            for (idx, page) in notebook.pages.iter().enumerate() {
-                                                let is_current = idx == notebook.current_page_index;
-                                                if page_thumbnail(
-                                                    ui,
-                                                    state,
-                                                    page,
-                                                    idx + 1,
-                                                    is_current,
-                                                )
-                                                .clicked()
+                            if state.page_picker_list {
+                                egui::ScrollArea::vertical()
+                                    .max_height(420.0)
+                                    .show(ui, |ui| {
+                                        ui.set_width(ui.available_width());
+                                        if let Some(idx) = page_title_list(ui, notebook) {
+                                            actions.push(UiAction::GoToPage(idx));
+                                            state.show_page_jump_popup = false;
+                                        }
+                                    });
+                            } else {
+                                egui::ScrollArea::vertical()
+                                    .max_height(420.0)
+                                    .show(ui, |ui| {
+                                        egui::Grid::new("page_picker_grid")
+                                            .spacing([8.0, 8.0])
+                                            .show(ui, |ui| {
+                                                for (idx, page) in notebook.pages.iter().enumerate()
                                                 {
-                                                    actions.push(UiAction::GoToPage(idx));
-                                                    state.show_page_jump_popup = false;
+                                                    let is_current =
+                                                        idx == notebook.current_page_index;
+                                                    if page_thumbnail(
+                                                        ui,
+                                                        state,
+                                                        page,
+                                                        idx + 1,
+                                                        is_current,
+                                                    )
+                                                    .clicked()
+                                                    {
+                                                        actions.push(UiAction::GoToPage(idx));
+                                                        state.show_page_jump_popup = false;
+                                                    }
+                                                    if (idx + 1) % PAGE_PICKER_COLUMNS == 0 {
+                                                        ui.end_row();
+                                                    }
                                                 }
-                                                if (idx + 1) % PAGE_PICKER_COLUMNS == 0 {
-                                                    ui.end_row();
-                                                }
-                                            }
-                                        });
-                                });
+                                            });
+                                    });
+                            }
                             ui.add_space(4.0);
                             if ui
                                 .add_sized(

@@ -1180,6 +1180,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "885c5ef0654933139a9b9546fc2c69e18d37f38aa2520f079092b1be18f1fcaa"
 
 [[package]]
+name = "hayro-svg"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e7377affc9513cf5b66c4a8b5fa1e6058ae652eef3d13fdc4709004a03968488"
+dependencies = [
+ "base64",
+ "hayro-interpret",
+ "image",
+ "kurbo",
+ "rustc-hash 2.1.3",
+ "siphasher",
+ "xmlwriter",
+]
+
+[[package]]
 name = "hayro-syntax"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1388,6 +1403,7 @@ dependencies = [
  "fs2",
  "glam",
  "hayro",
+ "hayro-svg",
  "image",
  "minisign-verify",
  "naga",
@@ -3826,6 +3842,12 @@ name = "xml-rs"
 version = "0.8.29"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e450f9b2ed1dff33c94c12589a87338689467b9c4f5d8a5710bd09a847d2c8a7"
+
+[[package]]
+name = "xmlwriter"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ec7a2a501ed189703dba8b08142f057e887dfc4b2cc4db2d343ac6376ba3e0b9"
 
 [[package]]
 name = "yoke"

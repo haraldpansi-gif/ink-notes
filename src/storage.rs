@@ -152,7 +152,8 @@ impl StrokeData {
 ///   das unbekannte Feld ignorieren, Bilder als Rechteckstrich anzeigen und beim Speichern
 ///   verlieren.
 /// - Version 5: importierte PDF-Seiten als Seitenhintergrund (`pdf_background`).
-pub const CURRENT_FORMAT_VERSION: u32 = 5;
+/// - Version 6: Seitentitel (`title` in Seite und Manifest).
+pub const CURRENT_FORMAT_VERSION: u32 = 6;
 
 /// Standardwert für ältere Dateien ohne explizite Formatversion (Legacy v0).
 pub fn legacy_format_version() -> u32 {
@@ -169,6 +170,9 @@ pub struct PageData {
     /// Importierte PDF-Seite als Hintergrund
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pdf_background: Option<crate::document::PdfBackground>,
+    /// Seitentitel (steht zusätzlich im Manifest)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
     pub strokes: Vec<StrokeData>,
 }
 
@@ -179,6 +183,7 @@ impl From<&Page> for PageData {
             id: page.id,
             background: page.background,
             pdf_background: page.pdf_background.clone(),
+            title: page.title.clone(),
             strokes: page.strokes.iter().map(StrokeData::from).collect(),
         }
     }
@@ -189,6 +194,7 @@ impl PageData {
     pub fn to_page(&self) -> Page {
         let mut page = Page::new(self.id, self.background);
         page.pdf_background = self.pdf_background.clone();
+        page.title = self.title.clone();
         for stroke_data in &self.strokes {
             page.strokes.push(stroke_data.to_stroke());
         }
@@ -205,11 +211,18 @@ pub struct PageMeta {
     pub id: u64,
     #[serde(default)]
     pub background: Option<PageBackground>,
+    /// Seitentitel (Lesezeichen), damit die Seitenübersicht ihn ohne Laden der Seite kennt
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
 }
 
 impl PageMeta {
     pub fn new(id: u64, background: Option<PageBackground>) -> Self {
-        Self { id, background }
+        Self {
+            id,
+            background,
+            title: None,
+        }
     }
 }
 
@@ -259,6 +272,13 @@ impl NotebookManifest {
         }
     }
 
+    pub fn title_for_page(&self, page_id: u64) -> Option<String> {
+        self.pages
+            .iter()
+            .find(|p| p.id == page_id)
+            .and_then(|p| p.title.clone())
+    }
+
     pub fn background_for_page(&self, page_id: u64) -> Option<PageBackground> {
         self.pages
             .iter()
@@ -274,6 +294,7 @@ impl NotebookManifest {
             .map(|p| PageMeta {
                 id: p.id,
                 background: Some(p.background),
+                title: p.title.clone(),
             })
             .collect();
         self.page_ids = self.pages.iter().map(|p| p.id).collect();
@@ -721,6 +742,13 @@ pub fn load_notebook(notebook_dir: &Path) -> Result<(Notebook, NotebookManifest)
         pages.push(Page::new_unloaded(page_id, bg));
     }
 
+    // Titel aus dem Manifest (Platzhalter und Ersatzseiten kennen sie sonst nicht)
+    for page in &mut pages {
+        if page.title.is_none() {
+            page.title = manifest.title_for_page(page.id);
+        }
+    }
+
     let mut notebook = Notebook::from_pages(
         pages,
         manifest.current_page_index,
@@ -758,7 +786,10 @@ pub fn ensure_page_loaded(
     let page_id = notebook.pages[page_idx].id;
     match load_page(notebook_dir, page_id) {
         Ok(data) => {
-            notebook.pages[page_idx] = data.to_page();
+            let title = notebook.pages[page_idx].title.take();
+            let mut page = data.to_page();
+            page.title = page.title.or(title);
+            notebook.pages[page_idx] = page;
             Ok(())
         }
         Err(StorageError::CorruptedPage(id, err_msg)) => {
@@ -1302,12 +1333,14 @@ pub fn load_all_pages(notebook_dir: &Path, notebook: &mut Notebook) -> Result<()
             ));
         }
         if !page.is_loaded {
+            let title = page.title.take();
             *page = match load_page(notebook_dir, page.id) {
                 Ok(data) => data.to_page(),
                 // Wie beim Lazy Loading: nie gespeicherte Seite = leere Seite
                 Err(StorageError::PageNotFound(_)) => Page::new(page.id, page.background),
                 Err(e) => return Err(e),
             };
+            page.title = page.title.take().or(title);
         }
     }
     Ok(())
@@ -2448,5 +2481,38 @@ mod tests {
             create_notebook_from_pdf(temp_dir.path(), "Kaputt", b"%PDF-kaputt".to_vec()).is_err()
         );
         assert_eq!(std::fs::read_dir(temp_dir.path()).unwrap().count(), before);
+    }
+
+    #[test]
+    fn test_page_titles_survive_restart_and_lazy_loading() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let (mut notebook, mut manifest, dir) =
+            create_new_notebook(temp_dir.path(), "Mit Titeln").unwrap();
+        notebook.add_page(PageBackground::Lined);
+        notebook.add_page(PageBackground::Lined);
+        let ids: Vec<u64> = notebook.pages.iter().map(|p| p.id).collect();
+        assert!(notebook.set_page_title(ids[0], "  Einleitung \n"));
+        assert!(notebook.set_page_title(ids[2], "Kapitel 2 – Integrale"));
+        assert!(!notebook.set_page_title(ids[2], "Kapitel 2 – Integrale"));
+        save_notebook(&dir, &notebook, &mut manifest).unwrap();
+        assert_eq!(manifest.pages[0].title.as_deref(), Some("Einleitung"));
+
+        // Neustart: Folgeseiten sind Platzhalter, kennen ihren Titel aber aus dem Manifest
+        let (mut reloaded, _) = load_notebook(&dir).unwrap();
+        assert!(!reloaded.pages[2].is_loaded);
+        assert_eq!(
+            reloaded.pages[2].title.as_deref(),
+            Some("Kapitel 2 – Integrale")
+        );
+        ensure_page_loaded(&dir, &mut reloaded, 2).unwrap();
+        assert_eq!(
+            reloaded.pages[2].title.as_deref(),
+            Some("Kapitel 2 – Integrale")
+        );
+        assert_eq!(reloaded.pages[1].title, None);
+
+        // Titel entfernen
+        assert!(reloaded.set_page_title(ids[0], "   "));
+        assert_eq!(reloaded.pages[0].title, None);
     }
 }

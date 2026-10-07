@@ -122,6 +122,22 @@ pub fn point_in_convex_quad(p: glam::Vec2, quad: &[glam::Vec2; 4]) -> bool {
     true
 }
 
+/// Größte Länge eines Seitentitels in Zeichen.
+pub const MAX_PAGE_TITLE_CHARS: usize = 120;
+
+/// Bereinigt einen Seitentitel: Zeilenumbrüche und doppelte Leerzeichen entfernen, auf
+/// [`MAX_PAGE_TITLE_CHARS`] kürzen; leer bedeutet „kein Titel“.
+pub fn normalize_page_title(title: &str) -> Option<String> {
+    let cleaned: String = title
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(MAX_PAGE_TITLE_CHARS)
+        .collect();
+    (!cleaned.is_empty()).then_some(cleaned)
+}
+
 /// Verweis auf eine Seite eines importierten PDFs (Datei im Asset-Ordner).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PdfBackground {
@@ -221,16 +237,122 @@ pub enum EraserMode {
     All,
     /// Nur Textmarker – die Handschrift darunter bleibt erhalten
     HighlighterOnly,
+    /// Nur den überstrichenen Teil eines Strichs entfernen; der Rest bleibt in Stücken
+    /// erhalten. Formen werden als Ganzes radiert.
+    Partial,
 }
 
 impl EraserMode {
     /// Darf ein Strich dieses Werkzeugs radiert werden?
     pub fn erases(self, tool: StrokeTool) -> bool {
         match self {
-            EraserMode::All => true,
+            EraserMode::All | EraserMode::Partial => true,
             EraserMode::HighlighterOnly => tool == StrokeTool::Highlighter,
         }
     }
+}
+
+/// Zeitfenster, in dem aufeinanderfolgende Teilradierungen zu einem Undo-Schritt
+/// zusammengefasst werden (ein Radierzug besteht aus vielen kleinen Schnitten).
+pub const PARTIAL_ERASE_MERGE_WINDOW: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// Zerlegt die Punktfolge eines Strichs an einem Kreis (Radierer): übrig bleiben die Stücke
+/// außerhalb des Kreises, an den Kreisrand gekürzt. `None`, wenn der Kreis den Strich nicht
+/// berührt. Stücke kürzer als `min_length` entfallen.
+pub fn split_samples_at_circle(
+    samples: &[StylusSample],
+    center: glam::Vec2,
+    radius: f32,
+    min_length: f32,
+) -> Option<Vec<Vec<StylusSample>>> {
+    let inside = |p: glam::Vec2| (p - center).length_squared() <= radius * radius;
+    let lerp = |a: &StylusSample, b: &StylusSample, t: f32| StylusSample {
+        position: a.position.lerp(b.position, t),
+        pressure: a.pressure + (b.pressure - a.pressure) * t,
+        timestamp: a.timestamp + (b.timestamp - a.timestamp) * t as f64,
+    };
+    // Schnittparameter t ∈ (0, 1) einer Strecke mit dem Kreisrand, aufsteigend
+    let crossings = |a: glam::Vec2, b: glam::Vec2| -> Vec<f32> {
+        let d = b - a;
+        let f = a - center;
+        let qa = d.dot(d);
+        if qa < 1e-12 {
+            return Vec::new();
+        }
+        let qb = 2.0 * f.dot(d);
+        let qc = f.dot(f) - radius * radius;
+        let disc = qb * qb - 4.0 * qa * qc;
+        if disc < 0.0 {
+            return Vec::new();
+        }
+        let root = disc.sqrt();
+        [(-qb - root) / (2.0 * qa), (-qb + root) / (2.0 * qa)]
+            .into_iter()
+            .filter(|t| *t > 0.0 && *t < 1.0)
+            .collect()
+    };
+
+    match samples {
+        [] => return None,
+        [single] => return inside(single.position).then(Vec::new),
+        _ => {}
+    }
+    let touched = samples.iter().any(|s| inside(s.position))
+        || samples
+            .windows(2)
+            .any(|w| crossings(w[0].position, w[1].position).len() == 2);
+    if !touched {
+        return None;
+    }
+
+    let mut pieces = Vec::new();
+    let mut current: Vec<StylusSample> = Vec::new();
+    if !inside(samples[0].position) {
+        current.push(samples[0]);
+    }
+    for w in samples.windows(2) {
+        let (a, b) = (&w[0], &w[1]);
+        let (a_in, b_in) = (inside(a.position), inside(b.position));
+        let ts = crossings(a.position, b.position);
+        match (a_in, b_in) {
+            (false, false) => {
+                if let [t_enter, t_exit] = ts[..] {
+                    // Strecke läuft durch den Kreis
+                    current.push(lerp(a, b, t_enter));
+                    pieces.push(std::mem::take(&mut current));
+                    current.push(lerp(a, b, t_exit));
+                }
+                current.push(*b);
+            }
+            (false, true) => {
+                if let Some(&t) = ts.first() {
+                    current.push(lerp(a, b, t));
+                }
+                pieces.push(std::mem::take(&mut current));
+            }
+            (true, false) => {
+                current.clear();
+                if let Some(&t) = ts.last() {
+                    current.push(lerp(a, b, t));
+                }
+                current.push(*b);
+            }
+            (true, true) => {}
+        }
+    }
+    pieces.push(current);
+
+    let length = |p: &Vec<StylusSample>| -> f32 {
+        p.windows(2)
+            .map(|w| (w[1].position - w[0].position).length())
+            .sum()
+    };
+    Some(
+        pieces
+            .into_iter()
+            .filter(|p| p.len() >= 2 && length(p) >= min_length)
+            .collect(),
+    )
 }
 
 /// Ein einzelner Vektor-Strich auf einer Seite.
@@ -532,6 +654,8 @@ pub struct Page {
     pub background: PageBackground,
     /// Importierte PDF-Seite als Hintergrund (unter Bildern und Tinte)
     pub pdf_background: Option<PdfBackground>,
+    /// Seitentitel (Lesezeichen); auch im Manifest, damit er ohne Laden der Seite bekannt ist
+    pub title: Option<String>,
     pub vertex_cache: Vec<InkVertex>,
     pub stroke_ranges: Vec<Range<u32>>,
     pub is_dirty: bool,
@@ -547,6 +671,7 @@ impl Page {
             strokes: Vec::new(),
             background,
             pdf_background: None,
+            title: None,
             vertex_cache: Vec::new(),
             stroke_ranges: Vec::new(),
             is_dirty: false,
@@ -563,6 +688,7 @@ impl Page {
             strokes: Vec::new(),
             background,
             pdf_background: None,
+            title: None,
             vertex_cache: Vec::new(),
             stroke_ranges: Vec::new(),
             is_dirty: false,
@@ -681,6 +807,66 @@ impl Page {
         self.is_dirty = true;
 
         removed
+    }
+
+    /// Teilradierer: entfernt den Teil aller Striche im Kreis um `eraser_pos`. Getroffene
+    /// Striche werden durch ihre übrig gebliebenen Stücke ersetzt (neue IDs aus `next_id`),
+    /// Formen als Ganzes entfernt, Bilder nie. Aufeinanderfolgende Schnitte eines Radierzugs
+    /// bilden einen gemeinsamen Undo-Schritt. Gibt `true` zurück, wenn sich etwas geändert hat.
+    pub fn erase_partial_at(
+        &mut self,
+        eraser_pos: glam::Vec2,
+        eraser_radius: f32,
+        next_id: &mut u64,
+    ) -> bool {
+        let mut removed = Vec::new();
+        let mut added = Vec::new();
+        let mut result = Vec::with_capacity(self.strokes.len());
+        for stroke in std::mem::take(&mut self.strokes) {
+            let reach = eraser_radius + stroke.width / 2.0;
+            if stroke.is_image() || !stroke.aabb.expanded(reach).contains_point(eraser_pos) {
+                result.push(stroke);
+                continue;
+            }
+            if stroke.shape.is_some() {
+                // Formen werden ganz radiert, sobald der Radierer sie berührt
+                if stroke.distance_to_point(eraser_pos) <= reach {
+                    removed.push(stroke);
+                } else {
+                    result.push(stroke);
+                }
+                continue;
+            }
+            match split_samples_at_circle(&stroke.points, eraser_pos, reach, stroke.width * 0.5) {
+                None => result.push(stroke),
+                Some(pieces) => {
+                    for samples in pieces {
+                        let vertices = crate::storage::reconstruct_stroke_vertices(
+                            &samples,
+                            stroke.color,
+                            stroke.width,
+                            stroke.tool,
+                            true,
+                        );
+                        let mut piece = Stroke::new(*next_id, samples, vertices, stroke.color);
+                        *next_id += 1;
+                        piece.tool = stroke.tool;
+                        piece.width = stroke.width;
+                        piece.finalized = true;
+                        result.push(piece.clone());
+                        added.push(piece);
+                    }
+                    removed.push(stroke);
+                }
+            }
+        }
+        self.strokes = result;
+        if removed.is_empty() {
+            return false;
+        }
+        self.history.push_split(removed, added);
+        self.is_dirty = true;
+        true
     }
 
     /// Baut den gecachten Vertex-Puffer der Seite neu auf, wenn `is_dirty` gesetzt ist.
@@ -883,6 +1069,25 @@ impl Notebook {
         &mut self.pages[self.current_page_index]
     }
 
+    /// Radiert auf der aktuellen Seite gemäß `mode` (ganze Striche, nur Textmarker oder
+    /// Teilstriche). Gibt `true` zurück, wenn sich etwas geändert hat.
+    pub fn erase_at(
+        &mut self,
+        eraser_pos: glam::Vec2,
+        eraser_radius: f32,
+        max_stroke_radius: f32,
+        mode: EraserMode,
+    ) -> bool {
+        let page = &mut self.pages[self.current_page_index];
+        if mode == EraserMode::Partial {
+            page.erase_partial_at(eraser_pos, eraser_radius, &mut self.next_stroke_id)
+        } else {
+            !page
+                .erase_at(eraser_pos, eraser_radius, max_stroke_radius, mode)
+                .is_empty()
+        }
+    }
+
     /// Erzeugt eine eindeutige neue Stroke-ID.
     pub fn next_stroke_id(&mut self) -> u64 {
         let id = self.next_stroke_id;
@@ -927,6 +1132,20 @@ impl Notebook {
         if !self.pages.is_empty() {
             self.current_page_index = self.pages.len() - 1;
         }
+    }
+
+    /// Setzt den Titel der Seite `page_id` (leer = kein Titel). `true`, wenn er sich geändert
+    /// hat.
+    pub fn set_page_title(&mut self, page_id: u64, title: &str) -> bool {
+        let title = normalize_page_title(title);
+        let Some(page) = self.pages.iter_mut().find(|p| p.id == page_id) else {
+            return false;
+        };
+        if page.title == title || !page.is_loaded || page.is_readonly() {
+            return false;
+        }
+        page.title = title;
+        true
     }
 
     /// Text für das On-Screen-Display (OSD), z. B. "Seite 3 / 12".
@@ -1383,6 +1602,151 @@ mod tests {
         image.rotate(glam::Vec2::new(200.0, 150.0), std::f32::consts::FRAC_PI_2);
         let rotated = image.image_corners().unwrap();
         assert!((rotated[0] - glam::Vec2::new(250.0, 50.0)).length() < 1e-3);
+    }
+
+    fn line_samples(points: &[(f32, f32)]) -> Vec<StylusSample> {
+        points
+            .iter()
+            .enumerate()
+            .map(|(i, &(x, y))| StylusSample {
+                position: glam::Vec2::new(x, y),
+                pressure: 0.5,
+                timestamp: i as f64,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_split_samples_at_circle() {
+        let c = glam::Vec2::new(50.0, 0.0);
+        // Lange Strecke mit nur zwei Punkten, Kreis in der Mitte: zwei Stücke, am Rand gekürzt
+        let pieces =
+            split_samples_at_circle(&line_samples(&[(0.0, 0.0), (100.0, 0.0)]), c, 10.0, 1.0)
+                .unwrap();
+        assert_eq!(pieces.len(), 2);
+        assert!((pieces[0].last().unwrap().position.x - 40.0).abs() < 1e-3);
+        assert!((pieces[1][0].position.x - 60.0).abs() < 1e-3);
+        // Druck und Zeit werden am Schnittpunkt interpoliert
+        assert!((pieces[0].last().unwrap().timestamp - 0.4).abs() < 1e-3);
+
+        // Viele Punkte, Kreis am Ende: ein Stück bleibt
+        let dense: Vec<(f32, f32)> = (0..=10).map(|i| (i as f32 * 10.0, 0.0)).collect();
+        let pieces = split_samples_at_circle(
+            &line_samples(&dense),
+            glam::Vec2::new(100.0, 0.0),
+            15.0,
+            1.0,
+        )
+        .unwrap();
+        assert_eq!(pieces.len(), 1);
+        assert!((pieces[0].last().unwrap().position.x - 85.0).abs() < 1e-3);
+
+        // Ganz im Kreis: nichts bleibt; Kreis weit weg: unberührt
+        assert_eq!(
+            split_samples_at_circle(&line_samples(&[(48.0, 0.0), (52.0, 0.0)]), c, 10.0, 1.0),
+            Some(Vec::new())
+        );
+        assert_eq!(
+            split_samples_at_circle(
+                &line_samples(&dense),
+                glam::Vec2::new(50.0, 40.0),
+                10.0,
+                1.0
+            ),
+            None
+        );
+        // Winziger Rest wird verworfen
+        let pieces = split_samples_at_circle(
+            &line_samples(&[(0.0, 0.0), (100.0, 0.0)]),
+            glam::Vec2::new(5.0, 0.0),
+            4.0,
+            2.0,
+        )
+        .unwrap();
+        assert_eq!(pieces.len(), 1);
+        assert!((pieces[0][0].position.x - 9.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn test_partial_erase_splits_and_undoes_in_one_step() {
+        let mut notebook = Notebook::new();
+        let mut stroke = Stroke::new(
+            1,
+            line_samples(&[(100.0, 100.0), (500.0, 100.0)]),
+            Vec::new(),
+            [0.0, 0.0, 0.0, 1.0],
+        );
+        stroke.width = 5.0;
+        notebook.next_stroke_id = 10;
+        let page = notebook.current_page_mut();
+        page.add_stroke(stroke);
+        page.add_stroke(Stroke::new_image(
+            2,
+            "a.png".into(),
+            [
+                glam::Vec2::new(0.0, 0.0),
+                glam::Vec2::new(900.0, 0.0),
+                glam::Vec2::new(900.0, 900.0),
+                glam::Vec2::new(0.0, 900.0),
+            ],
+        ));
+        let mut shape = crate::geometry::shape_to_stroke(
+            crate::geometry::RecognizedShape::Line {
+                start: glam::Vec2::new(100.0, 300.0),
+                end: glam::Vec2::new(500.0, 300.0),
+            },
+            3,
+            [0.0, 0.0, 0.0, 1.0],
+            5.0,
+        );
+        shape.recompute_aabb();
+        page.add_stroke(shape);
+        let undo_depth = page.history.undo_stack.len();
+
+        // Zwei Schnitte desselben Zugs durch die Linie
+        assert!(notebook.erase_at(
+            glam::Vec2::new(200.0, 100.0),
+            20.0,
+            12.0,
+            EraserMode::Partial
+        ));
+        assert!(notebook.erase_at(
+            glam::Vec2::new(400.0, 100.0),
+            20.0,
+            12.0,
+            EraserMode::Partial
+        ));
+        // Form wird als Ganzes radiert
+        assert!(notebook.erase_at(
+            glam::Vec2::new(300.0, 300.0),
+            20.0,
+            12.0,
+            EraserMode::Partial
+        ));
+        let page = notebook.current_page();
+        let ink: Vec<&Stroke> = page.strokes.iter().filter(|s| !s.is_image()).collect();
+        assert_eq!(ink.len(), 3, "Linie in drei Stücke zerlegt, Form entfernt");
+        assert!(ink.iter().all(|s| s.id >= 10 && !s.vertices.is_empty()));
+        assert!(page.strokes.iter().any(|s| s.id == 2), "Bild bleibt");
+        assert!(notebook.next_stroke_id > 10);
+
+        // Ein einziger Undo-Schritt stellt alles wieder her
+        let page = notebook.current_page_mut();
+        assert_eq!(page.history.undo_stack.len(), undo_depth + 1);
+        assert!(page.undo());
+        let mut ids: Vec<u64> = page.strokes.iter().map(|s| s.id).collect();
+        ids.sort();
+        assert_eq!(ids, vec![1, 2, 3]);
+        assert!(page.redo());
+        assert_eq!(page.strokes.iter().filter(|s| !s.is_image()).count(), 3);
+
+        // Danebenradieren ändert nichts
+        assert!(!notebook.erase_at(
+            glam::Vec2::new(800.0, 800.0),
+            20.0,
+            12.0,
+            EraserMode::Partial
+        ));
     }
 
     #[test]

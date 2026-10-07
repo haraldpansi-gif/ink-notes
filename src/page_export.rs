@@ -1,0 +1,233 @@
+//! Export einzelner Seiten als PNG oder SVG und einer Auswahl als Bild.
+//!
+//! Grundlage ist immer der PDF-Export: die Seite wird als einseitiges PDF erzeugt (mit
+//! Bildern, importierten PDF-Seiten und Formen) und anschließend mit `hayro` gerastert bzw.
+//! mit `hayro-svg` nach SVG umgewandelt. So sehen PDF, PNG und SVG gleich aus.
+
+use std::error::Error;
+
+use hayro::hayro_interpret::InterpreterSettings;
+use hayro::hayro_syntax::Pdf;
+use hayro::vello_cpu::color::palette::css::{TRANSPARENT, WHITE};
+use hayro::{PixmapSettings, RenderCache, RenderSettings};
+
+use crate::assets::{AssetStore, RgbaImage};
+use crate::document::{Aabb, Notebook, Page, PageBackground, A4_WIDTH_MM, PAGE_WIDTH};
+use crate::export::{export_notebook_to_bytes, ExportStrategy};
+
+/// Auflösung des PNG-Exports einer Seite.
+pub const PAGE_PNG_DPI: f32 = 200.0;
+/// Auflösung einer in die Zwischenablage kopierten Auswahl.
+pub const SELECTION_PNG_DPI: f32 = 150.0;
+
+/// Hintergrund beim Bild-Export.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImageBackground {
+    /// Weißes Papier mit Raster bzw. importierter PDF-Seite
+    Paper,
+    /// Transparent, nur Bilder und Tinte (ohne Raster und ohne importierte PDF-Seite)
+    Transparent,
+}
+
+/// Erzeugt ein einseitiges PDF aus `page`.
+fn single_page_pdf(page: &Page, assets: Option<&AssetStore>) -> Result<Vec<u8>, Box<dyn Error>> {
+    let notebook = Notebook::from_pages(vec![page.clone()], 0, 1, page.id + 1);
+    export_notebook_to_bytes(&notebook, ExportStrategy::FilledPolygon, assets)
+}
+
+/// Seite ohne Raster und PDF-Hintergrund (für transparenten Export und Auswahlen).
+fn content_only(page: &Page) -> Page {
+    let mut page = page.clone();
+    page.background = PageBackground::Blank;
+    page.pdf_background = None;
+    page
+}
+
+/// Rastert die erste Seite eines PDFs mit `dpi`; Farben ohne Vormultiplikation.
+fn rasterize(pdf_bytes: Vec<u8>, dpi: f32, transparent: bool) -> Result<RgbaImage, Box<dyn Error>> {
+    let pdf = Pdf::new(pdf_bytes).map_err(|e| format!("PDF nicht lesbar: {e:?}"))?;
+    let page = pdf.pages().first().ok_or("PDF ohne Seite")?;
+    let scale = dpi / 72.0;
+    let pixmap = hayro::render(
+        page,
+        &RenderCache::new(),
+        &InterpreterSettings::default(),
+        &RenderSettings::default(),
+        &PixmapSettings {
+            x_scale: scale,
+            y_scale: scale,
+            bg_color: if transparent { TRANSPARENT } else { WHITE },
+        },
+    );
+    let mut pixels = pixmap.data_as_u8_slice().to_vec();
+    // hayro liefert vormultiplizierte Farben; PNG erwartet gerade Farben
+    for px in pixels.as_chunks_mut::<4>().0 {
+        let a = px[3] as u32;
+        if a > 0 && a < 255 {
+            for c in &mut px[..3] {
+                *c = ((*c as u32 * 255 + a / 2) / a).min(255) as u8;
+            }
+        }
+    }
+    Ok(RgbaImage {
+        width: pixmap.width() as u32,
+        height: pixmap.height() as u32,
+        pixels,
+    })
+}
+
+/// Kodiert ein Bild als PNG.
+pub fn encode_png(image: &RgbaImage) -> Result<Vec<u8>, Box<dyn Error>> {
+    let buffer = image::RgbaImage::from_raw(image.width, image.height, image.pixels.clone())
+        .ok_or("Pixeldaten passen nicht zur Bildgröße")?;
+    let mut out = Vec::new();
+    image::DynamicImage::ImageRgba8(buffer)
+        .write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)?;
+    Ok(out)
+}
+
+/// Seite als PNG (A4 mit [`PAGE_PNG_DPI`]).
+pub fn page_png(
+    page: &Page,
+    assets: Option<&AssetStore>,
+    background: ImageBackground,
+) -> Result<Vec<u8>, Box<dyn Error>> {
+    let image = match background {
+        ImageBackground::Paper => rasterize(single_page_pdf(page, assets)?, PAGE_PNG_DPI, false)?,
+        ImageBackground::Transparent => rasterize(
+            single_page_pdf(&content_only(page), assets)?,
+            PAGE_PNG_DPI,
+            true,
+        )?,
+    };
+    encode_png(&image)
+}
+
+/// Seite als SVG (Vektor; Schriften importierter PDFs werden zu Pfaden).
+pub fn page_svg(page: &Page, assets: Option<&AssetStore>) -> Result<String, Box<dyn Error>> {
+    let pdf =
+        Pdf::new(single_page_pdf(page, assets)?).map_err(|e| format!("PDF nicht lesbar: {e:?}"))?;
+    let pdf_page = pdf.pages().first().ok_or("PDF ohne Seite")?;
+    Ok(hayro_svg::convert(
+        pdf_page,
+        &hayro_svg::RenderCache::new(),
+        &InterpreterSettings::default(),
+        &hayro_svg::SvgRenderSettings {
+            bg_color: [255, 255, 255, 255],
+        },
+    ))
+}
+
+/// Bild der Objekte `ids` auf `page`, auf ihren Umriss zugeschnitten, mit transparentem
+/// Hintergrund. `None`, wenn keines der Objekte auf der Seite liegt.
+pub fn selection_image(
+    page: &Page,
+    ids: &[u64],
+    assets: Option<&AssetStore>,
+) -> Result<Option<RgbaImage>, Box<dyn Error>> {
+    let mut selected = content_only(page);
+    selected.strokes.retain(|s| ids.contains(&s.id));
+    let Some(bounds) = Page::selection_aabb(&selected.strokes) else {
+        return Ok(None);
+    };
+    let max_width = selected.strokes.iter().map(|s| s.width).fold(0.0, f32::max);
+    let bounds: Aabb = bounds.expanded(max_width / 2.0 + 4.0);
+
+    let full = rasterize(single_page_pdf(&selected, assets)?, SELECTION_PNG_DPI, true)?;
+    // Seiteneinheiten → Pixel
+    let px_per_unit = SELECTION_PNG_DPI / 25.4 * A4_WIDTH_MM / PAGE_WIDTH;
+    let x0 = ((bounds.min.x * px_per_unit).floor().max(0.0) as u32).min(full.width);
+    let y0 = ((bounds.min.y * px_per_unit).floor().max(0.0) as u32).min(full.height);
+    let x1 = ((bounds.max.x * px_per_unit).ceil().max(0.0) as u32).min(full.width);
+    let y1 = ((bounds.max.y * px_per_unit).ceil().max(0.0) as u32).min(full.height);
+    if x1 <= x0 || y1 <= y0 {
+        return Ok(None);
+    }
+    let (w, h) = (x1 - x0, y1 - y0);
+    let mut pixels = Vec::with_capacity((w * h * 4) as usize);
+    for y in y0..y1 {
+        let start = ((y * full.width + x0) * 4) as usize;
+        pixels.extend_from_slice(&full.pixels[start..start + (w * 4) as usize]);
+    }
+    Ok(Some(RgbaImage {
+        width: w,
+        height: h,
+        pixels,
+    }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::document::{Stroke, StylusSample, PAGE_HEIGHT};
+
+    fn page_with_line() -> Page {
+        let mut page = Page::new(1, PageBackground::Grid5mm);
+        let samples: Vec<StylusSample> = (0..=20)
+            .map(|i| StylusSample {
+                position: glam::Vec2::new(500.0 + i as f32 * 20.0, 1000.0),
+                pressure: 0.6,
+                timestamp: i as f64 * 0.01,
+            })
+            .collect();
+        let vertices = crate::storage::reconstruct_stroke_vertices(
+            &samples,
+            [0.9, 0.1, 0.1, 1.0],
+            20.0,
+            Default::default(),
+            true,
+        );
+        let mut stroke = Stroke::new(7, samples, vertices, [0.9, 0.1, 0.1, 1.0]);
+        stroke.width = 20.0;
+        page.strokes.push(stroke);
+        page
+    }
+
+    fn decode(png: &[u8]) -> image::RgbaImage {
+        image::load_from_memory(png).unwrap().into_rgba8()
+    }
+
+    #[test]
+    fn test_page_png_paper_and_transparent() {
+        let page = page_with_line();
+        let paper = decode(&page_png(&page, None, ImageBackground::Paper).unwrap());
+        // A4 mit 200 dpi
+        assert_eq!(paper.width(), (A4_WIDTH_MM / 25.4 * PAGE_PNG_DPI) as u32);
+        assert_eq!(paper.get_pixel(5, 5).0[3], 255, "Papier ist deckend");
+
+        let clear = decode(&page_png(&page, None, ImageBackground::Transparent).unwrap());
+        assert_eq!(clear.get_pixel(5, 5).0[3], 0, "Hintergrund ist transparent");
+        // Die Linie ist rot und deckend
+        let px_per_unit = clear.width() as f32 / PAGE_WIDTH;
+        let line = clear.get_pixel((700.0 * px_per_unit) as u32, (1000.0 * px_per_unit) as u32);
+        assert!(
+            line.0[0] > 180 && line.0[1] < 80 && line.0[3] > 200,
+            "{line:?}"
+        );
+        assert!(clear.height() as f32 / clear.width() as f32 - PAGE_HEIGHT / PAGE_WIDTH < 0.01);
+    }
+
+    #[test]
+    fn test_page_svg_contains_ink() {
+        let svg = page_svg(&page_with_line(), None).unwrap();
+        assert!(svg.starts_with("<svg") || svg.contains("<svg"));
+        assert!(svg.contains("<path"));
+        assert!(svg.trim_end().ends_with("</svg>"));
+    }
+
+    #[test]
+    fn test_selection_image_is_cropped() {
+        let page = page_with_line();
+        let image = selection_image(&page, &[7], None).unwrap().unwrap();
+        // Linie 400 Einheiten (40 mm) lang: Bild etwas breiter als 40 mm bei 150 dpi
+        let expected = 40.0 / 25.4 * SELECTION_PNG_DPI;
+        assert!(
+            (image.width as f32) > expected && (image.width as f32) < expected * 1.25,
+            "{} px",
+            image.width
+        );
+        assert!(image.height < image.width / 3);
+        assert!(image.pixels.as_chunks::<4>().0.iter().any(|p| p[3] > 200));
+        assert!(selection_image(&page, &[99], None).unwrap().is_none());
+    }
+}
