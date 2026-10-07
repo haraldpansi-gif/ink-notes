@@ -145,7 +145,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .build(&event_loop)?,
     );
 
-    let mut canvas = pollster::block_on(CanvasState::new(window.clone()))?;
+    let mut canvas = match pollster::block_on(CanvasState::new(window.clone())) {
+        Ok(canvas) => canvas,
+        Err(err) => {
+            eprintln!("[Grafik-Fehler] {err}");
+            std::process::exit(1);
+        }
+    };
 
     let mut tablet_manager = match octotablet::builder::Builder::default().build_shared(&window) {
         Ok(mgr) => {

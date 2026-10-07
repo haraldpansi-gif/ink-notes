@@ -87,8 +87,35 @@ pub fn spline_vertices_to_ndc(
 }
 
 /// Verwaltet den GPU-Zustand, Surface, Pipelines und Buffer für das Inking.
+/// Meldung, wenn kein Grafikadapter das Fenster darstellen kann.
+pub const NO_USABLE_GPU_MESSAGE: &str = "Keine nutzbare Grafikschnittstelle gefunden.\n\
+     Häufigste Ursache: Der Benutzer darf nicht auf die Grafikkarte zugreifen (/dev/dri).\n\
+     Prüfen mit `ls -l /dev/dri` und `groups`; ggf. `sudo usermod -aG render,video $USER`\n\
+     und neu anmelden. Alternativ einen Software-Renderer installieren (Paket mesa-vulkan-drivers)\n\
+     oder die Schnittstelle festlegen, z. B. `WGPU_BACKEND=vulkan ink-notes`.";
+
+/// Wählt den Darstellungsmodus: Mailbox (geringste Latenz), sonst Fifo, sonst den ersten
+/// angebotenen. `None`, wenn keiner angeboten wird. `INK_FORCE_FIFO` erzwingt Fifo.
+pub fn choose_present_mode(available: &[wgpu::PresentMode]) -> Option<wgpu::PresentMode> {
+    let force_fifo = std::env::var("INK_FORCE_FIFO").is_ok();
+    let preferred: &[wgpu::PresentMode] = if force_fifo {
+        &[wgpu::PresentMode::Fifo]
+    } else {
+        &[wgpu::PresentMode::Mailbox, wgpu::PresentMode::Fifo]
+    };
+    preferred
+        .iter()
+        .copied()
+        .find(|m| available.contains(m))
+        .or_else(|| available.first().copied())
+}
+
 pub struct CanvasState {
     pub surface: wgpu::Surface<'static>,
+    /// Verwendeter Grafikadapter (für erneute Abfrage der Surface-Fähigkeiten bei Größenänderung)
+    adapter: wgpu::Adapter,
+    /// Meldung „keine Darstellungsmodi“ wurde bereits ausgegeben
+    presentation_warned: bool,
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
     pub config: wgpu::SurfaceConfiguration,
@@ -149,23 +176,47 @@ impl CanvasState {
         let viewport =
             PageViewport::calculate(size.width as f32, size.height as f32, Self::VIEWPORT_MARGIN);
 
-        // 1. WGPU Instance & Surface
+        // 1. WGPU Instance & Surface (Grafikschnittstelle per WGPU_BACKEND wählbar, z. B. "vulkan")
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::all(),
+            backends: wgpu::util::backend_bits_from_env().unwrap_or(wgpu::Backends::all()),
             ..Default::default()
         });
 
         let surface = instance.create_surface(window.clone())?;
 
-        // 2. Adapter auswählen (hohe Performance bevorzugt)
-        let adapter = instance
-            .request_adapter(&wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::HighPerformance,
-                compatible_surface: Some(&surface),
-                force_fallback_adapter: false,
-            })
-            .await
-            .ok_or("Kein passender GPU-Adapter gefunden")?;
+        // 2. Adapter auswählen: zuerst die GPU, dann der Software-Renderer (z. B. lavapipe).
+        //    Ein Adapter taugt nur, wenn er für dieses Fenster Formate und Darstellungsmodi
+        //    anbietet – fehlt z. B. der Zugriff auf /dev/dri, ist die Liste leer.
+        let mut chosen = None;
+        for force_fallback_adapter in [false, true] {
+            let Some(adapter) = instance
+                .request_adapter(&wgpu::RequestAdapterOptions {
+                    power_preference: wgpu::PowerPreference::HighPerformance,
+                    compatible_surface: Some(&surface),
+                    force_fallback_adapter,
+                })
+                .await
+            else {
+                continue;
+            };
+            let info = adapter.get_info();
+            let caps = surface.get_capabilities(&adapter);
+            match choose_present_mode(&caps.present_modes) {
+                Some(mode) if !caps.formats.is_empty() && !caps.alpha_modes.is_empty() => {
+                    eprintln!(
+                        "[Grafik] Adapter: {} ({:?}), Darstellungsmodus {:?}",
+                        info.name, info.backend, mode
+                    );
+                    chosen = Some((adapter, caps, mode));
+                    break;
+                }
+                _ => eprintln!(
+                    "[Grafik] Adapter {} ({:?}) bietet für das Fenster keine Darstellung an, versuche den nächsten.",
+                    info.name, info.backend
+                ),
+            }
+        }
+        let (adapter, surface_caps, present_mode) = chosen.ok_or(NO_USABLE_GPU_MESSAGE)?;
 
         // 3. Device & Queue erstellen
         let (device, queue) = adapter
@@ -179,28 +230,13 @@ impl CanvasState {
             )
             .await?;
 
-        // 4. Zero-Latency-Pufferung: Mailbox mit Fallback Fifo & Frame-Latency 1
-        let surface_caps = surface.get_capabilities(&adapter);
+        // 4. Zero-Latency-Pufferung (Mailbox, sonst Fifo) & Frame-Latency 1
         let surface_format = surface_caps
             .formats
             .iter()
             .copied()
             .find(|f| f.is_srgb())
             .unwrap_or(surface_caps.formats[0]);
-
-        let present_mode = if std::env::var("INK_FORCE_FIFO").is_ok() {
-            eprintln!("Erzwinge PresentMode::Fifo (via INK_FORCE_FIFO)");
-            wgpu::PresentMode::Fifo
-        } else if surface_caps
-            .present_modes
-            .contains(&wgpu::PresentMode::Mailbox)
-        {
-            eprintln!("Verwende Zero-Latency PresentMode::Mailbox");
-            wgpu::PresentMode::Mailbox
-        } else {
-            eprintln!("Mailbox nicht verfügbar, Fallback auf PresentMode::Fifo");
-            wgpu::PresentMode::Fifo
-        };
 
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
@@ -369,6 +405,8 @@ impl CanvasState {
 
         Ok(Self {
             surface,
+            adapter,
+            presentation_warned: false,
             device,
             queue,
             config,
@@ -452,6 +490,23 @@ impl CanvasState {
             self.size = new_size;
             self.config.width = new_size.width;
             self.config.height = new_size.height;
+            // Fähigkeiten neu abfragen: Ein nicht (mehr) angebotener Modus führt in wgpu zum Absturz
+            let caps = self.surface.get_capabilities(&self.adapter);
+            if !caps.present_modes.contains(&self.config.present_mode) {
+                match choose_present_mode(&caps.present_modes) {
+                    Some(mode) => self.config.present_mode = mode,
+                    None => {
+                        if !self.presentation_warned {
+                            eprintln!(
+                                "[Grafik] Fenster kann derzeit nicht dargestellt werden (keine Darstellungsmodi). {}",
+                                NO_USABLE_GPU_MESSAGE
+                            );
+                            self.presentation_warned = true;
+                        }
+                        return;
+                    }
+                }
+            }
             self.surface.configure(&self.device, &self.config);
             self.recalculate_viewport();
         }
@@ -857,6 +912,16 @@ impl CanvasState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_choose_present_mode() {
+        use wgpu::PresentMode::{Fifo, Immediate, Mailbox};
+        assert_eq!(choose_present_mode(&[Fifo, Mailbox]), Some(Mailbox));
+        assert_eq!(choose_present_mode(&[Fifo, Immediate]), Some(Fifo));
+        assert_eq!(choose_present_mode(&[Immediate]), Some(Immediate));
+        // Keine Darstellungsmodi (z. B. kein Zugriff auf /dev/dri): kein Absturz, sondern None
+        assert_eq!(choose_present_mode(&[]), None);
+    }
 
     #[test]
     fn test_pixel_to_ndc_mapping() {
