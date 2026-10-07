@@ -113,6 +113,39 @@ pub enum StrokeTool {
     Shape,
 }
 
+impl StrokeTool {
+    /// Werkzeug eines gespeicherten Strichs. Bis v0.3.7 wurde das Werkzeug nicht erfasst und
+    /// jeder Strich als `pen` gespeichert; Textmarker erkennt man dann an der
+    /// Halbtransparenz (der Stift ist immer deckend), Formen an der erkannten Form.
+    pub fn resolve_stored(stored: StrokeTool, color: [f32; 4], has_shape: bool) -> StrokeTool {
+        match stored {
+            StrokeTool::Pen if has_shape => StrokeTool::Shape,
+            StrokeTool::Pen if color[3] < 0.99 => StrokeTool::Highlighter,
+            other => other,
+        }
+    }
+}
+
+/// Welche Striche der Radierer entfernt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum EraserMode {
+    /// Alle getroffenen Striche
+    #[default]
+    All,
+    /// Nur Textmarker – die Handschrift darunter bleibt erhalten
+    HighlighterOnly,
+}
+
+impl EraserMode {
+    /// Darf ein Strich dieses Werkzeugs radiert werden?
+    pub fn erases(self, tool: StrokeTool) -> bool {
+        match self {
+            EraserMode::All => true,
+            EraserMode::HighlighterOnly => tool == StrokeTool::Highlighter,
+        }
+    }
+}
+
 /// Ein einzelner Vektor-Strich auf einer Seite.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Stroke {
@@ -469,7 +502,8 @@ impl Page {
         }
     }
 
-    /// Radiert alle Striche an der Position `eraser_pos` mit Radius `eraser_radius`.
+    /// Radiert alle Striche an der Position `eraser_pos` mit Radius `eraser_radius`,
+    /// die `mode` zulässt.
     ///
     /// Gibt die gelöschten Striche zurück (falls welche getroffen wurden).
     pub fn erase_at(
@@ -477,11 +511,14 @@ impl Page {
         eraser_pos: glam::Vec2,
         eraser_radius: f32,
         max_stroke_radius: f32,
+        mode: EraserMode,
     ) -> Vec<Stroke> {
         let mut hit_indices = Vec::new();
 
         for (i, stroke) in self.strokes.iter().enumerate() {
-            if stroke.intersects_eraser(eraser_pos, eraser_radius, max_stroke_radius) {
+            if mode.erases(stroke.tool)
+                && stroke.intersects_eraser(eraser_pos, eraser_radius, max_stroke_radius)
+            {
                 hit_indices.push(i);
             }
         }
@@ -1040,7 +1077,7 @@ mod tests {
         assert_eq!(page.strokes.len(), 2);
 
         // Radieren bei (30, 12): Trifft nur s1
-        let removed = page.erase_at(glam::Vec2::new(30.0, 12.0), 10.0, 2.0);
+        let removed = page.erase_at(glam::Vec2::new(30.0, 12.0), 10.0, 2.0, EraserMode::All);
         assert_eq!(removed.len(), 1);
         assert_eq!(removed[0].id, 1);
         assert_eq!(page.strokes.len(), 1);
@@ -1054,6 +1091,58 @@ mod tests {
         assert!(page.redo());
         assert_eq!(page.strokes.len(), 1);
         assert_eq!(page.strokes[0].id, 2);
+    }
+
+    #[test]
+    fn test_erase_highlighter_only_keeps_handwriting() {
+        let mut page = Page::new(1, PageBackground::Grid5mm);
+        let line = |id: u64, tool: StrokeTool| {
+            let mut stroke = Stroke::new(
+                id,
+                vec![
+                    StylusSample {
+                        position: glam::Vec2::new(10.0, 10.0),
+                        pressure: 0.5,
+                        timestamp: 0.0,
+                    },
+                    StylusSample {
+                        position: glam::Vec2::new(50.0, 10.0),
+                        pressure: 0.5,
+                        timestamp: 0.01,
+                    },
+                ],
+                vec![
+                    InkVertex::new(10.0, 10.0, [0.0, 0.0, 0.0, 1.0]),
+                    InkVertex::new(50.0, 10.0, [0.0, 0.0, 0.0, 1.0]),
+                ],
+                [0.0, 0.0, 0.0, 1.0],
+            );
+            stroke.tool = tool;
+            stroke
+        };
+        // Handschrift, Form und Textmarker liegen übereinander
+        page.add_stroke(line(1, StrokeTool::Pen));
+        page.add_stroke(line(2, StrokeTool::Highlighter));
+        page.add_stroke(line(3, StrokeTool::Shape));
+
+        let at = glam::Vec2::new(30.0, 10.0);
+        let removed = page.erase_at(at, 10.0, 2.0, EraserMode::HighlighterOnly);
+        assert_eq!(removed.iter().map(|s| s.id).collect::<Vec<_>>(), vec![2]);
+        assert_eq!(
+            page.strokes.iter().map(|s| s.id).collect::<Vec<_>>(),
+            vec![1, 3]
+        );
+        // Kein Textmarker mehr da: nichts wird entfernt, kein Undo-Eintrag
+        assert!(page
+            .erase_at(at, 10.0, 2.0, EraserMode::HighlighterOnly)
+            .is_empty());
+        assert!(page.undo());
+        assert_eq!(page.strokes.len(), 3);
+
+        // Normaler Radierer entfernt alles
+        let removed = page.erase_at(at, 10.0, 2.0, EraserMode::All);
+        assert_eq!(removed.len(), 3);
+        assert!(page.strokes.is_empty());
     }
 
     #[test]

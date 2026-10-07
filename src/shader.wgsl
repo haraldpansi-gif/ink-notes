@@ -14,6 +14,8 @@ struct VertexOutput {
 struct CameraUniforms {
     transform_scale: vec2<f32>,
     transform_offset: vec2<f32>,
+    // x: 1.0 = dunkle Tinte für dunkles Papier aufhellen (siehe `adapt_ink_color`)
+    ink_params: vec4<f32>,
 };
 
 @group(0) @binding(0)
@@ -31,4 +33,17 @@ fn vs_main(in: VertexInput) -> VertexOutput {
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     return in.color;
+}
+
+// Striche: bei dunklem Papier wird die HSL-Helligkeit dunkler Farben gespiegelt
+// (L -> 1 - L, Farbton und Sättigung bleiben). Entspricht `background::adapt_ink_color`.
+@fragment
+fn fs_ink(in: VertexOutput) -> @location(0) vec4<f32> {
+    if (camera.ink_params.x < 0.5) {
+        return in.color;
+    }
+    let max_c = max(max(in.color.r, in.color.g), in.color.b);
+    let min_c = min(min(in.color.r, in.color.g), in.color.b);
+    let lift = max(1.0 - max_c - min_c, 0.0);
+    return vec4<f32>(in.color.rgb + vec3<f32>(lift), in.color.a);
 }

@@ -53,3 +53,5 @@ strip = true
 
 [dev-dependencies]
 tempfile = "3.27.0"
+# Prüft den WGSL-Shader in den Tests (dieselbe Version wie in wgpu 0.19)
+naga = { version = "0.19", features = ["wgsl-in"] }

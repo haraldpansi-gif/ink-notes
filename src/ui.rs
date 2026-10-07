@@ -4,16 +4,19 @@
 //! (links oder rechts, umschaltbar):
 //! - Symbol-Knöpfe mit 40 px Kantenlänge (stift- und fingertauglich), Tooltips mit Kürzeln
 //! - Werkzeuge, Farben des aktiven Werkzeugs, Auswahl-Aktionen, Undo/Redo, Seitennavigation
-//! - Selten genutzte Funktionen (PDF, Hintergrund, Zoom, Touch-Modus, Leistenseite,
-//!   Updates, Speicherstatus) im ☰-Menü
+//! - Selten genutzte Funktionen (PDF, Hintergrund, Papierfarbe, Zoom, Touch-Modus,
+//!   Druckkurve, Leistenseite, Updates, Speicherstatus) im ☰-Menü
 //! - Popover (Stift/Marker/Menü) öffnen sich zur Blattseite hin
 //! - Hit-Testing für Event-Transparenz außerhalb der Leiste und der Popover
 
 use std::time::Instant;
 
 use crate::autosave::AutosaveStatus;
-use crate::document::{Notebook, Page, PageBackground, StrokeTool, PAGE_HEIGHT, PAGE_WIDTH};
-use crate::settings::SidebarSide;
+use crate::background::{adapt_ink_color, PaperTheme};
+use crate::document::{
+    EraserMode, Notebook, Page, PageBackground, StrokeTool, PAGE_HEIGHT, PAGE_WIDTH,
+};
+use crate::settings::{PressureCurve, SidebarSide};
 use crate::storage::NotebookSummary;
 
 /// Aktives Werkzeug für das Zeichnen oder Bearbeiten.
@@ -39,6 +42,15 @@ impl ActiveTool {
 
     pub fn is_drawing(&self) -> bool {
         matches!(self, ActiveTool::Pen | ActiveTool::Highlighter)
+    }
+
+    /// Werkzeug, das ein mit diesem Werkzeug gezeichneter Strich erhält.
+    pub fn stroke_tool(&self, has_shape: bool) -> StrokeTool {
+        match self {
+            _ if has_shape => StrokeTool::Shape,
+            ActiveTool::Highlighter => StrokeTool::Highlighter,
+            _ => StrokeTool::Pen,
+        }
     }
 }
 
@@ -132,6 +144,13 @@ pub enum UiAction {
     UnlockCorruptedPage(u64),
     /// Werkzeugleiste an die andere Fensterseite verlegen (wird gespeichert)
     SetSidebarSide(SidebarSide),
+    /// Papierfarbe der Anzeige und Aufhellen dunkler Tinte (wird gespeichert)
+    SetPaperTheme {
+        theme: PaperTheme,
+        adapt_ink: bool,
+    },
+    /// Druckkurve speichern (gilt während des Ziehens bereits über `UiState::pressure_curve`)
+    SavePressureCurve(PressureCurve),
     // Beenden-Sicherheit bei Fehlschlag
     RetryShutdown,
     ExportRecoveryAndExit,
@@ -183,6 +202,16 @@ pub struct UiState {
     pub sidebar_side: SidebarSide,
     /// Öffnungszustand des ☰-Menüs
     pub is_more_menu_open: bool,
+    /// Welche Striche der Radierer entfernt (gilt auch für Stiftrückseite und Seitentaste)
+    pub eraser_mode: EraserMode,
+    /// Papierfarbe der Anzeige
+    pub paper_theme: PaperTheme,
+    /// Dunkle Tinte auf dunklem Papier aufhellen
+    pub adapt_ink_colors: bool,
+    /// Druckkurve des Stifts
+    pub pressure_curve: PressureCurve,
+    /// Zuletzt gemessener Rohdruck des Stifts (Anzeige in der Druckkurve)
+    pub last_raw_pressure: Option<f32>,
 }
 
 impl Default for UiState {
@@ -218,6 +247,11 @@ impl Default for UiState {
             shutdown_error: None,
             sidebar_side: SidebarSide::Left,
             is_more_menu_open: false,
+            eraser_mode: EraserMode::All,
+            paper_theme: PaperTheme::White,
+            adapt_ink_colors: true,
+            pressure_curve: PressureCurve::default(),
+            last_raw_pressure: None,
         }
     }
 }
@@ -706,14 +740,21 @@ const PAGE_TILE: egui::Vec2 = egui::vec2(66.0, 66.0 * PAGE_HEIGHT / PAGE_WIDTH +
 /// Höchstzahl gezeichneter Punkte pro Vorschau (dünnt volle Seiten aus).
 const THUMBNAIL_POINT_BUDGET: usize = 1500;
 
-/// Zeichenbefehle für die verkleinerte Vorschau einer Seite in `rect` (A4-Format).
-/// Striche werden als Linien gezeichnet und bei vielen Punkten gleichmäßig ausgedünnt.
-pub fn page_thumbnail_shapes(page: &Page, rect: egui::Rect) -> Vec<egui::Shape> {
+/// Zeichenbefehle für die verkleinerte Vorschau einer Seite in `rect` (A4-Format) in der
+/// Papierfarbe `paper`. Striche werden als Linien gezeichnet und bei vielen Punkten
+/// gleichmäßig ausgedünnt; `adapt_ink` hellt dunkle Tinte wie auf dem Blatt auf.
+pub fn page_thumbnail_shapes(
+    page: &Page,
+    rect: egui::Rect,
+    paper: PaperTheme,
+    adapt_ink: bool,
+) -> Vec<egui::Shape> {
     let mut shapes = vec![egui::Shape::rect_filled(
         rect,
         egui::Rounding::same(3.0),
-        egui::Color32::WHITE,
+        linear_color32(paper.paper_color()),
     )];
+    let adapt = adapt_ink && paper.is_dark();
     let scale = rect.width() / PAGE_WIDTH;
     let to_screen = |p: glam::Vec2| rect.min + egui::vec2(p.x * scale, p.y * scale);
 
@@ -721,7 +762,12 @@ pub fn page_thumbnail_shapes(page: &Page, rect: egui::Rect) -> Vec<egui::Shape> 
     let step = total.div_ceil(THUMBNAIL_POINT_BUDGET).max(1);
 
     for stroke in &page.strokes {
-        let mut color = color32_from(stroke.color);
+        let ink = if adapt {
+            adapt_ink_color(stroke.color)
+        } else {
+            stroke.color
+        };
+        let mut color = color32_from(ink);
         if stroke.tool == StrokeTool::Highlighter {
             color = color.gamma_multiply(0.45);
         }
@@ -743,9 +789,15 @@ pub fn page_thumbnail_shapes(page: &Page, rect: egui::Rect) -> Vec<egui::Shape> 
     shapes
 }
 
+/// Linearer Farbwert (wie auf der GPU) als egui-Farbe (sRGB).
+fn linear_color32(color: [f32; 4]) -> egui::Color32 {
+    egui::Rgba::from_rgba_unmultiplied(color[0], color[1], color[2], color[3]).into()
+}
+
 /// Kachel der Seitenauswahl: Vorschau der Seite mit Seitenzahl darunter.
 fn page_thumbnail(
     ui: &mut egui::Ui,
+    state: &UiState,
     page: &Page,
     number: usize,
     is_current: bool,
@@ -757,7 +809,12 @@ fn page_thumbnail(
             egui::vec2(PAGE_TILE.x, PAGE_TILE.x * PAGE_HEIGHT / PAGE_WIDTH),
         );
         let painter = ui.painter();
-        painter.extend(page_thumbnail_shapes(page, thumb));
+        painter.extend(page_thumbnail_shapes(
+            page,
+            thumb,
+            state.paper_theme,
+            state.adapt_ink_colors,
+        ));
         if !page.is_loaded {
             painter.text(
                 thumb.center(),
@@ -788,6 +845,112 @@ fn page_thumbnail(
         );
     }
     response.on_hover_text(format!("Seite {number}"))
+}
+
+/// Auswahlknopf für eine Papierfarbe: Farbmuster und Name.
+fn paper_theme_button(ui: &mut egui::Ui, theme: PaperTheme, selected: bool) -> egui::Response {
+    let response = ui.add_sized(
+        [115.0, 28.0],
+        egui::SelectableLabel::new(selected, format!("     {}", theme.label())),
+    );
+    let swatch = egui::Rect::from_center_size(
+        egui::pos2(response.rect.min.x + 14.0, response.rect.center().y),
+        egui::vec2(14.0, 14.0),
+    );
+    ui.painter().rect_filled(
+        swatch,
+        egui::Rounding::same(3.0),
+        linear_color32(theme.paper_color()),
+    );
+    ui.painter().rect_stroke(
+        swatch,
+        egui::Rounding::same(3.0),
+        egui::Stroke::new(1.0_f32, egui::Color32::from_gray(120)),
+    );
+    response
+}
+
+/// Schieberegler für die Druckkurve mit Vorschau der Kennlinie. Änderungen gelten sofort
+/// (`state.pressure_curve`); zurückgegeben wird die Kurve, sobald sie gespeichert werden soll
+/// (Regler losgelassen oder per Tastatur geändert).
+fn pressure_curve_editor(ui: &mut egui::Ui, state: &mut UiState) -> Option<PressureCurve> {
+    let mut save = false;
+    let mut track = |response: egui::Response| {
+        if response.drag_stopped() || (response.changed() && !response.dragged()) {
+            save = true;
+        }
+    };
+
+    ui.add_space(4.0);
+    ui.label("Druckkurve des Stifts");
+    let (graph, _) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), 56.0), egui::Sense::hover());
+    let painter = ui.painter_at(graph);
+    painter.rect_filled(
+        graph,
+        egui::Rounding::same(4.0),
+        egui::Color32::from_black_alpha(90),
+    );
+    let to_screen = |raw: f32, out: f32| {
+        egui::pos2(
+            graph.min.x + 6.0 + raw * (graph.width() - 12.0),
+            graph.max.y - 6.0 - out * (graph.height() - 12.0),
+        )
+    };
+    painter.line_segment(
+        [to_screen(0.0, 0.0), to_screen(1.0, 1.0)],
+        egui::Stroke::new(1.0_f32, egui::Color32::from_white_alpha(40)),
+    );
+    let curve = state.pressure_curve;
+    let points: Vec<egui::Pos2> = (0..=48)
+        .map(|i| {
+            let raw = i as f32 / 48.0;
+            to_screen(raw, curve.apply(raw))
+        })
+        .collect();
+    painter.add(egui::Shape::line(
+        points,
+        egui::Stroke::new(2.0_f32, egui::Color32::from_rgb(110, 165, 255)),
+    ));
+    if let Some(raw) = state.last_raw_pressure {
+        let raw = raw.clamp(0.0, 1.0);
+        painter.circle_filled(
+            to_screen(raw, curve.apply(raw)),
+            4.0,
+            egui::Color32::from_rgb(255, 200, 80),
+        );
+    }
+
+    ui.horizontal(|ui| {
+        ui.label("weich");
+        ui.spacing_mut().slider_width = (ui.available_width() - 40.0).max(60.0);
+        track(ui.add(
+            egui::Slider::new(&mut state.pressure_curve.exponent, PressureCurve::EXPONENT_RANGE)
+                .logarithmic(true)
+                .show_value(false),
+        ).on_hover_text("Weich: schon leichter Druck ergibt kräftige Linien.\nHart: erst fester Druck ergibt kräftige Linien."));
+        ui.label("hart");
+    });
+    ui.horizontal(|ui| {
+        ui.label("Mindestdruck");
+        ui.spacing_mut().slider_width = (ui.available_width() - 60.0).max(60.0);
+        track(ui.add(
+            egui::Slider::new(&mut state.pressure_curve.threshold, PressureCurve::THRESHOLD_RANGE)
+                .custom_formatter(|v, _| format!("{:.0} %", v * 100.0))
+                .custom_parser(|s| s.trim().trim_end_matches('%').trim().parse::<f64>().ok().map(|v| v / 100.0)),
+        ).on_hover_text("Leichterer Druck zählt als kein Druck (dünnste Linie).\nHilft bei Stiften, die schon beim Schweben Druck melden."));
+    });
+    if ui
+        .add_enabled(
+            state.pressure_curve != PressureCurve::default(),
+            egui::Button::new("Druckkurve zurücksetzen"),
+        )
+        .clicked()
+    {
+        state.pressure_curve = PressureCurve::default();
+        save = true;
+    }
+    save.then_some(state.pressure_curve)
 }
 
 /// Rahmen der Popover neben der Werkzeugleiste.
@@ -1085,7 +1248,7 @@ pub fn render_ui(
                                     (
                                         ActiveTool::Eraser,
                                         SidebarIcon::Eraser,
-                                        "Radierer (E oder rechte Maustaste)",
+                                        "Radierer (E oder rechte Maustaste) – darunter: alles oder nur Textmarker",
                                     ),
                                     (
                                         ActiveTool::Select,
@@ -1146,10 +1309,44 @@ pub fn render_ui(
                                         }
                                     }
                                 }
-                                let missing = UiState::MAX_PALETTE_LEN.saturating_sub(shown);
-                                if missing > 0 {
-                                    let spacing = ui.spacing().item_spacing.y;
-                                    ui.add_space(missing as f32 * (swatch + spacing));
+                                let spacing = ui.spacing().item_spacing.y;
+                                let mut used = shown as f32 * (swatch + spacing);
+                                // Radierer: statt Farben die Radier-Modi im selben Platz
+                                if state.active_tool == ActiveTool::Eraser {
+                                    for (mode, icon, indicator, tooltip) in [
+                                        (
+                                            EraserMode::All,
+                                            SidebarIcon::Text("Alle"),
+                                            None,
+                                            "Alle Striche radieren",
+                                        ),
+                                        (
+                                            EraserMode::HighlighterOnly,
+                                            SidebarIcon::Glyph("🖊"),
+                                            Some(state.highlighter_color),
+                                            "Nur Textmarker radieren – Handschrift darunter bleibt",
+                                        ),
+                                    ] {
+                                        if sidebar_button(
+                                            ui,
+                                            btn,
+                                            icon,
+                                            state.eraser_mode == mode,
+                                            true,
+                                            indicator,
+                                            tooltip,
+                                        )
+                                        .clicked()
+                                        {
+                                            state.eraser_mode = mode;
+                                        }
+                                        used += btn + spacing;
+                                    }
+                                }
+                                let reserved =
+                                    UiState::MAX_PALETTE_LEN as f32 * (swatch + spacing);
+                                if reserved > used {
+                                    ui.add_space(reserved - used);
                                 }
 
                                 // --- Aktionen für die Auswahl ---
@@ -1623,6 +1820,10 @@ pub fn render_ui(
                                 );
                             });
 
+                            // Bei kleinen Fenstern scrollen statt abschneiden
+                            egui::ScrollArea::vertical()
+                                .max_height((ctx.screen_rect().height() - 90.0).max(150.0))
+                                .show(ui, |ui| {
                             section(ui, "DOKUMENT");
                             if ui
                                 .add_sized([ui.available_width(), 30.0], egui::Button::new("📄  Als PDF exportieren (Strg+E)"))
@@ -1668,6 +1869,48 @@ pub fn render_ui(
                                     }
                                 });
 
+                            section(ui, "PAPIERFARBE (NUR ANZEIGE)");
+                            let mut paper_changed = false;
+                            egui::Grid::new("more_menu_paper")
+                                .num_columns(2)
+                                .spacing([6.0, 6.0])
+                                .show(ui, |ui| {
+                                    for (i, theme) in PaperTheme::ALL.into_iter().enumerate() {
+                                        if paper_theme_button(ui, theme, state.paper_theme == theme)
+                                            .clicked()
+                                            && state.paper_theme != theme
+                                        {
+                                            state.paper_theme = theme;
+                                            paper_changed = true;
+                                        }
+                                        if i % 2 == 1 {
+                                            ui.end_row();
+                                        }
+                                    }
+                                });
+                            if ui
+                                .add_enabled(
+                                    state.paper_theme.is_dark(),
+                                    egui::Checkbox::new(
+                                        &mut state.adapt_ink_colors,
+                                        "Dunkle Stiftfarben aufhellen",
+                                    ),
+                                )
+                                .on_hover_text(
+                                    "Schwarz wird Weiß, Dunkelblau wird Hellblau. Gespeichert und \
+                                     als PDF exportiert werden immer die Originalfarben.",
+                                )
+                                .changed()
+                            {
+                                paper_changed = true;
+                            }
+                            if paper_changed {
+                                actions.push(UiAction::SetPaperTheme {
+                                    theme: state.paper_theme,
+                                    adapt_ink: state.adapt_ink_colors,
+                                });
+                            }
+
                             section(ui, "ZOOM");
                             ui.horizontal(|ui| {
                                 if ui
@@ -1702,6 +1945,9 @@ pub fn render_ui(
                             .on_hover_text(
                                 "Aus: ein Finger verschiebt, zwei Finger zoomen (empfohlen mit Stift).\nAn: ein Finger zeichnet.",
                             );
+                            if let Some(curve) = pressure_curve_editor(ui, state) {
+                                actions.push(UiAction::SavePressureCurve(curve));
+                            }
 
                             section(ui, "WERKZEUGLEISTE");
                             ui.horizontal(|ui| {
@@ -1757,6 +2003,7 @@ pub fn render_ui(
                                 state.close_overlays();
                                 state.is_update_dialog_open = true;
                             }
+                                });
                         })
                         .response
                         .rect
@@ -1796,8 +2043,14 @@ pub fn render_ui(
                                         .show(ui, |ui| {
                                             for (idx, page) in notebook.pages.iter().enumerate() {
                                                 let is_current = idx == notebook.current_page_index;
-                                                if page_thumbnail(ui, page, idx + 1, is_current)
-                                                    .clicked()
+                                                if page_thumbnail(
+                                                    ui,
+                                                    state,
+                                                    page,
+                                                    idx + 1,
+                                                    is_current,
+                                                )
+                                                .clicked()
                                                 {
                                                     actions.push(UiAction::GoToPage(idx));
                                                     state.show_page_jump_popup = false;
@@ -2918,6 +3171,19 @@ mod tests {
     }
 
     #[test]
+    fn test_stroke_tool_follows_active_tool() {
+        assert_eq!(ActiveTool::Pen.stroke_tool(false), StrokeTool::Pen);
+        assert_eq!(
+            ActiveTool::Highlighter.stroke_tool(false),
+            StrokeTool::Highlighter
+        );
+        assert_eq!(ActiveTool::Shape.stroke_tool(false), StrokeTool::Pen);
+        // Eingerastete Form (Formwerkzeug oder Halten am Strichende)
+        assert_eq!(ActiveTool::Shape.stroke_tool(true), StrokeTool::Shape);
+        assert_eq!(ActiveTool::Pen.stroke_tool(true), StrokeTool::Shape);
+    }
+
+    #[test]
     fn test_all_ui_texts_are_renderable() {
         // Zeichen ohne Glyphe in den eingebauten egui-Schriften erscheinen als leere Kästchen
         let ctx = egui::Context::default();
@@ -3130,11 +3396,14 @@ mod tests {
 
         // Leere Seite: nur das weiße Blatt
         let empty = Page::new(1, PageBackground::Blank);
-        assert_eq!(page_thumbnail_shapes(&empty, rect).len(), 1);
+        assert_eq!(
+            page_thumbnail_shapes(&empty, rect, PaperTheme::White, true).len(),
+            1
+        );
 
         // Striche liegen innerhalb der Kachel
         let page = page_with_strokes(3, 20);
-        let shapes = page_thumbnail_shapes(&page, rect);
+        let shapes = page_thumbnail_shapes(&page, rect, PaperTheme::White, true);
         assert_eq!(shapes.len(), 1 + 3);
         let pts = shape_points(&shapes);
         assert!(!pts.is_empty());
@@ -3145,7 +3414,7 @@ mod tests {
 
         // Sehr volle Seite wird auf das Punktbudget ausgedünnt (+ Endpunkte je Strich)
         let full = page_with_strokes(100, 1000);
-        let pts = shape_points(&page_thumbnail_shapes(&full, rect));
+        let pts = shape_points(&page_thumbnail_shapes(&full, rect, PaperTheme::White, true));
         assert!(
             pts.len() <= THUMBNAIL_POINT_BUDGET + 2 * 100,
             "{} Punkte statt höchstens {}",

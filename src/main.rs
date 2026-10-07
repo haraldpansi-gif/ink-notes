@@ -31,6 +31,19 @@ use ink_notes::ui::{self, ActiveTool, UiAction, UiState};
 use ink_notes::updater::UpdaterController;
 
 /// Aktualisiert den Fenstertitel als minimales On-Screen-Display (OSD) inklusive Autosave-Status.
+/// Speichert die UI-Einstellungen; ein Fehler wird gemeldet, bricht aber nichts ab.
+fn save_ui_settings(settings: &UiSettings, path: Option<&std::path::Path>, ui_state: &mut UiState) {
+    if let Some(path) = path {
+        if let Err(err) = settings.save_to(path) {
+            eprintln!(
+                "[Einstellungen] Konnte '{}' nicht speichern: {err}",
+                path.display()
+            );
+            ui_state.set_export_message(format!("Einstellung nicht gespeichert: {err}"));
+        }
+    }
+}
+
 fn update_window_title(
     window: &Window,
     notebook: &Notebook,
@@ -121,7 +134,8 @@ fn commit_stroke_to_notebook(
         canvas.finish_stroke(new_id)
     };
 
-    if let Some(stroke) = stroke_opt {
+    if let Some(mut stroke) = stroke_opt {
+        stroke.tool = ui_state.active_tool.stroke_tool(stroke.shape.is_some());
         let page = notebook.current_page_mut();
         page.add_stroke(stroke);
         canvas.sync_page(page);
@@ -259,6 +273,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map(UiSettings::load_from)
         .unwrap_or_default();
     ui_state.sidebar_side = ui_settings.sidebar_side;
+    ui_state.paper_theme = ui_settings.paper_theme;
+    ui_state.adapt_ink_colors = ui_settings.adapt_ink_colors;
+    ui_state.pressure_curve = ui_settings.pressure_curve;
     ui_state.current_notebook_id = manifest.id.clone();
     ui_state.document_title = manifest.title.clone();
     ui_state.available_notebooks = available_notebooks;
@@ -290,6 +307,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     canvas.sync_page(notebook.current_page_mut());
     canvas.set_stroke_color(ui_state.pen_color);
     canvas.set_stroke_width_mm(ui_state.pen_stroke_width_mm);
+    canvas.set_paper_theme(ui_state.paper_theme, ui_state.adapt_ink_colors);
 
     let start_time = Instant::now();
     let mut cursor_screen_pos = (0.0_f32, 0.0_f32);
@@ -471,7 +489,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         cursor_screen_pos = (sx, sy);
 
                                         if let Some(p) = pose.pressure.get() {
-                                            current_pressure = p;
+                                            current_pressure = ui_state.pressure_curve.apply(p);
+                                            ui_state.last_raw_pressure = Some(p);
                                         }
 
                                         // Stiftbewegung an egui weitergeben (Hover, Schieberegler ziehen),
@@ -498,8 +517,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 let removed = page.erase_at(
                                                     page_pt,
                                                     eraser_radius,
-                                                    stroke_max_radius,
-                                                );
+                                                    stroke_max_radius, ui_state.eraser_mode);
                                                 if !removed.is_empty() {
                                                     canvas.sync_page(page);
                                                     autosave.mark_dirty(&notebook, &mut manifest);
@@ -566,8 +584,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 let removed = page.erase_at(
                                                     page_pt,
                                                     eraser_radius,
-                                                    stroke_max_radius,
-                                                );
+                                                    stroke_max_radius, ui_state.eraser_mode);
                                                 if !removed.is_empty() {
                                                     canvas.sync_page(page);
                                                     autosave.mark_dirty(&notebook, &mut manifest);
@@ -1187,7 +1204,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     let (sx, sy) = cursor_screen_pos;
                                     if let Some(page_pt) = canvas.screen_to_page(sx, sy) {
                                         let page = notebook.current_page_mut();
-                                        let removed = page.erase_at(page_pt, eraser_radius, stroke_max_radius);
+                                        let removed = page.erase_at(page_pt, eraser_radius, stroke_max_radius, ui_state.eraser_mode);
                                         if !removed.is_empty() {
                                             canvas.sync_page(page);
                                             autosave.mark_dirty(&notebook, &mut manifest);
@@ -1455,7 +1472,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             } else if is_erasing {
                                 if let Some(page_pt) = canvas.screen_to_page(sx, sy) {
                                     let page = notebook.current_page_mut();
-                                    let removed = page.erase_at(page_pt, eraser_radius, stroke_max_radius);
+                                    let removed = page.erase_at(page_pt, eraser_radius, stroke_max_radius, ui_state.eraser_mode);
                                     if !removed.is_empty() {
                                         canvas.sync_page(page);
                                         autosave.mark_dirty(&notebook, &mut manifest);
@@ -1516,15 +1533,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let now = start_time.elapsed().as_secs_f64();
                         let tx = touch.location.x as f32;
                         let ty = touch.location.y as f32;
-                        let pressure = match touch.force {
-                            Some(winit::event::Force::Normalized(f)) => f as f32,
+                        let raw_pressure = match touch.force {
+                            Some(winit::event::Force::Normalized(f)) => Some(f as f32),
                             Some(winit::event::Force::Calibrated {
                                 force,
                                 max_possible_force,
                                 ..
-                            }) => (force / max_possible_force).clamp(0.0, 1.0) as f32,
-                            None => 0.5,
+                            }) => Some((force / max_possible_force).clamp(0.0, 1.0) as f32),
+                            None => None,
                         };
+                        // Druckkurve nur bei echtem Druck; Finger ohne Druck zeichnen mittelstark
+                        let pressure =
+                            raw_pressure.map_or(0.5, |p| ui_state.pressure_curve.apply(p));
 
                         let is_eraser_action = ui_state.active_tool == ActiveTool::Eraser;
 
@@ -1591,7 +1611,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             is_erasing = true;
                                             if let Some(page_pt) = canvas.screen_to_page(tx, ty) {
                                                 let page = notebook.current_page_mut();
-                                                let removed = page.erase_at(page_pt, eraser_radius, stroke_max_radius);
+                                                let removed = page.erase_at(page_pt, eraser_radius, stroke_max_radius, ui_state.eraser_mode);
                                                 if !removed.is_empty() {
                                                     canvas.sync_page(page);
                                                     autosave.mark_dirty(&notebook, &mut manifest);
@@ -1732,7 +1752,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     } else if is_erasing {
                                         if let Some(page_pt) = canvas.screen_to_page(tx, ty) {
                                             let page = notebook.current_page_mut();
-                                            let removed = page.erase_at(page_pt, eraser_radius, stroke_max_radius);
+                                            let removed = page.erase_at(page_pt, eraser_radius, stroke_max_radius, ui_state.eraser_mode);
                                             if !removed.is_empty() {
                                                 canvas.sync_page(page);
                                                 autosave.mark_dirty(&notebook, &mut manifest);
@@ -2410,13 +2430,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                                 UiAction::SetSidebarSide(side) => {
                                     ui_settings.sidebar_side = side;
-                                    if let Some(path) = ui_settings_path.as_deref() {
-                                        if let Err(err) = ui_settings.save_to(path) {
-                                            eprintln!("[Einstellungen] Konnte '{}' nicht speichern: {err}", path.display());
-                                            ui_state.set_export_message(format!("Einstellung nicht gespeichert: {err}"));
-                                        }
-                                    }
+                                    save_ui_settings(&ui_settings, ui_settings_path.as_deref(), &mut ui_state);
                                     window.request_redraw();
+                                }
+                                UiAction::SetPaperTheme { theme, adapt_ink } => {
+                                    canvas.set_paper_theme(theme, adapt_ink);
+                                    ui_settings.paper_theme = theme;
+                                    ui_settings.adapt_ink_colors = adapt_ink;
+                                    save_ui_settings(&ui_settings, ui_settings_path.as_deref(), &mut ui_state);
+                                    window.request_redraw();
+                                }
+                                UiAction::SavePressureCurve(curve) => {
+                                    ui_settings.pressure_curve = curve;
+                                    save_ui_settings(&ui_settings, ui_settings_path.as_deref(), &mut ui_state);
                                 }
                                 UiAction::ForceExit => {
                                     println!("[Shutdown] Beenden erzwungen trotz ungespeicherter Änderungen.");

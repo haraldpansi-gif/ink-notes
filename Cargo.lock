@@ -1057,6 +1057,7 @@ dependencies = [
  "fs2",
  "glam",
  "minisign-verify",
+ "naga",
  "octotablet",
  "pollster",
  "printpdf",

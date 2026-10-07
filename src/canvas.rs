@@ -11,7 +11,7 @@ use std::sync::Arc;
 use winit::dpi::PhysicalSize;
 use winit::window::Window;
 
-use crate::background::{generate_background_mesh, generate_paper_quad, DESK_COLOR};
+use crate::background::{generate_background_mesh, generate_paper_quad, PaperTheme};
 use crate::document::{Page, PageBackground, PageViewport, Stroke, StylusSample};
 use crate::filter::OneEuroFilter;
 use crate::spline::{self, ControlPoint, SplineConfig};
@@ -58,6 +58,8 @@ impl InkVertex {
 pub struct CameraUniforms {
     pub transform_scale: [f32; 2],
     pub transform_offset: [f32; 2],
+    /// x: 1.0 = dunkle Tinte aufhellen (Shader `fs_ink`), y–w: ungenutzt (Ausrichtung)
+    pub ink_params: [f32; 4],
 }
 
 /// Transformiert einen Pixel-Koordinatenpunkt in den Normalized Device Coordinate (NDC) Raum [-1.0, 1.0].
@@ -135,7 +137,6 @@ pub struct CanvasState {
     pub camera_bind_group: wgpu::BindGroup,
     pub current_ink_color: [f32; 4],
     pub current_stroke_width_mm: f32,
-    pub current_tool: crate::document::StrokeTool,
 
     // Statische Hintergrund-Geometrie
     pub paper_buffer: wgpu::Buffer,
@@ -143,6 +144,10 @@ pub struct CanvasState {
     pub background_vertex_capacity: usize,
     pub background_vertex_count: u32,
     pub current_background: PageBackground,
+    /// Papierfarbe der Anzeige
+    pub paper_theme: PaperTheme,
+    /// Dunkle Tinte auf dunklem Papier aufhellen
+    pub adapt_ink: bool,
 
     // Pipeline-Trennung: Live-Strich (aktiver Stroke)
     pub live_vertex_buffer: wgpu::Buffer,
@@ -276,6 +281,7 @@ impl CanvasState {
         let camera_uniforms = CameraUniforms {
             transform_scale: scale,
             transform_offset: offset,
+            ink_params: [0.0; 4],
         };
         let camera_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Camera Uniform Buffer"),
@@ -312,7 +318,7 @@ impl CanvasState {
             },
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
-                entry_point: "fs_main",
+                entry_point: "fs_ink",
                 targets: &[Some(wgpu::ColorTargetState {
                     format: config.format,
                     blend: Some(wgpu::BlendState::ALPHA_BLENDING),
@@ -366,7 +372,8 @@ impl CanvasState {
         });
 
         // 6. Statische Buffer
-        let paper_quad = generate_paper_quad();
+        let paper_theme = PaperTheme::default();
+        let paper_quad = generate_paper_quad(paper_theme.paper_color());
         let paper_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Paper Quad Buffer"),
             size: (paper_quad.len() * std::mem::size_of::<InkVertex>()) as u64,
@@ -376,7 +383,7 @@ impl CanvasState {
         queue.write_buffer(&paper_buffer, 0, bytemuck::cast_slice(&paper_quad));
 
         let current_background = PageBackground::Grid5mm;
-        let bg_mesh = generate_background_mesh(current_background);
+        let bg_mesh = generate_background_mesh(current_background, paper_theme.pattern_color());
         let background_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Background Mesh Buffer"),
             size: (Self::INITIAL_BACKGROUND_CAPACITY * std::mem::size_of::<InkVertex>()) as u64,
@@ -420,12 +427,13 @@ impl CanvasState {
             camera_bind_group,
             current_ink_color: default_ink_color,
             current_stroke_width_mm: 0.5,
-            current_tool: crate::document::StrokeTool::Pen,
             paper_buffer,
             background_buffer,
             background_vertex_capacity: Self::INITIAL_BACKGROUND_CAPACITY,
             background_vertex_count: bg_mesh.len() as u32,
             current_background,
+            paper_theme,
+            adapt_ink: false,
             live_vertex_buffer,
             live_vertex_capacity: Self::INITIAL_LIVE_CAPACITY,
             live_vertex_count: 0,
@@ -453,6 +461,16 @@ impl CanvasState {
         let camera_uniforms = CameraUniforms {
             transform_scale: scale,
             transform_offset: offset,
+            ink_params: [
+                if self.adapt_ink && self.paper_theme.is_dark() {
+                    1.0
+                } else {
+                    0.0
+                },
+                0.0,
+                0.0,
+                0.0,
+            ],
         };
         self.queue.write_buffer(
             &self.camera_buffer,
@@ -587,9 +605,19 @@ impl CanvasState {
             SplineConfig::from_width_units(width_mm * crate::document::UNITS_PER_MM);
     }
 
-    /// Setzt das aktive Zeichenwerkzeug für den Stift.
-    pub fn set_tool(&mut self, tool: crate::document::StrokeTool) {
-        self.current_tool = tool;
+    /// Setzt die Papierfarbe und ob dunkle Tinte auf dunklem Papier aufgehellt wird.
+    pub fn set_paper_theme(&mut self, theme: PaperTheme, adapt_ink: bool) {
+        self.adapt_ink = adapt_ink;
+        if self.paper_theme != theme {
+            self.paper_theme = theme;
+            self.queue.write_buffer(
+                &self.paper_buffer,
+                0,
+                bytemuck::cast_slice(&generate_paper_quad(theme.paper_color())),
+            );
+            self.upload_background_mesh();
+        }
+        self.update_uniforms();
     }
 
     /// Setzt den Seitenhintergrund und aktualisiert bei Bedarf den Vertex-Puffer.
@@ -598,7 +626,13 @@ impl CanvasState {
             return;
         }
         self.current_background = background;
-        let mesh = generate_background_mesh(background);
+        self.upload_background_mesh();
+    }
+
+    /// Erzeugt das Muster für Hintergrund und Papierfarbe neu und lädt es auf die GPU.
+    fn upload_background_mesh(&mut self) {
+        let mesh =
+            generate_background_mesh(self.current_background, self.paper_theme.pattern_color());
         self.background_vertex_count = mesh.len() as u32;
 
         if mesh.len() > self.background_vertex_capacity {
@@ -728,7 +762,6 @@ impl CanvasState {
             &self.spline_config,
         );
         let mut stroke = stroke;
-        stroke.tool = self.current_tool;
         stroke.width = self.current_stroke_width_mm * crate::document::UNITS_PER_MM;
         stroke.finalized = true;
 
@@ -824,7 +857,7 @@ impl CanvasState {
                     view: &view,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(DESK_COLOR), // Dunkler Tischhintergrund
+                        load: wgpu::LoadOp::Clear(self.paper_theme.desk_color()), // Tischhintergrund
                         store: wgpu::StoreOp::Store,
                     },
                 })],
@@ -836,7 +869,7 @@ impl CanvasState {
             // 2D-Kamera Uniforms (Scale & Offset) binden
             render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
 
-            // 1. Weißes DIN-A4-Blatt zeichnen (Farbe ist direkt im Paper-Quad Vertex hinterlegt)
+            // 1. DIN-A4-Blatt in Papierfarbe zeichnen (Farbe ist direkt im Paper-Quad Vertex hinterlegt)
             render_pass.set_pipeline(&self.triangle_pipeline);
             render_pass.set_vertex_buffer(0, self.paper_buffer.slice(..));
             render_pass.draw(0..6, 0..1);
@@ -948,7 +981,40 @@ mod tests {
     #[test]
     fn test_camera_uniforms() {
         let _u = CameraUniforms::default();
-        assert_eq!(std::mem::size_of::<CameraUniforms>(), 16);
+        // Muss dem WGSL-Layout entsprechen: vec2 + vec2 + vec4
+        assert_eq!(std::mem::size_of::<CameraUniforms>(), 32);
+    }
+
+    #[test]
+    fn test_shader_is_valid_and_matches_uniforms() {
+        // Ein Shaderfehler fiele sonst erst beim Programmstart auf
+        let module = naga::front::wgsl::parse_str(include_str!("shader.wgsl"))
+            .unwrap_or_else(|e| panic!("WGSL-Fehler: {e}"));
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::empty(),
+        )
+        .validate(&module)
+        .unwrap_or_else(|e| panic!("Shader ungültig: {e:?}"));
+
+        for name in ["vs_main", "fs_main", "fs_ink"] {
+            assert!(
+                module.entry_points.iter().any(|ep| ep.name == name),
+                "Einstiegspunkt {name} fehlt"
+            );
+        }
+        let camera = module
+            .types
+            .iter()
+            .find(|(_, ty)| ty.name.as_deref() == Some("CameraUniforms"))
+            .expect("CameraUniforms fehlt im Shader")
+            .1;
+        match camera.inner {
+            naga::TypeInner::Struct { span, .. } => {
+                assert_eq!(span as usize, std::mem::size_of::<CameraUniforms>())
+            }
+            ref other => panic!("CameraUniforms ist kein Struct: {other:?}"),
+        }
     }
 
     #[test]

@@ -117,7 +117,11 @@ impl StrokeData {
         };
         let mut stroke = Stroke::new(self.id, stylus_samples, vertices, self.color);
         stroke.shape = self.shape.clone();
-        stroke.tool = self.tool;
+        stroke.tool = crate::document::StrokeTool::resolve_stored(
+            self.tool,
+            self.color,
+            self.shape.is_some(),
+        );
         stroke.width = width;
         stroke.finalized = self.finalized;
         stroke
@@ -2281,5 +2285,35 @@ mod tests {
             .map(|s| s.shape.clone())
             .collect();
         assert_eq!(loaded, shapes.iter().cloned().map(Some).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn test_stroke_tool_of_old_files_is_recovered() {
+        // Bis v0.3.7 wurde jeder Strich als "pen" gespeichert
+        let json = r#"{"id": 1, "color": [1.0, 0.95, 0.1, 0.35], "tool": "pen",
+            "samples": [{"x": 10.0, "y": 10.0, "p": 0.5, "t": 0.0},
+                        {"x": 90.0, "y": 10.0, "p": 0.5, "t": 0.1}]}"#;
+        let data: StrokeData = serde_json::from_str(json).unwrap();
+        let highlighter = data.to_stroke();
+        assert_eq!(highlighter.tool, crate::document::StrokeTool::Highlighter);
+
+        let mut pen = data.clone();
+        pen.color = [0.12, 0.12, 0.14, 1.0];
+        assert_eq!(pen.to_stroke().tool, crate::document::StrokeTool::Pen);
+
+        let mut shape = pen.clone();
+        shape.shape = Some(crate::geometry::RecognizedShape::Line {
+            start: glam::Vec2::new(10.0, 10.0),
+            end: glam::Vec2::new(90.0, 10.0),
+        });
+        assert_eq!(shape.to_stroke().tool, crate::document::StrokeTool::Shape);
+
+        // Ausdrücklich gespeicherte Werkzeuge bleiben unverändert
+        let mut explicit = data.clone();
+        explicit.tool = crate::document::StrokeTool::Shape;
+        assert_eq!(
+            explicit.to_stroke().tool,
+            crate::document::StrokeTool::Shape
+        );
     }
 }
