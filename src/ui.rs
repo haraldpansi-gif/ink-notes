@@ -17,6 +17,7 @@ use crate::document::{
     EraserMode, Notebook, Page, PageBackground, StrokeTool, PAGE_HEIGHT, PAGE_WIDTH,
 };
 use crate::file_picker::{FilePicker, PickerKind};
+use crate::ruler::{Ruler, RulerHit};
 use crate::settings::{PressureCurve, SidebarSide};
 use crate::storage::NotebookSummary;
 
@@ -96,6 +97,37 @@ pub const PEN_WIDTH_PRESETS: [(f32, &str); 4] = [
 /// Dicken-Presets für den Textmarker:
 pub const HIGHLIGHTER_WIDTH_PRESETS: [(f32, &str); 3] =
     [(4.0, "4.0 mm"), (6.0, "6.0 mm"), (8.0, "8.0 mm")];
+
+/// Abbildung zwischen Seitenkoordinaten und logischen Bildschirmpunkten (egui), vom
+/// Hauptprogramm je Bild aus Ansicht und Zoom gesetzt.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PageView {
+    /// Bildschirmposition des Seitenursprungs (oben links)
+    pub origin: egui::Pos2,
+    /// Bildschirmpunkte je Seiteneinheit
+    pub scale: f32,
+}
+
+impl PageView {
+    pub fn to_screen(&self, p: glam::Vec2) -> egui::Pos2 {
+        self.origin + egui::vec2(p.x, p.y) * self.scale
+    }
+
+    pub fn to_page(&self, p: egui::Pos2) -> glam::Vec2 {
+        let d = (p - self.origin) / self.scale.max(1e-6);
+        glam::Vec2::new(d.x, d.y)
+    }
+}
+
+/// Laufende Bedienung des Lineals.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum RulerDrag {
+    /// Verschieben; Abstand vom Griffpunkt zum Mittelpunkt
+    Move {
+        grab_offset: glam::Vec2,
+    },
+    Rotate,
+}
 
 /// Format für den Export der aktuellen Seite.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -234,6 +266,13 @@ pub struct UiState {
     pub last_raw_pressure: Option<f32>,
     /// Geöffnete Dateiauswahl („Bild einfügen“ oder „PDF importieren“)
     pub file_picker: Option<FilePicker>,
+    /// Eingeblendetes Lineal
+    pub ruler: Option<Ruler>,
+    pub ruler_drag: Option<RulerDrag>,
+    /// Aktuelle Abbildung Seite ↔ Bildschirm (für Lineal und Treffertests)
+    pub page_view: Option<PageView>,
+    /// Fenstergröße in logischen Punkten (vom letzten Bild)
+    pub screen_size: egui::Vec2,
     /// Eingabefeld „Titel dieser Seite“ in der Seitenübersicht und die Seite, zu der es gehört
     pub page_title_input: String,
     pub page_title_for: Option<u64>,
@@ -286,6 +325,10 @@ impl Default for UiState {
             last_raw_pressure: None,
             file_picker: None,
             queued_actions: Vec::new(),
+            ruler: None,
+            ruler_drag: None,
+            page_view: None,
+            screen_size: egui::Vec2::ZERO,
             page_title_input: String::new(),
             page_title_for: None,
             page_picker_list: false,
@@ -312,6 +355,39 @@ impl UiState {
         self.is_document_menu_open = false;
         self.is_update_dialog_open = false;
         self.file_picker = None;
+    }
+
+    /// Blendet das Lineal ein (waagerecht in der Mitte des sichtbaren Blattbereichs) oder aus.
+    pub fn toggle_ruler(&mut self) {
+        self.ruler_drag = None;
+        self.ruler = match self.ruler {
+            Some(_) => None,
+            None => {
+                let center = self
+                    .page_view
+                    .map(|v| {
+                        let screen = self.visible_canvas_center();
+                        v.to_page(screen)
+                    })
+                    .unwrap_or(glam::Vec2::new(
+                        crate::document::PAGE_WIDTH / 2.0,
+                        crate::document::PAGE_HEIGHT / 2.0,
+                    ));
+                Some(Ruler::new(center))
+            }
+        };
+    }
+
+    /// Mitte des Bereichs neben der Werkzeugleiste (logische Punkte).
+    fn visible_canvas_center(&self) -> egui::Pos2 {
+        (self.screen_size / 2.0).to_pos2()
+            + egui::vec2(
+                match self.sidebar_side {
+                    SidebarSide::Left => self.sidebar_reserved_width() / 2.0,
+                    SidebarSide::Right => -self.sidebar_reserved_width() / 2.0,
+                },
+                0.0,
+            )
     }
 
     /// Öffnet die Dateiauswahl „Bild einfügen“ im zuletzt benutzten Ordner.
@@ -442,6 +518,15 @@ impl UiState {
         if self.is_point_inside_toolbar(px, py) {
             return true;
         }
+        // Lineal: Fläche und Dreh-Griff bedient die Oberfläche, die Kanten bleiben zum Zeichnen
+        if self.ruler_drag.is_some() {
+            return true;
+        }
+        if let (Some(ruler), Some(view)) = (self.ruler, self.page_view) {
+            if ruler.hit(view.to_page(egui::pos2(px, py))).is_some() {
+                return true;
+            }
+        }
         if let Some(pop_rect) = self.popover_rect {
             if pop_rect.contains(egui::pos2(px, py)) {
                 return true;
@@ -554,6 +639,8 @@ enum SidebarIcon<'a> {
     Eraser,
     /// Selbst gezeichnetes gestricheltes Auswahlrechteck
     Lasso,
+    /// Selbst gezeichnetes Lineal mit Skala
+    Ruler,
 }
 
 /// Quadratischer Symbol-Knopf der Werkzeugleiste mit optionalem Farbbalken an der Unterkante.
@@ -655,6 +742,30 @@ fn sidebar_button(
                     egui::Color32::TRANSPARENT,
                     stroke,
                 ));
+            }
+            SidebarIcon::Ruler => {
+                let dir = egui::vec2(1.0, -1.0).normalized();
+                let perp = egui::vec2(dir.y, -dir.x);
+                let (half_len, half_w) = (12.0, 4.5);
+                let p = |along: f32, across: f32| c + dir * along + perp * across;
+                painter.add(egui::Shape::convex_polygon(
+                    vec![
+                        p(-half_len, -half_w),
+                        p(half_len, -half_w),
+                        p(half_len, half_w),
+                        p(-half_len, half_w),
+                    ],
+                    egui::Color32::TRANSPARENT,
+                    egui::Stroke::new(1.5_f32, color),
+                ));
+                for i in 1..6 {
+                    let along = -half_len + i as f32 * 4.0;
+                    let tick = if i % 2 == 0 { 4.0 } else { 2.5 };
+                    painter.line_segment(
+                        [p(along, -half_w), p(along, -half_w + tick)],
+                        egui::Stroke::new(1.2_f32, color),
+                    );
+                }
             }
             SidebarIcon::Lasso => {
                 let r = egui::Rect::from_center_size(c, egui::vec2(20.0, 16.0));
@@ -1076,6 +1187,149 @@ fn pressure_curve_editor(ui: &mut egui::Ui, state: &mut UiState) -> Option<Press
     save.then_some(state.pressure_curve)
 }
 
+/// Zeichnet das Lineal über dem Blatt und bedient Verschieben und Drehen.
+fn ruler_overlay(ctx: &egui::Context, state: &mut UiState) {
+    let (Some(mut ruler), Some(view)) = (state.ruler, state.page_view) else {
+        state.ruler_drag = None;
+        return;
+    };
+
+    // Bedienung: Druck auf Fläche oder Griff beginnt das Ziehen (nicht über Leiste/Popovern)
+    let (pressed, down, pos) = ctx.input(|i| {
+        (
+            i.pointer.primary_pressed(),
+            i.pointer.primary_down(),
+            i.pointer.interact_pos(),
+        )
+    });
+    if pressed && !ctx.is_pointer_over_area() {
+        if let Some(pos) = pos {
+            let page = view.to_page(pos);
+            state.ruler_drag = match ruler.hit(page) {
+                Some(RulerHit::Body) => Some(RulerDrag::Move {
+                    grab_offset: ruler.center - page,
+                }),
+                Some(RulerHit::RotateHandle) => Some(RulerDrag::Rotate),
+                None => None,
+            };
+        }
+    }
+    match (state.ruler_drag, down, pos) {
+        (Some(RulerDrag::Move { grab_offset }), true, Some(pos)) => {
+            ruler.center = view.to_page(pos) + grab_offset;
+        }
+        (Some(RulerDrag::Rotate), true, Some(pos)) => ruler.rotate_toward(view.to_page(pos)),
+        (_, false, _) => state.ruler_drag = None,
+        _ => {}
+    }
+    state.ruler = Some(ruler);
+
+    // Zeichnen (unter Leiste und Dialogen)
+    let painter = ctx.layer_painter(egui::LayerId::new(
+        egui::Order::Background,
+        egui::Id::new("ruler_overlay"),
+    ));
+    let corners: Vec<egui::Pos2> = ruler.corners().iter().map(|&c| view.to_screen(c)).collect();
+    painter.add(egui::Shape::convex_polygon(
+        corners.clone(),
+        egui::Color32::from_rgba_unmultiplied(214, 222, 235, 165),
+        egui::Stroke::new(
+            1.0_f32,
+            egui::Color32::from_rgba_unmultiplied(60, 70, 90, 200),
+        ),
+    ));
+
+    let ink = egui::Color32::from_rgb(45, 52, 66);
+    let axis = ruler.axis();
+    let normal = ruler.normal();
+    let mm = crate::document::UNITS_PER_MM;
+    let px_per_mm = view.scale * mm;
+    let half_len_mm = (crate::ruler::RULER_LENGTH / mm / 2.0) as i32;
+    let half_w = crate::ruler::RULER_WIDTH / 2.0;
+    // Skala an beiden Längskanten, von der Mitte aus: Millimeter nur, wenn sie nicht verschwimmen
+    for side in [-1.0_f32, 1.0] {
+        let edge = ruler.center + normal * side * half_w;
+        for i in -half_len_mm..=half_len_mm {
+            let tick_mm = if i % 10 == 0 {
+                4.0
+            } else if i % 5 == 0 {
+                2.5
+            } else if px_per_mm >= 3.0 {
+                1.5
+            } else {
+                continue;
+            };
+            let base = edge + axis * (i as f32 * mm);
+            let tip = base - normal * side * tick_mm * mm;
+            painter.line_segment(
+                [view.to_screen(base), view.to_screen(tip)],
+                egui::Stroke::new(1.0_f32, ink),
+            );
+        }
+    }
+    // Zentimeter-Zahlen an der oberen Kante, von der linken Ecke an gezählt
+    if px_per_mm >= 1.2 {
+        let font = egui::FontId::proportional((px_per_mm * 2.6).clamp(8.0, 13.0));
+        let edge = ruler.center - normal * half_w;
+        for cm in 0..=(half_len_mm * 2 / 10) {
+            let along = -crate::ruler::RULER_LENGTH / 2.0 + cm as f32 * 10.0 * mm;
+            let anchor = view.to_screen(edge + axis * along + normal * 5.0 * mm);
+            let galley = ctx.fonts(|f| f.layout_no_wrap(cm.to_string(), font.clone(), ink));
+            let offset = egui::vec2(galley.size().x / 2.0, 0.0);
+            let offset = egui::vec2(
+                offset.x * axis.x - offset.y * axis.y,
+                offset.x * axis.y + offset.y * axis.x,
+            );
+            let mut text = egui::epaint::TextShape::new(anchor - offset, galley, ink);
+            text.angle = ruler.angle;
+            painter.add(text);
+        }
+    }
+
+    // Winkelanzeige und Dreh-Griff
+    let center = view.to_screen(ruler.center);
+    let label = format!("{}°", ruler.display_degrees());
+    let galley = ctx.fonts(|f| {
+        f.layout_no_wrap(
+            label,
+            egui::FontId::proportional(13.0),
+            egui::Color32::WHITE,
+        )
+    });
+    let pill = egui::Rect::from_center_size(center, galley.size() + egui::vec2(14.0, 6.0));
+    painter.rect_filled(
+        pill,
+        egui::Rounding::same(9.0),
+        egui::Color32::from_rgba_unmultiplied(40, 70, 130, 220),
+    );
+    painter.galley(
+        pill.center() - galley.size() / 2.0,
+        galley,
+        egui::Color32::WHITE,
+    );
+
+    let handle = view.to_screen(ruler.handle_center());
+    let radius = (crate::ruler::HANDLE_RADIUS * view.scale).max(10.0);
+    let active = state.ruler_drag == Some(RulerDrag::Rotate);
+    painter.circle(
+        handle,
+        radius,
+        if active {
+            egui::Color32::from_rgb(70, 120, 210)
+        } else {
+            egui::Color32::from_rgba_unmultiplied(40, 70, 130, 200)
+        },
+        egui::Stroke::new(1.0_f32, egui::Color32::WHITE),
+    );
+    painter.text(
+        handle,
+        egui::Align2::CENTER_CENTER,
+        "⟳",
+        egui::FontId::proportional((radius * 1.1).clamp(10.0, 20.0)),
+        egui::Color32::WHITE,
+    );
+}
+
 /// Dialog „Bild einfügen“ bzw. „PDF importieren“: Schnellzugriffe, Ordnerpfad und Liste aus
 /// Ordnern und passenden Dateien.
 fn file_picker_dialog(ctx: &egui::Context, state: &mut UiState, actions: &mut Vec<UiAction>) {
@@ -1333,6 +1587,8 @@ pub fn render_ui(
     updater: &crate::updater::UpdaterController,
 ) -> Vec<UiAction> {
     let mut actions = std::mem::take(&mut state.queued_actions);
+    state.screen_size = ctx.screen_rect().size();
+    ruler_overlay(ctx, state);
 
     let mut pen_btn_rect = None;
     let mut high_btn_rect = None;
@@ -1517,6 +1773,22 @@ pub fn render_ui(
                                         state.is_more_menu_open = false;
                                         actions.push(UiAction::SetTool(tool));
                                     }
+                                }
+
+                                // --- Lineal (ein-/ausblenden) ---
+                                if sidebar_button(
+                                    ui,
+                                    btn,
+                                    SidebarIcon::Ruler,
+                                    state.ruler.is_some(),
+                                    true,
+                                    None,
+                                    "Lineal (L): Fläche ziehen = verschieben, Griff ⟳ = drehen; \
+                                     Striche an einer Kante werden gerade",
+                                )
+                                .clicked()
+                                {
+                                    state.toggle_ruler();
                                 }
 
                                 // --- Farben des aktiven Werkzeugs ---
@@ -3514,6 +3786,74 @@ mod tests {
             }
         }
         out
+    }
+
+    #[test]
+    fn test_ruler_drag_moves_and_rotates() {
+        let ctx = egui::Context::default();
+        let notebook = Notebook::new();
+        let updater = crate::updater::UpdaterController::new();
+        let mut state = UiState::new();
+        // 1 Seiteneinheit = 0,5 Punkte, Seite beginnt bei (100, 0)
+        let view = PageView {
+            origin: egui::pos2(100.0, 0.0),
+            scale: 0.5,
+        };
+        state.page_view = Some(view);
+        state.ruler = Some(Ruler::new(glam::Vec2::new(1000.0, 1000.0)));
+
+        let frame = |state: &mut UiState, events: Vec<egui::Event>| {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1600.0, 1000.0),
+                )),
+                events,
+                ..Default::default()
+            };
+            ctx.begin_frame(input);
+            let _ = render_ui(&ctx, state, &notebook, AutosaveStatus::Saved, &updater);
+            let _ = ctx.end_frame();
+        };
+        let press = |pos: egui::Pos2, pressed: bool| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        };
+
+        // Fläche und Griff gehören zur Oberfläche, die Kanten zum Zeichnen
+        let center = view.to_screen(glam::Vec2::new(1000.0, 1000.0));
+        assert!(state.is_point_in_ui(center.x, center.y));
+        let edge = view.to_screen(glam::Vec2::new(
+            1000.0,
+            1000.0 - crate::ruler::RULER_WIDTH / 2.0,
+        ));
+        assert!(!state.is_point_in_ui(edge.x, edge.y));
+
+        // Verschieben: Fläche greifen und um 50 Punkte (= 100 Einheiten) nach unten ziehen
+        frame(&mut state, vec![egui::Event::PointerMoved(center)]);
+        frame(&mut state, vec![press(center, true)]);
+        let target = center + egui::vec2(0.0, 50.0);
+        frame(&mut state, vec![egui::Event::PointerMoved(target)]);
+        assert!(state.ruler_drag.is_some());
+        frame(&mut state, vec![press(target, false)]);
+        let moved = state.ruler.unwrap();
+        assert!((moved.center - glam::Vec2::new(1000.0, 1100.0)).length() < 0.5);
+        assert!(state.ruler_drag.is_none());
+
+        // Drehen: Griff greifen und nach unten rechts ziehen → 45° (eingerastet)
+        let handle = view.to_screen(moved.handle_center());
+        frame(&mut state, vec![egui::Event::PointerMoved(handle)]);
+        frame(&mut state, vec![press(handle, true)]);
+        let diag = view.to_screen(moved.center + glam::Vec2::new(700.0, 690.0));
+        frame(&mut state, vec![egui::Event::PointerMoved(diag)]);
+        frame(&mut state, vec![press(diag, false)]);
+        assert_eq!(state.ruler.unwrap().display_degrees(), 45);
+
+        // Ausblenden
+        state.toggle_ruler();
+        assert!(state.ruler.is_none());
     }
 
     #[test]

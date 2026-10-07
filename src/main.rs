@@ -309,6 +309,16 @@ fn texture_for(
     }
 }
 
+/// Abbildung Seite ↔ logische Bildschirmpunkte für die Oberfläche (Lineal).
+fn page_view(canvas: &CanvasState, scale_factor: f32) -> ui::PageView {
+    let origin = canvas.page_to_screen(Vec2::ZERO);
+    let unit = canvas.page_to_screen(Vec2::new(1000.0, 0.0));
+    ui::PageView {
+        origin: egui::pos2(origin[0] / scale_factor, origin[1] / scale_factor),
+        scale: (unit[0] - origin[0]) / 1000.0 / scale_factor,
+    }
+}
+
 fn copy_message(count: usize, as_image: bool) -> String {
     if as_image {
         format!("{count} Objekt(e) kopiert – auch als Bild für andere Programme")
@@ -1243,6 +1253,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     &mut autosave, &mut selection_state, &mut ui_state,
                                 );
                                 update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
+                                window.request_redraw();
+                            }
+
+                            // Lineal ein-/ausblenden: L
+                            Key::Character(c) if c.eq_ignore_ascii_case("l") && !ctrl => {
+                                ui_state.toggle_ruler();
+                                canvas.ruler = ui_state.ruler;
                                 window.request_redraw();
                             }
 
@@ -2240,7 +2257,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                         // 3. Toolbar & Widgets rendern
                         updater.update();
+                        ui_state.page_view = Some(page_view(&canvas, window.scale_factor() as f32));
                         let actions = ui::render_ui(&egui_ctx, &mut ui_state, &notebook, autosave.status(), &updater);
+                        canvas.ruler = ui_state.ruler;
 
                         // Seite neben der Werkzeugleiste zentrieren (Leistenbreite in physischen Pixeln)
                         let reserved = ui_state.sidebar_reserved_width() * window.scale_factor() as f32;

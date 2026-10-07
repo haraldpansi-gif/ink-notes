@@ -15,6 +15,7 @@ pub mod page_export;
 pub mod pdf_doc;
 pub mod pdf_merge;
 pub mod platform;
+pub mod ruler;
 pub mod selection;
 pub mod settings;
 pub mod spline;

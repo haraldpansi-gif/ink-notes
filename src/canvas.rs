@@ -168,6 +168,11 @@ pub struct CanvasState {
     // Eingefügte Bilder der aktuellen Seite
     image_layer: crate::image_layer::ImageLayer,
 
+    /// Eingeblendetes Lineal (Striche nahe einer Kante rasten ein)
+    pub ruler: Option<crate::ruler::Ruler>,
+    /// Kante, an der der aktuelle Live-Strich eingerastet ist
+    ruler_lock: Option<crate::ruler::EdgeLock>,
+
     // egui UI-Renderer
     pub egui_renderer: egui_wgpu::Renderer,
 }
@@ -461,6 +466,8 @@ impl CanvasState {
             committed_vertex_count: 0,
             committed_strokes: Vec::with_capacity(128),
             image_layer,
+            ruler: None,
+            ruler_lock: None,
             egui_renderer,
             camera: crate::viewport::ViewportState::new(),
         })
@@ -726,6 +733,13 @@ impl CanvasState {
         self.live_vertices.clear();
         self.live_vertex_count = 0;
 
+        // Beginnt der Strich an einer Linealkante, bleibt er bis zum Abheben auf ihr
+        let half_width = self.current_stroke_width_mm * crate::document::UNITS_PER_MM / 2.0;
+        self.ruler_lock = self
+            .ruler
+            .and_then(|r| r.edge_lock(glam::Vec2::new(page_x, page_y), half_width));
+        let (page_x, page_y) = self.constrain_to_ruler(page_x, page_y);
+
         // 1. Zwingend durch den 1€-Filter leiten
         let (fx, fy, fp) = self.filter.filter(page_x, page_y, pressure, timestamp);
         let pt = ControlPoint::new(fx, fy, fp);
@@ -749,6 +763,7 @@ impl CanvasState {
         }
 
         // 1. Zwingend durch den 1€-Filter leiten
+        let (page_x, page_y) = self.constrain_to_ruler(page_x, page_y);
         let (fx, fy, fp) = self.filter.filter(page_x, page_y, pressure, timestamp);
         let new_pt = ControlPoint::new(fx, fy, fp);
 
@@ -769,6 +784,19 @@ impl CanvasState {
         self.live_samples.push(sample);
         self.live_control_points.push(new_pt);
         self.update_live_mesh();
+    }
+
+    /// Projiziert einen Punkt auf die Linealkante, falls der Live-Strich dort eingerastet ist.
+    fn constrain_to_ruler(&self, x: f32, y: f32) -> (f32, f32) {
+        match self.ruler_lock {
+            Some(lock) => lock.project(glam::Vec2::new(x, y)).into(),
+            None => (x, y),
+        }
+    }
+
+    /// Ist der aktuelle Live-Strich an einer Linealkante eingerastet?
+    pub fn is_ruler_locked(&self) -> bool {
+        self.ruler_lock.is_some()
     }
 
     /// Bricht den aktuellen Live-Strich ab und setzt Puffer sowie 1€-Filter sauber zurück.
