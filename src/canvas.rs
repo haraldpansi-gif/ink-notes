@@ -165,6 +165,9 @@ pub struct CanvasState {
     pub committed_vertex_count: u32,
     pub committed_strokes: Vec<Range<u32>>,
 
+    // Eingefügte Bilder der aktuellen Seite
+    image_layer: crate::image_layer::ImageLayer,
+
     // egui UI-Renderer
     pub egui_renderer: egui_wgpu::Renderer,
 }
@@ -407,6 +410,13 @@ impl CanvasState {
             mapped_at_creation: false,
         });
 
+        let image_layer = crate::image_layer::ImageLayer::new(
+            &device,
+            &shader,
+            &bind_group_layout,
+            config.format,
+        );
+
         // 8. egui Renderer für das schwebende UI initialisieren
         let egui_renderer = egui_wgpu::Renderer::new(&device, config.format, None, 1);
 
@@ -450,6 +460,7 @@ impl CanvasState {
             committed_vertex_capacity: Self::INITIAL_COMMITTED_CAPACITY,
             committed_vertex_count: 0,
             committed_strokes: Vec::with_capacity(128),
+            image_layer,
             egui_renderer,
             camera: crate::viewport::ViewportState::new(),
         })
@@ -655,6 +666,12 @@ impl CanvasState {
     pub fn sync_page(&mut self, page: &mut Page) {
         page.rebuild_cache_if_dirty();
         self.set_background(page.background);
+        self.image_layer.set_quads(
+            page.strokes
+                .iter()
+                .filter_map(|s| Some((s.image.clone()?, s.image_corners()?)))
+                .collect(),
+        );
 
         self.committed_vertex_count = page.vertex_cache.len() as u32;
         self.committed_strokes = page.stroke_ranges.clone();
@@ -679,6 +696,12 @@ impl CanvasState {
             0,
             bytemuck::cast_slice(&page.vertex_cache),
         );
+    }
+
+    /// Lädt Bilder der aktuellen Seite, die noch nicht auf der GPU liegen. Vor jedem
+    /// Zeichnen aufrufen; ohne Änderungen kostet das nichts.
+    pub fn prepare_images(&mut self, assets: &crate::assets::AssetStore) {
+        self.image_layer.prepare(&self.device, &self.queue, assets);
     }
 
     /// Startet einen neuen Live-Strich in DIN-A4-Seitenkoordinaten.
@@ -880,7 +903,10 @@ impl CanvasState {
                 render_pass.draw(0..self.background_vertex_count, 0..1);
             }
 
-            // 3. Abgeschlossene Striche der aktiven Seite rendern (TriangleStrip mit Vertex-Farben)
+            // 3. Eingefügte Bilder (unter der Tinte)
+            self.image_layer.draw(&mut render_pass);
+
+            // 4. Abgeschlossene Striche der aktiven Seite rendern (TriangleStrip mit Vertex-Farben)
             render_pass.set_pipeline(&self.strip_pipeline);
 
             if self.committed_vertex_count > 0 {
@@ -892,7 +918,7 @@ impl CanvasState {
                 }
             }
 
-            // 4. Temporäre Live-Geometrie des aktuellen Strichs rendern (Zero Latency)
+            // 5. Temporäre Live-Geometrie des aktuellen Strichs rendern (Zero Latency)
             if self.live_vertex_count > 0 {
                 render_pass.set_vertex_buffer(0, self.live_vertex_buffer.slice(..));
                 render_pass.draw(0..self.live_vertex_count, 0..1);
@@ -997,7 +1023,7 @@ mod tests {
         .validate(&module)
         .unwrap_or_else(|e| panic!("Shader ungültig: {e:?}"));
 
-        for name in ["vs_main", "fs_main", "fs_ink"] {
+        for name in ["vs_main", "fs_main", "fs_ink", "vs_image", "fs_image"] {
             assert!(
                 module.entry_points.iter().any(|ep| ep.name == name),
                 "Einstiegspunkt {name} fehlt"

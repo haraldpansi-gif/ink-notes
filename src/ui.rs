@@ -16,6 +16,7 @@ use crate::background::{adapt_ink_color, PaperTheme};
 use crate::document::{
     EraserMode, Notebook, Page, PageBackground, StrokeTool, PAGE_HEIGHT, PAGE_WIDTH,
 };
+use crate::file_picker::FilePicker;
 use crate::settings::{PressureCurve, SidebarSide};
 use crate::storage::NotebookSummary;
 
@@ -151,6 +152,8 @@ pub enum UiAction {
     },
     /// Druckkurve speichern (gilt während des Ziehens bereits über `UiState::pressure_curve`)
     SavePressureCurve(PressureCurve),
+    /// Bilddatei auf der aktuellen Seite einfügen
+    InsertImageFile(std::path::PathBuf),
     // Beenden-Sicherheit bei Fehlschlag
     RetryShutdown,
     ExportRecoveryAndExit,
@@ -212,6 +215,10 @@ pub struct UiState {
     pub pressure_curve: PressureCurve,
     /// Zuletzt gemessener Rohdruck des Stifts (Anzeige in der Druckkurve)
     pub last_raw_pressure: Option<f32>,
+    /// Geöffnete Dateiauswahl „Bild einfügen“
+    pub image_picker: Option<FilePicker>,
+    /// Zuletzt in der Dateiauswahl benutzter Ordner (während der Sitzung)
+    pub last_image_dir: Option<std::path::PathBuf>,
 }
 
 impl Default for UiState {
@@ -252,6 +259,8 @@ impl Default for UiState {
             adapt_ink_colors: true,
             pressure_curve: PressureCurve::default(),
             last_raw_pressure: None,
+            image_picker: None,
+            last_image_dir: None,
         }
     }
 }
@@ -273,6 +282,14 @@ impl UiState {
         self.show_page_jump_popup = false;
         self.is_document_menu_open = false;
         self.is_update_dialog_open = false;
+        self.image_picker = None;
+    }
+
+    /// Öffnet die Dateiauswahl „Bild einfügen“ im zuletzt benutzten Ordner.
+    pub fn open_image_picker(&mut self) {
+        let dir = self.last_image_dir.clone();
+        self.close_overlays();
+        self.image_picker = Some(FilePicker::open(dir.as_deref()));
     }
 
     /// Länge der längsten Farbpalette; so viel Platz hält die Leiste immer frei.
@@ -758,10 +775,19 @@ pub fn page_thumbnail_shapes(
     let scale = rect.width() / PAGE_WIDTH;
     let to_screen = |p: glam::Vec2| rect.min + egui::vec2(p.x * scale, p.y * scale);
 
+    // Bilder als Flächen unter der Tinte
+    for corners in page.strokes.iter().filter_map(|s| s.image_corners()) {
+        shapes.push(egui::Shape::convex_polygon(
+            corners.iter().map(|&c| to_screen(c)).collect(),
+            egui::Color32::from_rgb(168, 182, 200),
+            egui::Stroke::NONE,
+        ));
+    }
+
     let total: usize = page.strokes.iter().map(|s| s.points.len()).sum();
     let step = total.div_ceil(THUMBNAIL_POINT_BUDGET).max(1);
 
-    for stroke in &page.strokes {
+    for stroke in page.strokes.iter().filter(|s| !s.is_image()) {
         let ink = if adapt {
             adapt_ink_color(stroke.color)
         } else {
@@ -951,6 +977,110 @@ fn pressure_curve_editor(ui: &mut egui::Ui, state: &mut UiState) -> Option<Press
         save = true;
     }
     save.then_some(state.pressure_curve)
+}
+
+/// Dialog „Bild einfügen“: Schnellzugriffe, Ordnerpfad und Liste aus Ordnern und Bildern.
+fn image_picker_dialog(ctx: &egui::Context, state: &mut UiState, actions: &mut Vec<UiAction>) {
+    let mut close = false;
+    let mut navigate: Option<std::path::PathBuf> = None;
+    let mut go_up = false;
+    let mut chosen: Option<std::path::PathBuf> = None;
+
+    let Some(picker) = state.image_picker.as_ref() else {
+        return;
+    };
+    dialog_window("Bild einfügen", state, false).show(ctx, |ui| {
+        ui.set_width(460.0);
+        touch_friendly_spacing(ui);
+        if dialog_header(ui, "🖼 Bild einfügen", true) {
+            close = true;
+        }
+
+        ui.horizontal_wrapped(|ui| {
+            for (label, path) in crate::file_picker::shortcuts() {
+                if ui.selectable_label(picker.dir == path, label).clicked() {
+                    navigate = Some(path);
+                }
+            }
+        });
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(picker.dir.parent().is_some(), egui::Button::new("⏶"))
+                .on_hover_text("Übergeordneter Ordner")
+                .clicked()
+            {
+                go_up = true;
+            }
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(picker.dir.display().to_string())
+                        .color(egui::Color32::from_gray(190)),
+                )
+                .truncate(true),
+            );
+        });
+        if let Some(err) = &picker.error {
+            ui.colored_label(egui::Color32::from_rgb(255, 120, 120), err);
+        }
+        ui.add_space(4.0);
+
+        egui::ScrollArea::vertical()
+            .max_height((ctx.screen_rect().height() - 330.0).clamp(160.0, 420.0))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                if picker.entries.is_empty() {
+                    ui.label(
+                        egui::RichText::new("Keine Ordner oder Bilder (PNG, JPEG, GIF, WebP, BMP)")
+                            .color(egui::Color32::from_gray(150)),
+                    );
+                }
+                for entry in &picker.entries {
+                    let label = if entry.is_dir {
+                        format!("📁  {}", entry.name)
+                    } else {
+                        format!("🖼  {}", entry.name)
+                    };
+                    let button = egui::Button::new(label)
+                        .frame(false)
+                        .min_size(egui::vec2(ui.available_width(), 34.0));
+                    let response = ui.add(button);
+                    if response.clicked() {
+                        if entry.is_dir {
+                            navigate = Some(entry.path.clone());
+                        } else {
+                            chosen = Some(entry.path.clone());
+                        }
+                    }
+                }
+            });
+
+        ui.add_space(6.0);
+        ui.label(
+            egui::RichText::new(
+                "Tipp: Screenshots mit Strg+V einfügen oder Bilddateien ins Fenster ziehen.",
+            )
+            .size(11.5)
+            .color(egui::Color32::from_gray(150)),
+        );
+    });
+
+    if let Some(picker) = state.image_picker.as_mut() {
+        if go_up {
+            picker.go_up();
+        }
+        if let Some(dir) = navigate {
+            picker.navigate(&dir);
+        }
+    }
+    if let Some(path) = chosen {
+        state.last_image_dir = state.image_picker.as_ref().map(|p| p.dir.clone());
+        actions.push(UiAction::InsertImageFile(path));
+        close = true;
+    }
+    if close {
+        state.image_picker = None;
+    }
 }
 
 /// Rahmen der Popover neben der Werkzeugleiste.
@@ -1838,6 +1968,13 @@ pub fn render_ui(
                             {
                                 actions.push(UiAction::AddPage);
                             }
+                            if ui
+                                .add_sized([ui.available_width(), 30.0], egui::Button::new("🖼  Bild einfügen … (Strg+I)"))
+                                .on_hover_text("Auch per Strg+V aus der Zwischenablage oder durch Ziehen einer Bilddatei ins Fenster")
+                                .clicked()
+                            {
+                                state.open_image_picker();
+                            }
 
                             section(ui, "HINTERGRUND DIESER SEITE");
                             let current_bg = notebook.current_page().background;
@@ -2296,6 +2433,11 @@ pub fn render_ui(
         state.document_modal_rect = doc_win.map(|w| w.response.rect);
     } else {
         state.document_modal_rect = None;
+    }
+
+    // 3c. Dateiauswahl „Bild einfügen“
+    if state.image_picker.is_some() {
+        image_picker_dialog(ctx, state, &mut actions);
     }
 
     // 3c. Release- & Update-Center (Gitea Releases)
@@ -3139,10 +3281,11 @@ mod tests {
     }
 
     /// Quelltexte, deren String-Literale in der Oberfläche erscheinen können.
-    const UI_SOURCES: [(&str, &str); 3] = [
+    const UI_SOURCES: [(&str, &str); 4] = [
         ("ui.rs", include_str!("ui.rs")),
         ("selection.rs", include_str!("selection.rs")),
         ("main.rs", include_str!("main.rs")),
+        ("file_picker.rs", include_str!("file_picker.rs")),
     ];
 
     /// Liefert alle Zeichen aus String-Literalen eines Quelltexts (ohne Zeilenkommentare).
@@ -3421,6 +3564,28 @@ mod tests {
             pts.len(),
             THUMBNAIL_POINT_BUDGET + 200
         );
+
+        // Bild: gefüllte Fläche statt Umrisslinie, unter der Tinte
+        let mut with_image = page_with_strokes(1, 5);
+        with_image.strokes.insert(
+            0,
+            crate::document::Stroke::new_image(
+                99,
+                "a.png".into(),
+                [
+                    glam::Vec2::new(100.0, 100.0),
+                    glam::Vec2::new(900.0, 100.0),
+                    glam::Vec2::new(900.0, 600.0),
+                    glam::Vec2::new(100.0, 600.0),
+                ],
+            ),
+        );
+        let shapes = page_thumbnail_shapes(&with_image, rect, PaperTheme::White, true);
+        assert_eq!(shapes.len(), 3);
+        assert!(
+            matches!(shapes[1], egui::Shape::Path(ref p) if p.closed && p.fill != egui::Color32::TRANSPARENT)
+        );
+        assert!(matches!(shapes[2], egui::Shape::Path(ref p) if !p.closed));
     }
 
     #[test]

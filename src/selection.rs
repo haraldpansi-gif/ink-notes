@@ -243,7 +243,12 @@ impl SelectionState {
         if self.selected_ids.is_empty() {
             return false;
         }
-        let mut strokes = page.get_strokes(&self.selected_ids);
+        // Bilder behalten ihre Farben
+        let mut strokes: Vec<_> = page
+            .get_strokes(&self.selected_ids)
+            .into_iter()
+            .filter(|s| !s.is_image())
+            .collect();
         if strokes.is_empty() {
             return false;
         }
@@ -498,5 +503,31 @@ mod tests {
         assert!(page.undo());
         let restored_pos = page.strokes[0].points[0].position;
         assert!((orig_pos.x - restored_pos.x).abs() < 1e-4);
+    }
+
+    #[test]
+    fn test_recolor_ignores_images() {
+        let mut page = Page::new(1, PageBackground::Blank);
+        let corners = [
+            Vec2::new(0.0, 0.0),
+            Vec2::new(100.0, 0.0),
+            Vec2::new(100.0, 50.0),
+            Vec2::new(0.0, 50.0),
+        ];
+        page.add_stroke(Stroke::new_image(1, "a.png".into(), corners));
+        let undo_depth = page.history.undo_stack.len();
+
+        let mut sel = SelectionState::new();
+        sel.select_single(1);
+        // Nur ein Bild ausgewählt: nichts umzufärben, kein Undo-Eintrag
+        assert!(!sel.recolor_selected(&mut page, [1.0, 0.0, 0.0, 1.0]));
+        assert_eq!(page.history.undo_stack.len(), undo_depth);
+
+        // Bild und Strich: nur der Strich wird umgefärbt
+        page.add_stroke(make_test_stroke(2, 20.0, 20.0, [0.1, 0.1, 0.1, 1.0]));
+        sel.select_multiple(vec![1, 2]);
+        assert!(sel.recolor_selected(&mut page, [1.0, 0.0, 0.0, 1.0]));
+        assert_eq!(page.strokes[0].color, [1.0, 1.0, 1.0, 1.0]);
+        assert_eq!(page.strokes[1].color, [1.0, 0.0, 0.0, 1.0]);
     }
 }

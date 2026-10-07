@@ -70,6 +70,9 @@ pub struct StrokeData {
     pub width: f32,
     #[serde(default = "default_finalized")]
     pub finalized: bool,
+    /// Eingefügtes Bild (Name im Asset-Ordner); die Samples sind dann die vier Bildecken
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<String>,
 }
 
 impl From<&Stroke> for StrokeData {
@@ -82,6 +85,7 @@ impl From<&Stroke> for StrokeData {
             tool: stroke.tool,
             width: stroke.width,
             finalized: stroke.finalized,
+            image: stroke.image.clone(),
         }
     }
 }
@@ -96,6 +100,17 @@ impl StrokeData {
             .copied()
             .map(StylusSample::from)
             .collect();
+        if let Some(asset) = &self.image {
+            if let [a, b, c, d, ..] = stylus_samples.as_slice() {
+                let mut stroke = Stroke::new_image(
+                    self.id,
+                    asset.clone(),
+                    [a.position, b.position, c.position, d.position],
+                );
+                stroke.color = self.color;
+                return stroke;
+            }
+        }
         let width = if self.width > 0.0 {
             self.width
         } else if self.shape.is_some() {
@@ -133,7 +148,10 @@ impl StrokeData {
 /// - Version 3: neue Formen (Ellipse, Pfeil). Ältere App-Versionen kennen sie nicht und würden
 ///   betroffene Seiten für beschädigt halten; mit Version 3 lehnen sie das Notizbuch stattdessen
 ///   sauber als „neuere Version“ ab.
-pub const CURRENT_FORMAT_VERSION: u32 = 3;
+/// - Version 4: eingefügte Bilder (`image` am Strich, Ordner `assets/`). Ältere Versionen würden
+///   das unbekannte Feld ignorieren, Bilder als Rechteckstrich anzeigen und beim Speichern
+///   verlieren.
+pub const CURRENT_FORMAT_VERSION: u32 = 4;
 
 /// Standardwert für ältere Dateien ohne explizite Formatversion (Legacy v0).
 pub fn legacy_format_version() -> u32 {
@@ -2177,12 +2195,12 @@ mod tests {
         let (mut loaded, _) = load_notebook(&dir).unwrap();
         assert!(!loaded.pages[1].is_loaded);
         // Ohne Nachladen verweigert der Export, statt leere Seiten zu erzeugen
-        assert!(crate::export::generate_pdf_document(&loaded, Default::default()).is_err());
+        assert!(crate::export::generate_pdf_document(&loaded, Default::default(), None).is_err());
 
         load_all_pages(&dir, &mut loaded).unwrap();
         assert_eq!(loaded.pages[1].strokes.len(), 1);
         assert_eq!(loaded.pages[1].background, PageBackground::Lined);
-        assert!(crate::export::generate_pdf_document(&loaded, Default::default()).is_ok());
+        assert!(crate::export::generate_pdf_document(&loaded, Default::default(), None).is_ok());
     }
 
     #[test]
@@ -2315,5 +2333,35 @@ mod tests {
             explicit.to_stroke().tool,
             crate::document::StrokeTool::Shape
         );
+    }
+
+    #[test]
+    fn test_image_objects_round_trip_through_page_file() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let (mut notebook, mut manifest, dir) =
+            create_new_notebook(temp_dir.path(), "Mit Bild").unwrap();
+        let assets = crate::assets::AssetStore::new(&dir);
+        let imported = assets.import_rgba(4, 2, vec![200; 32]).unwrap();
+        let corners = [
+            glam::Vec2::new(100.0, 100.0),
+            glam::Vec2::new(500.0, 120.0),
+            glam::Vec2::new(480.0, 320.0),
+            glam::Vec2::new(80.0, 300.0),
+        ];
+        notebook.current_page_mut().strokes.push(Stroke::new_image(
+            7,
+            imported.asset.clone(),
+            corners,
+        ));
+        save_notebook(&dir, &notebook, &mut manifest).unwrap();
+        assert_eq!(load_manifest(&dir).unwrap().format_version, 4);
+
+        let (reloaded, _) = load_notebook(&dir).unwrap();
+        let image = &reloaded.current_page().strokes[0];
+        assert_eq!(image.image.as_deref(), Some(imported.asset.as_str()));
+        assert_eq!(image.image_corners(), Some(corners));
+        assert!(image.vertices.is_empty());
+        // Bilddatei liegt im Notizbuchordner
+        assert!(dir.join("assets").join(&imported.asset).exists());
     }
 }

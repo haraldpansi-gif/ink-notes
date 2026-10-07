@@ -16,6 +16,7 @@ use winit::{
 };
 
 use glam::Vec2;
+use ink_notes::assets::{AssetStore, ImportedImage};
 use ink_notes::autosave::{AutosaveController, AutosaveStatus};
 use ink_notes::canvas::CanvasState;
 use ink_notes::document::{Notebook, PageBackground};
@@ -91,8 +92,14 @@ fn start_pdf_export(
         let result = storage::load_all_pages(&storage_dir, &mut notebook_clone)
             .map_err(|err| err.to_string())
             .and_then(|()| {
-                export_notebook_to_pdf(&notebook_clone, &export_path, ExportStrategy::FilledPolygon)
-                    .map_err(|err| err.to_string())
+                let assets = AssetStore::new(&storage_dir);
+                export_notebook_to_pdf(
+                    &notebook_clone,
+                    &export_path,
+                    ExportStrategy::FilledPolygon,
+                    Some(&assets),
+                )
+                .map_err(|err| err.to_string())
             });
         match &result {
             Ok(()) => println!(
@@ -149,6 +156,213 @@ fn commit_stroke_to_notebook(
             autosave.status(),
         );
         window.request_redraw();
+    }
+}
+
+/// Zwischenablage: interne Objekte (Strg+C in ink-notes) und Bilder aus der
+/// Systemzwischenablage (Screenshots, aus anderen Programmen kopierte Bilder).
+struct ClipboardBridge {
+    system: Option<arboard::Clipboard>,
+    /// Prüfsumme des Systembildes zum Zeitpunkt des letzten internen Kopierens: Strg+V fügt
+    /// das Systembild nur ein, wenn es danach kopiert wurde (die jüngste Kopie gewinnt)
+    image_hash_at_copy: Option<[u8; 32]>,
+    /// Notizbuch, aus dem kopiert wurde (für Bilder beim Einfügen in ein anderes Notizbuch)
+    source_dir: Option<PathBuf>,
+}
+
+impl ClipboardBridge {
+    fn new() -> Self {
+        Self {
+            system: None,
+            image_hash_at_copy: None,
+            source_dir: None,
+        }
+    }
+
+    /// Bild in der Systemzwischenablage samt Prüfsumme.
+    fn system_image(&mut self) -> Option<(arboard::ImageData<'static>, [u8; 32])> {
+        if self.system.is_none() {
+            self.system = arboard::Clipboard::new()
+                .map_err(|e| eprintln!("[Zwischenablage] Nicht verfügbar: {e}"))
+                .ok();
+        }
+        let image = self.system.as_mut()?.get_image().ok()?;
+        use sha2::Digest;
+        let mut hasher = sha2::Sha256::new();
+        hasher.update((image.width as u64).to_le_bytes());
+        hasher.update((image.height as u64).to_le_bytes());
+        hasher.update(&image.bytes);
+        let hash: [u8; 32] = hasher.finalize().into();
+        Some((image.to_owned_img(), hash))
+    }
+
+    /// Merkt sich beim internen Kopieren das aktuelle Systembild und das Quell-Notizbuch.
+    fn note_internal_copy(&mut self, storage_dir: &Path) {
+        self.image_hash_at_copy = self.system_image().map(|(_, hash)| hash);
+        self.source_dir = Some(storage_dir.to_path_buf());
+    }
+}
+
+/// Fügt ein importiertes Bild um `center` (Seitenkoordinaten) auf der aktuellen Seite ein,
+/// wählt es aus und schaltet auf das Auswahlwerkzeug, damit es gleich verschoben und
+/// skaliert werden kann.
+#[allow(clippy::too_many_arguments)]
+fn insert_image_on_page(
+    imported: ImportedImage,
+    center: Vec2,
+    canvas: &mut CanvasState,
+    notebook: &mut Notebook,
+    manifest: &mut NotebookManifest,
+    autosave: &mut AutosaveController,
+    selection_state: &mut SelectionState,
+    ui_state: &mut UiState,
+) {
+    let id = notebook.next_stroke_id();
+    let corners = ink_notes::document::place_image(imported.width, imported.height, center);
+    let page = notebook.current_page_mut();
+    page.add_stroke(ink_notes::document::Stroke::new_image(
+        id,
+        imported.asset,
+        corners,
+    ));
+    canvas.sync_page(page);
+    manifest.next_stroke_id = notebook.next_stroke_id;
+    autosave.mark_dirty(notebook, manifest);
+    selection_state.select_single(id);
+    ui_state.active_tool = ActiveTool::Select;
+    ui_state.set_export_message(format!(
+        "Bild eingefügt ({} × {} px)",
+        imported.width, imported.height
+    ));
+}
+
+/// Seitenmitte des sichtbaren Bereichs (Ziel für eingefügte Bilder).
+fn visible_page_center(canvas: &CanvasState) -> Vec2 {
+    canvas.screen_to_page_clamped(
+        canvas.size.width as f32 / 2.0,
+        canvas.size.height as f32 / 2.0,
+    )
+}
+
+/// Strg+V bzw. „Einfügen“: ein neu kopiertes Systembild hat Vorrang, sonst werden die intern
+/// kopierten Objekte eingefügt. Gibt die Meldung für die Statuszeile zurück.
+#[allow(clippy::too_many_arguments)]
+fn paste(
+    clipboard: &mut ClipboardBridge,
+    storage_dir: &Path,
+    canvas: &mut CanvasState,
+    notebook: &mut Notebook,
+    manifest: &mut NotebookManifest,
+    autosave: &mut AutosaveController,
+    selection_state: &mut SelectionState,
+    ui_state: &mut UiState,
+) {
+    if notebook.current_page().is_readonly() {
+        return;
+    }
+    if let Some((image, hash)) = clipboard.system_image() {
+        // Die jüngste Kopie gewinnt: das Systembild nur, wenn es nach dem letzten internen
+        // Kopieren in die Zwischenablage kam
+        if selection_state.clipboard.is_empty() || clipboard.image_hash_at_copy != Some(hash) {
+            let assets = AssetStore::new(storage_dir);
+            match assets.import_rgba(
+                image.width as u32,
+                image.height as u32,
+                image.bytes.into_owned(),
+            ) {
+                Ok(imported) => {
+                    let center = visible_page_center(canvas);
+                    insert_image_on_page(
+                        imported,
+                        center,
+                        canvas,
+                        notebook,
+                        manifest,
+                        autosave,
+                        selection_state,
+                        ui_state,
+                    );
+                }
+                Err(err) => ui_state.set_export_message(format!("Bild nicht eingefügt: {err}")),
+            }
+            return;
+        }
+    }
+
+    // Bilder aus einem anderen Notizbuch mitnehmen
+    if let Some(source) = clipboard
+        .source_dir
+        .as_deref()
+        .filter(|d| *d != storage_dir)
+    {
+        let from = AssetStore::new(source);
+        let to = AssetStore::new(storage_dir);
+        for asset in selection_state
+            .clipboard
+            .iter()
+            .filter_map(|s| s.image.as_deref())
+        {
+            if let Err(err) = to.copy_from(&from, asset) {
+                eprintln!("[Zwischenablage] Bild '{asset}' nicht übernommen: {err}");
+            }
+        }
+    }
+    let mut next_id = notebook.next_stroke_id;
+    let new_ids = selection_state.paste_from_clipboard(notebook.current_page_mut(), &mut || {
+        let id = next_id;
+        next_id += 1;
+        id
+    });
+    notebook.next_stroke_id = next_id;
+    if !new_ids.is_empty() {
+        canvas.sync_page(notebook.current_page_mut());
+        manifest.next_stroke_id = notebook.next_stroke_id;
+        autosave.mark_dirty(notebook, manifest);
+        ui_state.set_export_message(format!("{} Objekt(e) eingefügt", new_ids.len()));
+    }
+}
+
+/// Liest eine Bilddatei und fügt sie um `center` ein.
+#[allow(clippy::too_many_arguments)]
+fn insert_image_file(
+    path: &Path,
+    center: Vec2,
+    storage_dir: &Path,
+    canvas: &mut CanvasState,
+    notebook: &mut Notebook,
+    manifest: &mut NotebookManifest,
+    autosave: &mut AutosaveController,
+    selection_state: &mut SelectionState,
+    ui_state: &mut UiState,
+) {
+    if notebook.current_page().is_readonly() {
+        ui_state.set_export_message("Seite ist schreibgeschützt".to_string());
+        return;
+    }
+    let result = std::fs::read(path)
+        .map_err(|e| e.to_string())
+        .and_then(|bytes| {
+            AssetStore::new(storage_dir)
+                .import_bytes(&bytes)
+                .map_err(|e| e.to_string())
+        });
+    match result {
+        Ok(imported) => insert_image_on_page(
+            imported,
+            center,
+            canvas,
+            notebook,
+            manifest,
+            autosave,
+            selection_state,
+            ui_state,
+        ),
+        Err(err) => ui_state.set_export_message(format!(
+            "'{}' nicht eingefügt: {err}",
+            path.file_name()
+                .map(|n| n.to_string_lossy())
+                .unwrap_or_default()
+        )),
     }
 }
 
@@ -284,6 +498,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ui_state.set_export_message(warning);
     }
     let mut selection_state = SelectionState::new();
+    let mut clipboard = ClipboardBridge::new();
 
     let mut _notebook_lock = match storage::NotebookLock::acquire(&storage_dir) {
         Ok(lock) => {
@@ -755,6 +970,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
 
+                    // Bilddatei ins Fenster gezogen: an der Ablagestelle einfügen
+                    WindowEvent::DroppedFile(path) => {
+                        if ink_notes::assets::is_supported_image_path(&path) {
+                            let (sx, sy) = cursor_screen_pos;
+                            let center = canvas.screen_to_page_clamped(sx, sy);
+                            insert_image_file(
+                                &path, center, &storage_dir, &mut canvas, &mut notebook, &mut manifest,
+                                &mut autosave, &mut selection_state, &mut ui_state,
+                            );
+                            update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
+                        } else {
+                            ui_state.set_export_message("Nur Bilder (PNG, JPEG, GIF, WebP, BMP) können eingefügt werden".to_string());
+                        }
+                        window.request_redraw();
+                    }
+
                     WindowEvent::Focused(false) => {
                         // Bei Fokusverlust Strich abbrechen und 1€-Filter resetten
                         if is_drawing {
@@ -879,6 +1110,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             Key::Character(c) if c.eq_ignore_ascii_case("c") && ctrl => {
                                 let count = selection_state.copy_to_clipboard(notebook.current_page());
                                 if count > 0 {
+                                    clipboard.note_internal_copy(&storage_dir);
                                     ui_state.set_export_message(format!("{count} Objekt(e) kopiert"));
                                     window.request_redraw();
                                 }
@@ -886,23 +1118,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                             // Einfügen: Strg + V
                             Key::Character(c) if c.eq_ignore_ascii_case("v") && ctrl => {
-                                let mut next_id = notebook.next_stroke_id;
-                                let new_ids = selection_state.paste_from_clipboard(
-                                    notebook.current_page_mut(),
-                                    &mut || {
-                                        let id = next_id;
-                                        next_id += 1;
-                                        id
-                                    },
+                                paste(
+                                    &mut clipboard, &storage_dir, &mut canvas, &mut notebook, &mut manifest,
+                                    &mut autosave, &mut selection_state, &mut ui_state,
                                 );
-                                notebook.next_stroke_id = next_id;
-                                if !new_ids.is_empty() {
-                                    canvas.sync_page(notebook.current_page_mut());
-                                    manifest.next_stroke_id = notebook.next_stroke_id;
-                                    autosave.mark_dirty(&notebook, &mut manifest);
-                                    ui_state.set_export_message(format!("{} Objekt(e) eingefügt", new_ids.len()));
-                                    window.request_redraw();
-                                }
+                                update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
+                                window.request_redraw();
+                            }
+
+                            // Bild einfügen: Strg + I
+                            Key::Character(c) if c.eq_ignore_ascii_case("i") && ctrl => {
+                                ui_state.open_image_picker();
+                                window.request_redraw();
                             }
 
                             // Löschen: Entf oder Backspace
@@ -1984,28 +2211,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 UiAction::CopySelected => {
                                     let count = selection_state.copy_to_clipboard(notebook.current_page());
                                     if count > 0 {
+                                        clipboard.note_internal_copy(&storage_dir);
                                         ui_state.set_export_message(format!("{count} Objekt(e) kopiert"));
                                         window.request_redraw();
                                     }
                                 }
                                 UiAction::PasteSelected => {
-                                    let mut next_id = notebook.next_stroke_id;
-                                    let new_ids = selection_state.paste_from_clipboard(
-                                        notebook.current_page_mut(),
-                                        &mut || {
-                                            let id = next_id;
-                                            next_id += 1;
-                                            id
-                                        },
+                                    paste(
+                                        &mut clipboard, &storage_dir, &mut canvas, &mut notebook, &mut manifest,
+                                        &mut autosave, &mut selection_state, &mut ui_state,
                                     );
-                                    notebook.next_stroke_id = next_id;
-                                    if !new_ids.is_empty() {
-                                        canvas.sync_page(notebook.current_page_mut());
-                                        manifest.next_stroke_id = notebook.next_stroke_id;
-                                        autosave.mark_dirty(&notebook, &mut manifest);
-                                        ui_state.set_export_message(format!("{} Objekt(e) eingefügt", new_ids.len()));
-                                        window.request_redraw();
-                                    }
+                                    update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
+                                    window.request_redraw();
+                                }
+                                UiAction::InsertImageFile(path) => {
+                                    let center = visible_page_center(&canvas);
+                                    insert_image_file(
+                                        &path, center, &storage_dir, &mut canvas, &mut notebook, &mut manifest,
+                                        &mut autosave, &mut selection_state, &mut ui_state,
+                                    );
+                                    update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
+                                    window.request_redraw();
                                 }
                                 UiAction::RotateSelected => {
                                     if !selection_state.is_empty()
@@ -2482,6 +2708,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
 
                         // 5. Canvas (Pass 1) und egui UI (Pass 2) in Surface-Textur rendern
+                        canvas.prepare_images(&AssetStore::new(&storage_dir));
                         match canvas.render(&clipped_primitives, &screen_descriptor, &full_output.textures_delta) {
                             Ok(_) => {}
                             Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {

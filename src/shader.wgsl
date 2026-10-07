@@ -47,3 +47,33 @@ fn fs_ink(in: VertexOutput) -> @location(0) vec4<f32> {
     let lift = max(1.0 - max_c - min_c, 0.0);
     return vec4<f32>(in.color.rgb + vec3<f32>(lift), in.color.a);
 }
+
+// Eingefügte Bilder: texturierte Vierecke unter der Tinte
+struct ImageVertexInput {
+    @location(0) position: vec2<f32>,
+    @location(1) uv: vec2<f32>,
+};
+
+struct ImageVertexOutput {
+    @builtin(position) clip_position: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+};
+
+@group(1) @binding(0)
+var image_texture: texture_2d<f32>;
+@group(1) @binding(1)
+var image_sampler: sampler;
+
+@vertex
+fn vs_image(in: ImageVertexInput) -> ImageVertexOutput {
+    var out: ImageVertexOutput;
+    let ndc = in.position * camera.transform_scale + camera.transform_offset;
+    out.clip_position = vec4<f32>(ndc, 0.0, 1.0);
+    out.uv = in.uv;
+    return out;
+}
+
+@fragment
+fn fs_image(in: ImageVertexOutput) -> @location(0) vec4<f32> {
+    return textureSample(image_texture, image_sampler, in.uv);
+}

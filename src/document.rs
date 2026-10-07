@@ -103,6 +103,52 @@ pub fn point_to_segment_distance(p: glam::Vec2, a: glam::Vec2, b: glam::Vec2) ->
     (p - projection).length()
 }
 
+/// Liegt `p` im konvexen Viereck `quad` (Ecken der Reihe nach, beliebiger Umlaufsinn)?
+pub fn point_in_convex_quad(p: glam::Vec2, quad: &[glam::Vec2; 4]) -> bool {
+    let mut sign = 0.0_f32;
+    for i in 0..4 {
+        let a = quad[i];
+        let b = quad[(i + 1) % 4];
+        let cross = (b - a).perp_dot(p - a);
+        if cross.abs() < 1e-6 {
+            continue;
+        }
+        if sign == 0.0 {
+            sign = cross.signum();
+        } else if cross.signum() != sign {
+            return false;
+        }
+    }
+    true
+}
+
+/// Seiteneinheiten pro Bildpixel beim Einfügen (96 dpi wie am Bildschirm: 1 px ≈ 0,26 mm).
+pub const IMAGE_UNITS_PER_PIXEL: f32 = UNITS_PER_MM * 25.4 / 96.0;
+
+/// Ecken (oben links, oben rechts, unten rechts, unten links) für ein neu eingefügtes Bild
+/// von `width` × `height` Pixeln um `center`: Bildschirmgröße bei 96 dpi, höchstens 80 % der
+/// Seitenbreite und 60 % der Seitenhöhe, und möglichst ganz auf dem Blatt.
+pub fn place_image(width: u32, height: u32, center: glam::Vec2) -> [glam::Vec2; 4] {
+    let natural =
+        glam::Vec2::new(width.max(1) as f32, height.max(1) as f32) * IMAGE_UNITS_PER_PIXEL;
+    let fit = (PAGE_WIDTH * 0.8 / natural.x)
+        .min(PAGE_HEIGHT * 0.6 / natural.y)
+        .min(1.0);
+    let size = natural * fit;
+    let half = size / 2.0;
+    let center = glam::Vec2::new(
+        center.x.clamp(half.x, PAGE_WIDTH - half.x),
+        center.y.clamp(half.y, PAGE_HEIGHT - half.y),
+    );
+    let tl = center - half;
+    [
+        tl,
+        tl + glam::Vec2::new(size.x, 0.0),
+        tl + size,
+        tl + glam::Vec2::new(0.0, size.y),
+    ]
+}
+
 /// Das Werkzeug, mit dem ein Strich gezeichnet wurde.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -158,6 +204,10 @@ pub struct Stroke {
     pub tool: StrokeTool,
     pub width: f32,
     pub finalized: bool,
+    /// Eingefügtes Bild (Name im Asset-Ordner, siehe `assets`). Die vier Punkte sind dann die
+    /// Bildecken oben links, oben rechts, unten rechts, unten links; Verschieben, Drehen und
+    /// Skalieren wirken so automatisch auch auf Bilder. Bilder liegen immer unter der Tinte.
+    pub image: Option<String>,
 }
 
 impl Stroke {
@@ -190,7 +240,42 @@ impl Stroke {
             tool: StrokeTool::Pen,
             width: 5.0,
             finalized: true,
+            image: None,
         }
+    }
+
+    /// Erzeugt ein Bildobjekt mit den Ecken oben links, oben rechts, unten rechts, unten links.
+    pub fn new_image(id: u64, asset: String, corners: [glam::Vec2; 4]) -> Self {
+        let points = corners
+            .iter()
+            .map(|&position| StylusSample {
+                position,
+                pressure: 1.0,
+                timestamp: 0.0,
+            })
+            .collect();
+        let mut stroke = Self::new(id, points, Vec::new(), [1.0, 1.0, 1.0, 1.0]);
+        stroke.width = 0.0;
+        stroke.image = Some(asset);
+        stroke
+    }
+
+    /// Ist dieses Objekt ein Bild?
+    pub fn is_image(&self) -> bool {
+        self.image.is_some()
+    }
+
+    /// Bildecken (oben links, oben rechts, unten rechts, unten links), falls ein Bild.
+    pub fn image_corners(&self) -> Option<[glam::Vec2; 4]> {
+        if self.image.is_none() || self.points.len() < 4 {
+            return None;
+        }
+        Some([
+            self.points[0].position,
+            self.points[1].position,
+            self.points[2].position,
+            self.points[3].position,
+        ])
     }
 
     /// Finalisiert rohe Stylus-Samples mit akausalem Post-Processing (Zwei-Stufen-Modell).
@@ -226,7 +311,16 @@ impl Stroke {
     }
 
     /// Berechnet den minimalen euklidischen Abstand eines Punktes zu diesem Strich.
+    /// Bei Bildern ist der Abstand innerhalb der Bildfläche 0.
     pub fn distance_to_point(&self, p: glam::Vec2) -> f32 {
+        if let Some(corners) = self.image_corners() {
+            if point_in_convex_quad(p, &corners) {
+                return 0.0;
+            }
+            return (0..4)
+                .map(|i| point_to_segment_distance(p, corners[i], corners[(i + 1) % 4]))
+                .fold(f32::INFINITY, f32::min);
+        }
         if self.points.is_empty() {
             return f32::INFINITY;
         }
@@ -348,7 +442,11 @@ impl Stroke {
     }
 
     /// Weist diesem Strich eine neue Farbe zu und aktualisiert alle Vertex-Farben.
+    /// Bilder behalten ihre Farben.
     pub fn set_color(&mut self, new_color: [f32; 4]) {
+        if self.is_image() {
+            return;
+        }
         self.color = new_color;
         for v in &mut self.vertices {
             v.color = new_color;
@@ -462,20 +560,18 @@ impl Page {
     }
 
     /// Findet den nächsten Strich an Position `pos` innerhalb eines maximalen Suchradius.
+    /// Tinte hat Vorrang vor Bildern darunter, damit Notizen auf einem Bild auswählbar bleiben.
     pub fn find_stroke_at(&self, pos: glam::Vec2, max_dist: f32) -> Option<&Stroke> {
-        let mut best: Option<(&Stroke, f32)> = None;
+        let mut best: Option<(&Stroke, (bool, f32))> = None;
         for s in &self.strokes {
             if !s.aabb.expanded(max_dist).contains_point(pos) {
                 continue;
             }
             let d = s.distance_to_point(pos);
             if d <= max_dist {
-                if let Some((_, best_d)) = best {
-                    if d < best_d {
-                        best = Some((s, d));
-                    }
-                } else {
-                    best = Some((s, d));
+                let key = (s.is_image(), d);
+                if best.map_or(true, |(_, best_key)| key < best_key) {
+                    best = Some((s, key));
                 }
             }
         }
@@ -516,7 +612,8 @@ impl Page {
         let mut hit_indices = Vec::new();
 
         for (i, stroke) in self.strokes.iter().enumerate() {
-            if mode.erases(stroke.tool)
+            if !stroke.is_image()
+                && mode.erases(stroke.tool)
                 && stroke.intersects_eraser(eraser_pos, eraser_radius, max_stroke_radius)
             {
                 hit_indices.push(i);
@@ -572,6 +669,8 @@ impl Page {
     }
 
     /// Findet die IDs aller Striche, die die gegebene Auswahlbox schneiden oder darin liegen.
+    /// Bilder werden nur ausgewählt, wenn sie ganz in der Box liegen – sonst würde jede
+    /// Auswahl von Notizen auf einem Bild das Bild mitnehmen.
     pub fn find_strokes_in_box(&self, box_min: glam::Vec2, box_max: glam::Vec2) -> Vec<u64> {
         let sel_box = Aabb::new(
             glam::Vec2::new(box_min.x.min(box_max.x), box_min.y.min(box_max.y)),
@@ -579,7 +678,13 @@ impl Page {
         );
         self.strokes
             .iter()
-            .filter(|s| s.aabb.intersects(&sel_box))
+            .filter(|s| {
+                if s.is_image() {
+                    sel_box.contains_point(s.aabb.min) && sel_box.contains_point(s.aabb.max)
+                } else {
+                    s.aabb.intersects(&sel_box)
+                }
+            })
             .map(|s| s.id)
             .collect()
     }
@@ -1143,6 +1248,96 @@ mod tests {
         let removed = page.erase_at(at, 10.0, 2.0, EraserMode::All);
         assert_eq!(removed.len(), 3);
         assert!(page.strokes.is_empty());
+    }
+
+    #[test]
+    fn test_place_image() {
+        let center = glam::Vec2::new(PAGE_WIDTH / 2.0, PAGE_HEIGHT / 2.0);
+        // Kleines Bild: Bildschirmgröße, zentriert
+        let [tl, tr, br, bl] = place_image(200, 100, center);
+        assert!(((tr - tl).length() - 200.0 * IMAGE_UNITS_PER_PIXEL).abs() < 1e-3);
+        assert!(((bl - tl).length() - 100.0 * IMAGE_UNITS_PER_PIXEL).abs() < 1e-3);
+        assert!(((tl + br) / 2.0 - center).length() < 1e-3);
+
+        // Großer Screenshot: auf 80 % der Breite verkleinert, Seitenverhältnis bleibt
+        let [tl, tr, br, _] = place_image(3840, 2160, center);
+        let size = br - tl;
+        assert!((size.x - PAGE_WIDTH * 0.8).abs() < 1e-2);
+        assert!((size.x / size.y - 3840.0 / 2160.0).abs() < 1e-3);
+        assert_eq!(tr.y, tl.y);
+
+        // Am Rand eingefügt: wird aufs Blatt geschoben
+        let corners = place_image(400, 400, glam::Vec2::new(-50.0, PAGE_HEIGHT + 50.0));
+        for c in corners {
+            assert!(c.x >= -1e-3 && c.x <= PAGE_WIDTH + 1e-3);
+            assert!(c.y >= -1e-3 && c.y <= PAGE_HEIGHT + 1e-3);
+        }
+    }
+
+    #[test]
+    fn test_image_objects_hit_test_and_survive_erasing() {
+        let mut page = Page::new(1, PageBackground::Blank);
+        let corners = [
+            glam::Vec2::new(100.0, 100.0),
+            glam::Vec2::new(300.0, 100.0),
+            glam::Vec2::new(300.0, 200.0),
+            glam::Vec2::new(100.0, 200.0),
+        ];
+        page.add_stroke(Stroke::new_image(1, "a.png".into(), corners));
+        assert_eq!(page.strokes[0].image_corners(), Some(corners));
+
+        // Fläche des Bildes trifft, auch weit weg vom Rand
+        let inside = glam::Vec2::new(200.0, 150.0);
+        assert_eq!(page.find_stroke_at(inside, 5.0).map(|s| s.id), Some(1));
+        assert!(page
+            .find_stroke_at(glam::Vec2::new(400.0, 150.0), 5.0)
+            .is_none());
+
+        // Notiz auf dem Bild hat beim Antippen Vorrang
+        let mut ink = Stroke::new(
+            2,
+            vec![
+                StylusSample {
+                    position: glam::Vec2::new(150.0, 150.0),
+                    pressure: 0.5,
+                    timestamp: 0.0,
+                },
+                StylusSample {
+                    position: glam::Vec2::new(250.0, 152.0),
+                    pressure: 0.5,
+                    timestamp: 0.1,
+                },
+            ],
+            Vec::new(),
+            [0.0, 0.0, 0.0, 1.0],
+        );
+        ink.width = 5.0;
+        page.add_stroke(ink);
+        assert_eq!(page.find_stroke_at(inside, 5.0).map(|s| s.id), Some(2));
+
+        // Radierer entfernt nur die Notiz, nie das Bild
+        let removed = page.erase_at(inside, 30.0, 12.0, EraserMode::All);
+        assert_eq!(removed.iter().map(|s| s.id).collect::<Vec<_>>(), vec![2]);
+        assert!(page
+            .erase_at(glam::Vec2::new(100.0, 100.0), 30.0, 12.0, EraserMode::All)
+            .is_empty());
+
+        // Auswahlrechteck: Bild nur bei vollständigem Einschluss
+        assert!(page
+            .find_strokes_in_box(glam::Vec2::new(150.0, 120.0), glam::Vec2::new(250.0, 180.0))
+            .is_empty());
+        assert_eq!(
+            page.find_strokes_in_box(glam::Vec2::new(90.0, 90.0), glam::Vec2::new(310.0, 210.0)),
+            vec![1]
+        );
+
+        // Umfärben ändert Bilder nicht, Drehen bewegt die Ecken mit
+        let mut image = page.strokes[0].clone();
+        image.set_color([1.0, 0.0, 0.0, 1.0]);
+        assert_eq!(image.color, [1.0, 1.0, 1.0, 1.0]);
+        image.rotate(glam::Vec2::new(200.0, 150.0), std::f32::consts::FRAC_PI_2);
+        let rotated = image.image_corners().unwrap();
+        assert!((rotated[0] - glam::Vec2::new(250.0, 50.0)).length() < 1e-3);
     }
 
     #[test]

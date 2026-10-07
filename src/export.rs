@@ -2,7 +2,7 @@
 //!
 //! Features:
 //! - Hochformat DIN A4 (210 mm x 297 mm)
-//! - 2 Layer pro Seite: Layer 1 ("Background") und Layer 2 ("Ink")
+//! - Layer pro Seite: "Background", "Images" (nur bei eingefügten Bildern) und "Ink"
 //! - Y-Achsen-Spiegelung (PDF-Ursprung unten links vs. Bildschirmursprung oben links)
 //! - Vektor-Hintergründe (Kariert 5mm, Liniert, Punktraster, Blanko)
 //! - Zwei Export-Strategien:
@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 use printpdf::path::{PaintMode, WindingOrder};
 use printpdf::{Color, Line, Mm, PdfDocument, PdfDocumentReference, Point, Polygon, Rgb};
 
+use crate::assets::AssetStore;
 use crate::background::{GRID_5MM_SPACING, LINED_SPACING};
 use crate::document::{
     Notebook, Page, PageBackground, Stroke, A4_HEIGHT_MM, A4_WIDTH_MM, PAGE_HEIGHT, PAGE_WIDTH,
@@ -109,14 +110,16 @@ pub fn page_to_pdf_mm(x: f32, y: f32) -> (f32, f32) {
 }
 
 /// Erzeugt ein PDF-Dokument aus einem Notizbuch und speichert es als Datei.
+/// `assets`: Bilder des Notizbuchs (ohne werden Bilder als graue Fläche ausgegeben).
 pub fn export_notebook_to_pdf<P: AsRef<Path>>(
     notebook: &Notebook,
     path: P,
     strategy: ExportStrategy,
+    assets: Option<&AssetStore>,
 ) -> Result<(), Box<dyn Error>> {
     let file = File::create(path)?;
     let mut writer = BufWriter::new(file);
-    let doc = generate_pdf_document(notebook, strategy)?;
+    let doc = generate_pdf_document(notebook, strategy, assets)?;
     doc.save(&mut writer)?;
     Ok(())
 }
@@ -125,8 +128,9 @@ pub fn export_notebook_to_pdf<P: AsRef<Path>>(
 pub fn export_notebook_to_bytes(
     notebook: &Notebook,
     strategy: ExportStrategy,
+    assets: Option<&AssetStore>,
 ) -> Result<Vec<u8>, Box<dyn Error>> {
-    let doc = generate_pdf_document(notebook, strategy)?;
+    let doc = generate_pdf_document(notebook, strategy, assets)?;
     let bytes = doc.save_to_bytes()?;
     Ok(bytes)
 }
@@ -135,6 +139,7 @@ pub fn export_notebook_to_bytes(
 pub fn generate_pdf_document(
     notebook: &Notebook,
     strategy: ExportStrategy,
+    assets: Option<&AssetStore>,
 ) -> Result<PdfDocumentReference, Box<dyn Error>> {
     if notebook.pages.is_empty() {
         return Err("Notizbuch enthält keine Seiten".into());
@@ -159,6 +164,9 @@ pub fn generate_pdf_document(
     let page1_ref = doc.get_page(page1_idx);
     let layer1_bg_ref = page1_ref.get_layer(layer1_bg);
     render_background_layer(&layer1_bg_ref, notebook.pages[0].background);
+    if notebook.pages[0].strokes.iter().any(Stroke::is_image) {
+        render_image_layer(&page1_ref.add_layer("Images"), &notebook.pages[0], assets);
+    }
 
     let layer1_ink_ref = page1_ref.add_layer("Ink");
     render_ink_layer(&layer1_ink_ref, &notebook.pages[0], strategy);
@@ -169,6 +177,9 @@ pub fn generate_pdf_document(
         let page_ref = doc.get_page(page_idx);
         let layer_bg_ref = page_ref.get_layer(layer_bg);
         render_background_layer(&layer_bg_ref, page.background);
+        if page.strokes.iter().any(Stroke::is_image) {
+            render_image_layer(&page_ref.add_layer("Images"), page, assets);
+        }
 
         let layer_ink_ref = page_ref.add_layer("Ink");
         render_ink_layer(&layer_ink_ref, page, strategy);
@@ -268,6 +279,9 @@ fn render_background_layer(layer: &printpdf::PdfLayerReference, background: Page
 /// Rendert alle Striche einer Seite auf Layer 2 ("Ink").
 fn render_ink_layer(layer: &printpdf::PdfLayerReference, page: &Page, strategy: ExportStrategy) {
     for stroke in &page.strokes {
+        if stroke.is_image() {
+            continue;
+        }
         if let Some(ref shape) = stroke.shape {
             render_recognized_shape(layer, shape, stroke.color);
         } else {
@@ -280,6 +294,160 @@ fn render_ink_layer(layer: &printpdf::PdfLayerReference, page: &Page, strategy: 
                 }
             }
         }
+    }
+}
+
+/// Auflösung, mit der Bilder höchstens eingebettet werden (Druckqualität).
+pub const PDF_IMAGE_DPI: f32 = 300.0;
+
+/// Seitenkoordinate in PDF-Punkten (ohne Begrenzung auf das Blatt, Ursprung unten links).
+fn page_to_pdf_pt(p: glam::Vec2) -> glam::Vec2 {
+    const PT_PER_MM: f32 = 72.0 / 25.4;
+    glam::Vec2::new(
+        p.x / PAGE_WIDTH * A4_WIDTH_MM * PT_PER_MM,
+        (1.0 - p.y / PAGE_HEIGHT) * A4_HEIGHT_MM * PT_PER_MM,
+    )
+}
+
+/// PDF-Transformationsmatrix, die das Einheitsquadrat eines Bildes (Ursprung unten links)
+/// auf die Bildecken oben links, oben rechts, unten rechts, unten links abbildet.
+pub fn image_matrix(corners: &[glam::Vec2; 4]) -> [f32; 6] {
+    let [tl, _, br, bl] = corners.map(page_to_pdf_pt);
+    let x_axis = br - bl;
+    let y_axis = tl - bl;
+    [x_axis.x, x_axis.y, y_axis.x, y_axis.y, bl.x, bl.y]
+}
+
+/// Anzahl der Bildkomponenten eines JPEG laut Frame-Header (1 = Graustufen, 3 = Farbe,
+/// 4 = CMYK), `None` bei unlesbarem Header.
+fn jpeg_components(bytes: &[u8]) -> Option<u8> {
+    let mut i = 2;
+    while i + 9 < bytes.len() {
+        if bytes[i] != 0xFF {
+            return None;
+        }
+        let marker = bytes[i + 1];
+        let len = u16::from_be_bytes([bytes[i + 2], bytes[i + 3]]) as usize;
+        // SOF0–SOF15 außer DHT (C4), JPG (C8) und DAC (CC)
+        if (0xC0..=0xCF).contains(&marker) && !matches!(marker, 0xC4 | 0xC8 | 0xCC) {
+            return bytes.get(i + 9).copied();
+        }
+        i += 2 + len;
+    }
+    None
+}
+
+/// Bilddaten für das PDF: JPEG-Dateien werden unverändert eingebettet, alles andere als
+/// RGB auf weißem Grund (Transparenz wird mit dem Papier verrechnet), höchstens mit
+/// `PDF_IMAGE_DPI` bezogen auf die Größe auf der Seite.
+fn pdf_image_xobject(
+    assets: &AssetStore,
+    asset: &str,
+    corners: &[glam::Vec2; 4],
+) -> Result<printpdf::ImageXObject, Box<dyn Error>> {
+    use printpdf::{ColorBits, ColorSpace, ImageFilter, ImageXObject, Px};
+
+    let bytes = assets.read_bytes(asset)?;
+    let decoded = image::load_from_memory(&bytes)?;
+
+    if asset.ends_with(".jpg") {
+        let color_space = match jpeg_components(&bytes) {
+            Some(1) => Some(ColorSpace::Greyscale),
+            Some(3) => Some(ColorSpace::Rgb),
+            _ => None,
+        };
+        if let Some(color_space) = color_space {
+            return Ok(ImageXObject {
+                width: Px(decoded.width() as usize),
+                height: Px(decoded.height() as usize),
+                color_space,
+                bits_per_component: ColorBits::Bit8,
+                interpolate: true,
+                image_data: bytes,
+                image_filter: Some(ImageFilter::DCT),
+                smask: None,
+                clipping_bbox: None,
+            });
+        }
+    }
+
+    // Größe auf der Seite in Zoll → benötigte Pixel
+    let width_in = (corners[1] - corners[0]).length() / PAGE_WIDTH * A4_WIDTH_MM / 25.4;
+    let height_in = (corners[3] - corners[0]).length() / PAGE_WIDTH * A4_WIDTH_MM / 25.4;
+    let max_w = ((width_in * PDF_IMAGE_DPI).ceil() as u32).max(1);
+    let max_h = ((height_in * PDF_IMAGE_DPI).ceil() as u32).max(1);
+    let decoded = if decoded.width() > max_w || decoded.height() > max_h {
+        decoded.resize(max_w, max_h, image::imageops::FilterType::Triangle)
+    } else {
+        decoded
+    };
+
+    let rgba = decoded.into_rgba8();
+    let mut rgb = Vec::with_capacity((rgba.width() * rgba.height() * 3) as usize);
+    for px in rgba.pixels() {
+        let alpha = px[3] as u32;
+        for c in &px.0[..3] {
+            rgb.push(((*c as u32 * alpha + 255 * (255 - alpha)) / 255) as u8);
+        }
+    }
+    Ok(ImageXObject {
+        width: Px(rgba.width() as usize),
+        height: Px(rgba.height() as usize),
+        color_space: ColorSpace::Rgb,
+        bits_per_component: ColorBits::Bit8,
+        interpolate: true,
+        image_data: rgb,
+        image_filter: None,
+        smask: None,
+        clipping_bbox: None,
+    })
+}
+
+/// Rendert die eingefügten Bilder einer Seite. Fehlt eine Bilddatei, erscheint an ihrer
+/// Stelle eine graue Fläche, damit der Export nicht abbricht.
+fn render_image_layer(
+    layer: &printpdf::PdfLayerReference,
+    page: &Page,
+    assets: Option<&AssetStore>,
+) {
+    for stroke in &page.strokes {
+        let (Some(asset), Some(corners)) = (stroke.image.as_deref(), stroke.image_corners()) else {
+            continue;
+        };
+        let xobject = match assets.map(|a| pdf_image_xobject(a, asset, &corners)) {
+            Some(Ok(xobject)) => xobject,
+            other => {
+                if let Some(Err(err)) = other {
+                    eprintln!("[PDF-Export] Bild '{asset}' fehlt oder ist beschädigt: {err}");
+                }
+                printpdf::ImageXObject {
+                    width: printpdf::Px(1),
+                    height: printpdf::Px(1),
+                    color_space: printpdf::ColorSpace::Rgb,
+                    bits_per_component: printpdf::ColorBits::Bit8,
+                    interpolate: false,
+                    image_data: vec![200, 200, 200],
+                    image_filter: None,
+                    smask: None,
+                    clipping_bbox: None,
+                }
+            }
+        };
+        let (width, height) = (xobject.width.0 as f32, xobject.height.0 as f32);
+        layer.save_graphics_state();
+        layer.set_ctm(printpdf::CurTransMat::Raw(image_matrix(&corners)));
+        // Bei 72 dpi ist ein Pixel ein Punkt; die Skalierung bildet das Bild auf das
+        // Einheitsquadrat ab, die Matrix oben auf die Bildecken
+        printpdf::Image::from(xobject).add_to_layer(
+            layer.clone(),
+            printpdf::ImageTransform {
+                dpi: Some(72.0),
+                scale_x: Some(1.0 / width),
+                scale_y: Some(1.0 / height),
+                ..Default::default()
+            },
+        );
+        layer.restore_graphics_state();
     }
 }
 
@@ -794,7 +962,7 @@ mod tests {
         let pdf_path = temp_dir.join("ink_notes_test_export.pdf");
 
         let export_res =
-            export_notebook_to_pdf(&notebook, &pdf_path, ExportStrategy::FilledPolygon);
+            export_notebook_to_pdf(&notebook, &pdf_path, ExportStrategy::FilledPolygon, None);
         assert!(
             export_res.is_ok(),
             "PDF-Export zu Datei muss erfolgreich sein"
@@ -820,7 +988,7 @@ mod tests {
         );
 
         // 3. Export als Bytes testen (Strategie B: BezierCurve)
-        let bytes_res = export_notebook_to_bytes(&notebook, ExportStrategy::BezierCurve);
+        let bytes_res = export_notebook_to_bytes(&notebook, ExportStrategy::BezierCurve, None);
         assert!(bytes_res.is_ok());
         let bytes = bytes_res.unwrap();
         assert!(bytes.len() > 1024);
@@ -943,11 +1111,121 @@ mod tests {
         );
         page.add_stroke(octahedron_stroke);
 
-        let bytes_res = export_notebook_to_bytes(&notebook, ExportStrategy::FilledPolygon);
+        let bytes_res = export_notebook_to_bytes(&notebook, ExportStrategy::FilledPolygon, None);
         assert!(bytes_res.is_ok(), "Shape export must succeed");
         let bytes = bytes_res.unwrap();
         assert!(bytes.len() > 1024);
         assert!(bytes.starts_with(b"%PDF-1."));
+    }
+
+    #[test]
+    fn test_image_matrix_maps_unit_square_to_corners() {
+        // Bild über die volle Seitenbreite, oberes Viertel der Seite
+        let corners = [
+            glam::Vec2::new(0.0, 0.0),
+            glam::Vec2::new(PAGE_WIDTH, 0.0),
+            glam::Vec2::new(PAGE_WIDTH, PAGE_HEIGHT / 4.0),
+            glam::Vec2::new(0.0, PAGE_HEIGHT / 4.0),
+        ];
+        let [a, b, c, d, e, f] = image_matrix(&corners);
+        let page_w_pt = A4_WIDTH_MM * 72.0 / 25.4;
+        let page_h_pt = A4_HEIGHT_MM * 72.0 / 25.4;
+        let map = |u: f32, v: f32| (a * u + c * v + e, b * u + d * v + f);
+        let close = |(x, y): (f32, f32), (ex, ey): (f32, f32)| {
+            (x - ex).abs() < 0.01 && (y - ey).abs() < 0.01
+        };
+        // Unten links des Bildes, oben rechts des Bildes (PDF-Ursprung unten links)
+        assert!(close(map(0.0, 0.0), (0.0, page_h_pt * 0.75)));
+        assert!(close(map(1.0, 1.0), (page_w_pt, page_h_pt)));
+        // Gedrehtes Bild: Achsen folgen den Ecken
+        let rotated = [
+            glam::Vec2::new(500.0, 500.0),
+            glam::Vec2::new(500.0, 900.0),
+            glam::Vec2::new(300.0, 900.0),
+            glam::Vec2::new(300.0, 500.0),
+        ];
+        let m = image_matrix(&rotated);
+        assert!(
+            m[0].abs() < 1e-3 && m[1] < 0.0,
+            "x-Achse zeigt nach unten: {m:?}"
+        );
+    }
+
+    #[test]
+    fn test_pdf_export_embeds_images() {
+        let dir = tempfile::tempdir().unwrap();
+        let assets = AssetStore::new(dir.path());
+        let jpg = crate::assets::tests::sample_image_bytes(64, 48, image::ImageFormat::Jpeg);
+        let png = crate::assets::tests::sample_image_bytes(30, 20, image::ImageFormat::Png);
+        let jpg_asset = assets.import_bytes(&jpg).unwrap().asset;
+        let png_asset = assets.import_bytes(&png).unwrap().asset;
+
+        let mut notebook = Notebook::new();
+        let page = notebook.current_page_mut();
+        for (id, asset) in [
+            (1, jpg_asset),
+            (2, png_asset),
+            (3, format!("{}.png", "0".repeat(64))),
+        ] {
+            let y = id as f32 * 400.0;
+            page.strokes.push(Stroke::new_image(
+                id,
+                asset,
+                [
+                    glam::Vec2::new(100.0, y),
+                    glam::Vec2::new(700.0, y),
+                    glam::Vec2::new(700.0, y + 300.0),
+                    glam::Vec2::new(100.0, y + 300.0),
+                ],
+            ));
+        }
+
+        let bytes =
+            export_notebook_to_bytes(&notebook, ExportStrategy::FilledPolygon, Some(&assets))
+                .expect("Export mit Bildern");
+        let contains = |needle: &[u8]| bytes.windows(needle.len()).any(|w| w == needle);
+        assert!(
+            contains(b"/DCTDecode"),
+            "JPEG wird nicht unverändert eingebettet"
+        );
+        // JPEG-Daten liegen byte-identisch im PDF
+        assert!(contains(&jpg[..64]));
+        assert!(
+            contains(b"/Images") || contains(b"(Images)"),
+            "Bild-Ebene fehlt"
+        );
+        let image_objects = bytes
+            .windows(b"/Subtype/Image".len())
+            .filter(|w| *w == b"/Subtype/Image")
+            .count()
+            + bytes
+                .windows(b"/Subtype /Image".len())
+                .filter(|w| *w == b"/Subtype /Image")
+                .count();
+        // JPEG, PNG und Ersatzfläche für die fehlende Datei
+        assert_eq!(image_objects, 3);
+
+        // Ohne Asset-Ordner: Export klappt trotzdem (graue Flächen)
+        assert!(export_notebook_to_bytes(&notebook, ExportStrategy::FilledPolygon, None).is_ok());
+    }
+
+    #[test]
+    fn test_jpeg_component_count() {
+        let color = crate::assets::tests::sample_image_bytes(8, 8, image::ImageFormat::Jpeg);
+        assert_eq!(jpeg_components(&color), Some(3));
+        let gray = {
+            let img = image::GrayImage::from_pixel(8, 8, image::Luma([90]));
+            let mut out = Vec::new();
+            image::DynamicImage::ImageLuma8(img)
+                .write_to(
+                    &mut std::io::Cursor::new(&mut out),
+                    image::ImageFormat::Jpeg,
+                )
+                .unwrap();
+            out
+        };
+        assert_eq!(jpeg_components(&gray), Some(1));
+        assert_eq!(jpeg_components(b"\xFF\xD8kaputt"), None);
     }
 
     #[test]
