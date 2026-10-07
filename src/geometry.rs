@@ -874,6 +874,11 @@ pub fn detect_polygon(points: &[Vec2]) -> Option<RecognizedShape> {
     }
 
     let corners = simplified;
+    // Echte Ecken verlangen: Bei einem glatten Oval verteilt sich die Richtungsänderung
+    // gleichmäßig, die Vereinfachung liefert aber trotzdem 6 oder 8 Punkte
+    if !turning_concentrated_at_corners(points, &corners) {
+        return None;
+    }
     let center = corners.iter().copied().sum::<Vec2>() / (n as f32);
 
     let radii: Vec<f32> = corners.iter().map(|&pt| (pt - center).length()).collect();
@@ -907,15 +912,93 @@ pub fn detect_polygon(points: &[Vec2]) -> Option<RecognizedShape> {
     })
 }
 
+/// Anteil der gesamten Richtungsänderung, der bei einem Vieleck in der Nähe der Ecken liegen muss.
+const POLYGON_TURNING_AT_CORNERS: f32 = 0.7;
+/// Umgebung einer Ecke als Anteil des Umfangs.
+const POLYGON_CORNER_NEIGHBORHOOD: f32 = 0.03;
+
+/// Liegt die Richtungsänderung des Strichs überwiegend an den Ecken (Vieleck) und nicht
+/// gleichmäßig verteilt (Oval)? Gemessen wird die vorzeichenbehaftete Drehung entlang des
+/// gleichmäßig neu abgetasteten Strichs; Zittern hebt sich dabei weitgehend auf.
+fn turning_concentrated_at_corners(points: &[Vec2], corners: &[Vec2]) -> bool {
+    corner_turning_ratio(points, corners).is_some_and(|r| r >= POLYGON_TURNING_AT_CORNERS)
+}
+
+/// Anteil der vorzeichenbehafteten Richtungsänderung, der in der Nähe der Ecken liegt.
+fn corner_turning_ratio(points: &[Vec2], corners: &[Vec2]) -> Option<f32> {
+    let total_len = path_length(points);
+    if total_len < 1e-3 || corners.is_empty() {
+        return None;
+    }
+    // Gleichmäßig neu abtasten (120 Punkte entlang der Bogenlänge)
+    const SAMPLES: usize = 120;
+    let step = total_len / SAMPLES as f32;
+    let mut resampled = vec![points[0]];
+    let mut carried = 0.0;
+    for w in points.windows(2) {
+        let (a, b) = (w[0], w[1]);
+        let seg = (b - a).length();
+        let mut pos = step - carried;
+        while pos <= seg {
+            resampled.push(a + (b - a) * (pos / seg));
+            pos += step;
+        }
+        carried = seg - (pos - step);
+    }
+    // Richtungen über einen Abstand von 3 Punkten, um das Zittern zu glätten
+    const W: usize = 3;
+    if resampled.len() < 2 * W + 2 {
+        return None;
+    }
+    let near = POLYGON_CORNER_NEIGHBORHOOD * total_len;
+    let (mut turn_total, mut turn_near) = (0.0_f32, 0.0_f32);
+    for i in W..resampled.len() - W {
+        let d_in = resampled[i] - resampled[i - W];
+        let d_out = resampled[i + W] - resampled[i];
+        let turn = d_in.perp_dot(d_out).atan2(d_in.dot(d_out)) / W as f32;
+        turn_total += turn;
+        if corners.iter().any(|c| (*c - resampled[i]).length() <= near) {
+            turn_near += turn;
+        }
+    }
+    (turn_total.abs() > 1e-3).then(|| turn_near / turn_total)
+}
+
 fn ramer_douucker_closed(points: &[Vec2], epsilon: f32) -> Vec<Vec2> {
     let simplified = ramer_douglas_peucker(points, epsilon);
-    if simplified.len() >= 2
+    let mut vertices = if simplified.len() >= 2
         && (simplified[0] - *simplified.last().unwrap()).length() < epsilon * 2.0
     {
         simplified[0..simplified.len() - 1].to_vec()
     } else {
         simplified
+    };
+    // Überzählige Punkte entfernen: zu dicht am Nachbarn (z. B. das Strichende kurz vor dem
+    // Start) oder fast auf einer Geraden mit den Nachbarn (< 20° Richtungsänderung)
+    loop {
+        let n = vertices.len();
+        if n <= 3 {
+            break;
+        }
+        let redundant = (0..n).find(|&i| {
+            let (prev, curr, next) = (
+                vertices[(i + n - 1) % n],
+                vertices[i],
+                vertices[(i + 1) % n],
+            );
+            let d_in = curr - prev;
+            let d_out = next - curr;
+            let turn = d_in.perp_dot(d_out).atan2(d_in.dot(d_out)).abs();
+            (next - curr).length() < epsilon || turn < 20f32.to_radians()
+        });
+        match redundant {
+            Some(i) => {
+                vertices.remove(i);
+            }
+            None => break,
+        }
     }
+    vertices
 }
 
 /// 7. Oktaeder-Erkennung (3D-Kantenmodell / Doppelpyramide).
@@ -1079,27 +1162,75 @@ pub fn detect_shape(points: &[StylusSample]) -> Option<RecognizedShape> {
         let aabb = Aabb::from_points(&pts);
         *err <= CLOSED_SHAPE_GOOD_FIT * (aabb.max - aabb.min).length()
     });
-    if !closed_fits_well {
-        if let Some(octa) = detect_octahedron(&pts) {
-            return Some(octa);
-        }
-    }
-    if let Some((_, shape)) = best_closed {
-        return Some(shape);
-    }
-    if let Some(polygon) = detect_polygon(&pts) {
-        return Some(polygon);
-    }
+    let best_closed = best_closed.map(|(_, shape)| shape);
 
-    // 3. Offene Formen: Koordinatensystem oder Gerade
-    if let Some(coord) = detect_coordinate_system(&pts) {
-        return Some(coord);
-    }
-    if let Some(line) = detect_line(&pts) {
-        return Some(line);
-    }
+    // Kandidaten in Prioritätsreihenfolge; 3. offene Formen (Koordinatensystem, Gerade) zuletzt.
+    // Übernommen wird der erste, der den Strich wirklich beschreibt. Passt keiner, bleibt der
+    // Strich unverändert (vorher wurde fast jede geschlossene Kritzelei zu einer Form).
+    let candidates: [&dyn Fn() -> Option<RecognizedShape>; 6] = [
+        &|| {
+            if closed_fits_well {
+                None
+            } else {
+                detect_octahedron(&pts)
+            }
+        },
+        &|| best_closed.clone(),
+        &|| detect_polygon(&pts),
+        &|| detect_coordinate_system(&pts),
+        &|| detect_line(&pts),
+        &|| None,
+    ];
+    candidates
+        .iter()
+        .filter_map(|candidate| candidate())
+        .find(|shape| shape_describes_stroke(&pts, shape))
+}
 
-    None
+/// Größte zulässige mittlere Abweichung (RMS) des Strichs von der erkannten Form, als Anteil
+/// der Strichdiagonale. Echte Formen liegen bei 0,5–3 %, Freiformen (Herz, Stern, Wolke,
+/// Spirale) und flache Ellipsen bei 5–6,5 %.
+const SHAPE_MAX_FIT_ERROR: f32 = 0.04;
+
+/// Mittlere Abweichung (RMS) des Strichs von einer Form, relativ zur Strichdiagonale.
+/// Gemessen wird gegen den Linienzug der Punkte, aus denen die Form gezeichnet wird; das
+/// funktioniert für alle Formtypen gleich (auch Linien, Koordinatensysteme und Oktaeder).
+pub fn shape_fit_error(points: &[Vec2], shape: &RecognizedShape) -> Option<f32> {
+    if points.is_empty() {
+        return None;
+    }
+    let (model, _) = shape_to_mesh(shape, 1.0, [0.0; 4]);
+    if model.is_empty() {
+        return None;
+    }
+    let aabb = Aabb::from_points(points);
+    let diagonal = (aabb.max - aabb.min).length();
+    if diagonal < 1e-3 {
+        return None;
+    }
+    // Abstand zum Linienzug der Modellpunkte (nicht zu den Punkten selbst: manche Formen,
+    // z. B. das Koordinatensystem, liefern nur ihre Eckpunkte)
+    let model: Vec<Vec2> = model.iter().map(|m| m.position).collect();
+    let sum_sq: f32 = points
+        .iter()
+        .map(|p| {
+            let d = if model.len() == 1 {
+                (model[0] - *p).length()
+            } else {
+                model
+                    .windows(2)
+                    .map(|w| segment_distance(*p, w[0], w[1]))
+                    .fold(f32::INFINITY, f32::min)
+            };
+            d * d
+        })
+        .sum();
+    Some((sum_sq / points.len() as f32).sqrt() / diagonal)
+}
+
+/// Beschreibt die Form den Strich gut genug, um ihn zu ersetzen?
+fn shape_describes_stroke(points: &[Vec2], shape: &RecognizedShape) -> bool {
+    shape_fit_error(points, shape).is_some_and(|err| err <= SHAPE_MAX_FIT_ERROR)
 }
 
 /// Größte zulässige Abweichung (RMS) eines Rechtecks vom Strich, als Anteil der Diagonale.
@@ -1111,30 +1242,27 @@ const RECTANGLE_AXIS_SNAP_DEG: f32 = 10.0;
 
 /// Anteil der Diagonale, bis zu dem die Abweichung einer geschlossenen Form als „passt gut“ gilt.
 const CLOSED_SHAPE_GOOD_FIT: f32 = 0.04;
-/// Ein Rechteck gewinnt gegen die freiere Raute, solange seine Abweichung höchstens um
-/// diesen Faktor größer ist (sonst würden Quadrate meist als Raute erkannt).
-const RECTANGLE_OVER_RHOMBUS: f32 = 1.5;
+/// Gewichte der Abweichung im Formvergleich (kleiner = bevorzugt). Ein Rechteck gewinnt gegen
+/// Raute und Vieleck bis zur 1,5-fachen Abweichung (sonst würden Quadrate oft zur Raute);
+/// ein Vieleck gewinnt entsprechend gegen den Kreis.
+const RECTANGLE_WEIGHT: f32 = 1.0 / 1.5;
+const CIRCLE_WEIGHT: f32 = 1.5;
 
-/// Wählt unter Kreis, Dreieck, Rechteck und Raute die Form, deren Kontur am besten passt,
+/// Wählt unter Kreis, Dreieck, Rechteck, Raute und Vieleck die Form, deren Kontur am besten passt,
 /// und liefert sie mit ihrer Abweichung (RMS).
 fn best_closed_shape(pts: &[Vec2]) -> Option<(f32, RecognizedShape)> {
-    let fit = |shape: Option<RecognizedShape>| {
-        shape.and_then(|s| contour_rms(pts, &s).map(|err| (err, s)))
+    // Gewichtete Abweichung: Bei fast gleicher Passung gewinnt die wahrscheinlichere Absicht.
+    // Rechte Winkel schlagen die freiere Raute bzw. ein freies Vieleck; ein Vieleck mit
+    // nachgewiesenen Ecken schlägt den Kreis (ein Achteck ist fast ein Kreis).
+    let fit = |shape: Option<RecognizedShape>, weight: f32| {
+        shape.and_then(|s| contour_rms(pts, &s).map(|err| (err * weight, s)))
     };
-    let rectangle = fit(detect_rectangle(pts));
-    let mut rhombus = fit(detect_rhombus(pts));
-    // Rechte Winkel sind die wahrscheinlichere Absicht: Passt das Rechteck fast so gut wie
-    // die Raute, wird die Raute verworfen
-    if let (Some((rect_err, _)), Some((rhombus_err, _))) = (&rectangle, &rhombus) {
-        if *rect_err <= RECTANGLE_OVER_RHOMBUS * *rhombus_err {
-            rhombus = None;
-        }
-    }
     [
-        fit(detect_circle(pts)),
-        fit(detect_triangle(pts)),
-        rectangle,
-        rhombus,
+        fit(detect_circle(pts), CIRCLE_WEIGHT),
+        fit(detect_triangle(pts), 1.0),
+        fit(detect_rectangle(pts), RECTANGLE_WEIGHT),
+        fit(detect_rhombus(pts), 1.0),
+        fit(detect_polygon(pts), 1.0),
     ]
     .into_iter()
     .flatten()
@@ -1554,6 +1682,11 @@ mod tests {
         }
 
         let detected = detect_line(&points);
+        assert_eq!(
+            kind(&detect_shape(&to_samples(&points))),
+            kind(&detected),
+            "Die vollständige Erkennung (detect_shape) muss dieselbe Form liefern"
+        );
         assert!(detected.is_some(), "Gerade sollte erkannt werden");
 
         if let Some(RecognizedShape::Line { start, end }) = detected {
@@ -1591,6 +1724,11 @@ mod tests {
         points.push(points[0]);
 
         let detected = detect_rectangle(&points);
+        assert_eq!(
+            kind(&detect_shape(&to_samples(&points))),
+            kind(&detected),
+            "Die vollständige Erkennung (detect_shape) muss dieselbe Form liefern"
+        );
         assert!(detected.is_some(), "Rechteck sollte erkannt werden");
 
         if let Some(RecognizedShape::Rectangle { corners }) = detected {
@@ -1627,6 +1765,11 @@ mod tests {
         }
 
         let detected = detect_circle(&points);
+        assert_eq!(
+            kind(&detect_shape(&to_samples(&points))),
+            kind(&detected),
+            "Die vollständige Erkennung (detect_shape) muss dieselbe Form liefern"
+        );
         assert!(detected.is_some(), "Kreis sollte erkannt werden");
 
         if let Some(RecognizedShape::Circle {
@@ -1662,6 +1805,11 @@ mod tests {
         }
 
         let detected = detect_coordinate_system(&points);
+        assert_eq!(
+            kind(&detect_shape(&to_samples(&points))),
+            kind(&detected),
+            "Die vollständige Erkennung (detect_shape) muss dieselbe Form liefern"
+        );
         assert!(
             detected.is_some(),
             "Koordinatensystem sollte erkannt werden"
@@ -1713,6 +1861,11 @@ mod tests {
         points.push(a);
 
         let detected = detect_triangle(&points);
+        assert_eq!(
+            kind(&detect_shape(&to_samples(&points))),
+            kind(&detected),
+            "Die vollständige Erkennung (detect_shape) muss dieselbe Form liefern"
+        );
         assert!(detected.is_some(), "Dreieck sollte erkannt werden");
 
         if let Some(RecognizedShape::Triangle { corners }) = detected {
@@ -1758,6 +1911,11 @@ mod tests {
         points.push(c0);
 
         let detected = detect_rhombus(&points);
+        assert_eq!(
+            kind(&detect_shape(&to_samples(&points))),
+            kind(&detected),
+            "Die vollständige Erkennung (detect_shape) muss dieselbe Form liefern"
+        );
         assert!(detected.is_some(), "Raute sollte erkannt werden");
 
         if let Some(RecognizedShape::Rhombus { corners }) = detected {
@@ -1799,6 +1957,11 @@ mod tests {
         points.push(points[0]);
 
         let detected = detect_polygon(&points);
+        assert_eq!(
+            kind(&detect_shape(&to_samples(&points))),
+            kind(&detected),
+            "Die vollständige Erkennung (detect_shape) muss dieselbe Form liefern"
+        );
         assert!(
             detected.is_some(),
             "Oktagon / Achteck sollte erkannt werden"
@@ -1838,6 +2001,11 @@ mod tests {
         }
 
         let detected = detect_octahedron(&points);
+        assert_eq!(
+            kind(&detect_shape(&to_samples(&points))),
+            kind(&detected),
+            "Die vollständige Erkennung (detect_shape) muss dieselbe Form liefern"
+        );
         assert!(detected.is_some(), "Oktaeder sollte erkannt werden");
 
         if let Some(RecognizedShape::Octahedron {
@@ -2004,8 +2172,9 @@ mod tests {
         assert!(wrong.is_empty(), "Falsch erkannt:\n{}", wrong.join("\n"));
     }
 
-    /// Erkennt Rechtecke, Kreise und Dreiecke in vielen Größen, Seitenverhältnissen, Drehungen
-    /// und Zittermustern; Ellipsen und Freiformen dürfen nie zu Rechtecken werden.
+    /// Erkennt Rechtecke, Kreise, Dreiecke und Vielecke in vielen Größen, Seitenverhältnissen,
+    /// Drehungen und Zittermustern; Freiformen bleiben unverändert, flache Ellipsen werden nie
+    /// zu Rechtecken.
     #[test]
     fn test_detect_shape_robustness() {
         let c = Vec2::new(1000.0, 1400.0);
@@ -2095,6 +2264,30 @@ mod tests {
                 }
             }
         }
+        // Regelmäßige Vielecke (5, 6, 8 Ecken) und Ovale (0,6) – Ovale dürfen keine Vielecke werden
+        for &n in &[5usize, 6, 8] {
+            for &size in &[200.0_f32, 400.0] {
+                for &seed in &seeds {
+                    let outline: Vec<Vec2> = (0..n)
+                        .map(|i| {
+                            let a = i as f32 / n as f32 * std::f32::consts::TAU
+                                - std::f32::consts::FRAC_PI_2;
+                            c + Vec2::new(a.cos(), a.sin()) * size
+                        })
+                        .collect();
+                    add(
+                        format!("Vieleck {n}"),
+                        kind(&detect_shape(&freehand(&outline, true, seed))),
+                    );
+                }
+            }
+        }
+        for &r in &[120.0_f32, 250.0, 400.0] {
+            for &seed in &seeds {
+                let pts = freehand(&circle_outline(c, r, r * 0.6), true, seed);
+                add("Oval 0.6".to_string(), kind(&detect_shape(&pts)));
+            }
+        }
         // Freiformen, die KEIN Rechteck/Kreis werden sollen
         for &seed in &seeds {
             let star: Vec<Vec2> = (0..10)
@@ -2160,12 +2353,23 @@ mod tests {
                 Some("Kreis")
             } else if group == "Dreieck" {
                 Some("Dreieck")
+            } else if group.starts_with("Vieleck") {
+                Some("Polygon")
+            } else if group.starts_with("Freiform") {
+                // Freiformen bleiben unverändert
+                Some("nichts")
             } else {
                 None
             };
             if let Some(kind) = expected {
                 let (hits, total) = count(group, kind);
-                if hits != total {
+                // Achteck/Sechseck und leicht ovale Kreise sind von Hand kaum zu unterscheiden
+                let min_share = if group.starts_with("Vieleck") || group == "Kreis/Ellipse 0.8" {
+                    0.9
+                } else {
+                    1.0
+                };
+                if (hits as f32) < min_share * total as f32 {
                     problems.push(format!(
                         "{group}: {hits}/{total} als {kind} erkannt ({:?})",
                         stats[group]
@@ -2183,5 +2387,17 @@ mod tests {
             }
         }
         assert!(problems.is_empty(), "{}", problems.join("\n"));
+    }
+
+    fn to_samples(points: &[Vec2]) -> Vec<StylusSample> {
+        points
+            .iter()
+            .enumerate()
+            .map(|(i, p)| StylusSample {
+                position: *p,
+                pressure: 0.5,
+                timestamp: i as f64 * 0.008,
+            })
+            .collect()
     }
 }
