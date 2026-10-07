@@ -2068,6 +2068,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
                                     window.request_redraw();
                                 }
+                                UiAction::LoadAllPages => {
+                                    // Für die Vorschaubilder der Seitenauswahl; Fehler werden wie beim
+                                    // Blättern behandelt (Ersatzseite, Warnung beim Öffnen der Seite)
+                                    for idx in 0..notebook.pages.len() {
+                                        if !notebook.pages[idx].is_loaded {
+                                            let _ = storage::ensure_page_loaded(&storage_dir, &mut notebook, idx);
+                                        }
+                                    }
+                                    window.request_redraw();
+                                }
                                 UiAction::GoToPage(idx) => {
                                     if idx < notebook.pages.len() {
                                         selection_state.clear();

@@ -12,7 +12,7 @@
 use std::time::Instant;
 
 use crate::autosave::AutosaveStatus;
-use crate::document::{Notebook, PageBackground};
+use crate::document::{Notebook, Page, PageBackground, StrokeTool, PAGE_HEIGHT, PAGE_WIDTH};
 use crate::settings::SidebarSide;
 use crate::storage::NotebookSummary;
 
@@ -96,6 +96,8 @@ pub enum UiAction {
     NextPage,
     AddPage,
     GoToPage(usize),
+    /// Alle noch nicht geladenen Seiten laden (für die Vorschaubilder der Seitenauswahl)
+    LoadAllPages,
     SetBackground(PageBackground),
     ExportPdf,
     ZoomIn,
@@ -699,8 +701,94 @@ fn color_circle_swatch(
 
 /// Spalten der Seitenauswahl.
 const PAGE_PICKER_COLUMNS: usize = 4;
-/// Größe einer Kachel der Seitenauswahl.
-const PAGE_TILE: egui::Vec2 = egui::vec2(56.0, 48.0);
+/// Größe einer Kachel der Seitenauswahl: A4-Vorschau plus Zeile für die Seitenzahl.
+const PAGE_TILE: egui::Vec2 = egui::vec2(66.0, 66.0 * PAGE_HEIGHT / PAGE_WIDTH + 18.0);
+/// Höchstzahl gezeichneter Punkte pro Vorschau (dünnt volle Seiten aus).
+const THUMBNAIL_POINT_BUDGET: usize = 1500;
+
+/// Zeichenbefehle für die verkleinerte Vorschau einer Seite in `rect` (A4-Format).
+/// Striche werden als Linien gezeichnet und bei vielen Punkten gleichmäßig ausgedünnt.
+pub fn page_thumbnail_shapes(page: &Page, rect: egui::Rect) -> Vec<egui::Shape> {
+    let mut shapes = vec![egui::Shape::rect_filled(
+        rect,
+        egui::Rounding::same(3.0),
+        egui::Color32::WHITE,
+    )];
+    let scale = rect.width() / PAGE_WIDTH;
+    let to_screen = |p: glam::Vec2| rect.min + egui::vec2(p.x * scale, p.y * scale);
+
+    let total: usize = page.strokes.iter().map(|s| s.points.len()).sum();
+    let step = total.div_ceil(THUMBNAIL_POINT_BUDGET).max(1);
+
+    for stroke in &page.strokes {
+        let mut color = color32_from(stroke.color);
+        if stroke.tool == StrokeTool::Highlighter {
+            color = color.gamma_multiply(0.45);
+        }
+        let width = (stroke.width * scale).clamp(0.6, 4.0);
+        let last = stroke.points.len().saturating_sub(1);
+        let points: Vec<egui::Pos2> = stroke
+            .points
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| i % step == 0 || *i == last)
+            .map(|(_, s)| to_screen(s.position))
+            .collect();
+        match points.len() {
+            0 => {}
+            1 => shapes.push(egui::Shape::circle_filled(points[0], width / 2.0, color)),
+            _ => shapes.push(egui::Shape::line(points, egui::Stroke::new(width, color))),
+        }
+    }
+    shapes
+}
+
+/// Kachel der Seitenauswahl: Vorschau der Seite mit Seitenzahl darunter.
+fn page_thumbnail(
+    ui: &mut egui::Ui,
+    page: &Page,
+    number: usize,
+    is_current: bool,
+) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(PAGE_TILE, egui::Sense::click());
+    if ui.is_rect_visible(rect) {
+        let thumb = egui::Rect::from_min_size(
+            rect.min,
+            egui::vec2(PAGE_TILE.x, PAGE_TILE.x * PAGE_HEIGHT / PAGE_WIDTH),
+        );
+        let painter = ui.painter();
+        painter.extend(page_thumbnail_shapes(page, thumb));
+        if !page.is_loaded {
+            painter.text(
+                thumb.center(),
+                egui::Align2::CENTER_CENTER,
+                "…",
+                egui::FontId::proportional(16.0),
+                egui::Color32::from_gray(140),
+            );
+        }
+        let border = if is_current {
+            egui::Stroke::new(2.5_f32, egui::Color32::from_rgb(90, 150, 255))
+        } else if response.hovered() {
+            egui::Stroke::new(1.5_f32, egui::Color32::from_white_alpha(200))
+        } else {
+            egui::Stroke::new(1.0_f32, egui::Color32::from_white_alpha(60))
+        };
+        painter.rect_stroke(thumb, egui::Rounding::same(3.0), border);
+        painter.text(
+            egui::pos2(rect.center().x, rect.max.y - 8.0),
+            egui::Align2::CENTER_CENTER,
+            number.to_string(),
+            egui::FontId::proportional(13.0),
+            if is_current {
+                egui::Color32::WHITE
+            } else {
+                egui::Color32::from_gray(180)
+            },
+        );
+    }
+    response.on_hover_text(format!("Seite {number}"))
+}
 
 /// Rahmen der Popover neben der Werkzeugleiste.
 fn popover_frame() -> egui::Frame {
@@ -1696,24 +1784,19 @@ pub fn render_ui(
                             if dialog_header(ui, &title, true) {
                                 state.show_page_jump_popup = false;
                             }
+                            // Noch nicht geladene Seiten für die Vorschau nachladen lassen
+                            if notebook.pages.iter().any(|p| !p.is_loaded) {
+                                actions.push(UiAction::LoadAllPages);
+                            }
                             egui::ScrollArea::vertical()
-                                .max_height(320.0)
+                                .max_height(420.0)
                                 .show(ui, |ui| {
                                     egui::Grid::new("page_picker_grid")
                                         .spacing([8.0, 8.0])
                                         .show(ui, |ui| {
-                                            for idx in 0..notebook.pages.len() {
+                                            for (idx, page) in notebook.pages.iter().enumerate() {
                                                 let is_current = idx == notebook.current_page_index;
-                                                let label =
-                                                    egui::RichText::new(format!("{}", idx + 1))
-                                                        .size(16.0);
-                                                if ui
-                                                    .add_sized(
-                                                        [56.0, 48.0],
-                                                        egui::SelectableLabel::new(
-                                                            is_current, label,
-                                                        ),
-                                                    )
+                                                if page_thumbnail(ui, page, idx + 1, is_current)
                                                     .clicked()
                                                 {
                                                     actions.push(UiAction::GoToPage(idx));
@@ -3004,5 +3087,91 @@ mod tests {
             y += 14.0;
         }
         assert_eq!(reached, (0..6).collect(), "alle Seiten erreichbar");
+    }
+
+    /// Seite mit `strokes` Strichen à `points` Punkten (diagonal über die Seite).
+    fn page_with_strokes(strokes: usize, points: usize) -> Page {
+        let mut page = Page::new(1, PageBackground::Grid5mm);
+        for i in 0..strokes {
+            let samples: Vec<crate::document::StylusSample> = (0..points)
+                .map(|j| crate::document::StylusSample {
+                    position: glam::Vec2::new(
+                        100.0 + j as f32 * 1800.0 / points as f32,
+                        100.0 + i as f32 * 20.0,
+                    ),
+                    pressure: 0.5,
+                    timestamp: j as f64 * 0.01,
+                })
+                .collect();
+            page.strokes.push(crate::document::Stroke::new(
+                i as u64 + 1,
+                samples,
+                Vec::new(),
+                [0.1, 0.1, 0.1, 1.0],
+            ));
+        }
+        page
+    }
+
+    fn shape_points(shapes: &[egui::Shape]) -> Vec<egui::Pos2> {
+        shapes
+            .iter()
+            .flat_map(|s| match s {
+                egui::Shape::Path(p) => p.points.clone(),
+                egui::Shape::Circle(c) => vec![c.center],
+                _ => Vec::new(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_page_thumbnail_shapes() {
+        let rect = egui::Rect::from_min_size(egui::pos2(50.0, 80.0), egui::vec2(66.0, 93.0));
+
+        // Leere Seite: nur das weiße Blatt
+        let empty = Page::new(1, PageBackground::Blank);
+        assert_eq!(page_thumbnail_shapes(&empty, rect).len(), 1);
+
+        // Striche liegen innerhalb der Kachel
+        let page = page_with_strokes(3, 20);
+        let shapes = page_thumbnail_shapes(&page, rect);
+        assert_eq!(shapes.len(), 1 + 3);
+        let pts = shape_points(&shapes);
+        assert!(!pts.is_empty());
+        assert!(
+            pts.iter().all(|p| rect.contains(*p)),
+            "Punkte außerhalb der Kachel"
+        );
+
+        // Sehr volle Seite wird auf das Punktbudget ausgedünnt (+ Endpunkte je Strich)
+        let full = page_with_strokes(100, 1000);
+        let pts = shape_points(&page_thumbnail_shapes(&full, rect));
+        assert!(
+            pts.len() <= THUMBNAIL_POINT_BUDGET + 2 * 100,
+            "{} Punkte statt höchstens {}",
+            pts.len(),
+            THUMBNAIL_POINT_BUDGET + 200
+        );
+    }
+
+    #[test]
+    fn test_page_picker_requests_loading_of_unloaded_pages() {
+        let updater = crate::updater::UpdaterController::new();
+        for (unloaded, expected) in [(false, false), (true, true)] {
+            let mut notebook = Notebook::new();
+            notebook.add_page(PageBackground::Grid5mm);
+            if unloaded {
+                notebook.pages[1] =
+                    Page::new_unloaded(notebook.pages[1].id, PageBackground::Grid5mm);
+            }
+            let mut state = UiState::new();
+            state.show_page_jump_popup = true;
+            let ctx = render_frames(&mut state, &notebook, 3);
+            ctx.begin_frame(egui::RawInput::default());
+            let actions = render_ui(&ctx, &mut state, &notebook, AutosaveStatus::Saved, &updater);
+            let _ = ctx.end_frame();
+            let requested = actions.iter().any(|a| matches!(a, UiAction::LoadAllPages));
+            assert_eq!(requested, expected, "ungeladene Seite: {unloaded}");
+        }
     }
 }
