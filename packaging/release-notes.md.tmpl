@@ -4,6 +4,7 @@ Latenzoptimierte Vektor-Notizbuch- und Inking-Anwendung für Linux (Zorin OS 18 
 
 ### Highlights:
 - **Stabiler Start**: Kein Absturz mehr, wenn die Grafikkarte nicht nutzbar ist (z. B. fehlende Rechte auf /dev/dri); Software-Renderer als Ausweichlösung und verständliche Fehlermeldung
+- **WSL (WSLg)**: Läuft unter WSL automatisch über X11 statt Wayland, da WSLg die Wayland-Verbindung abbricht; übersteuerbar mit `INK_NOTES_DISPLAY=x11|wayland`
 - **Wichtige Fehlerbehebung**: Nach einem Neustart auf einer späteren Seite konnte Weiterschreiben den bisherigen Inhalt dieser Seite überschreiben (betrifft v0.2.3 – v0.3.2)
 - **Neue Werkzeugleiste**: Schmale senkrechte Leiste mit Symbol-Knöpfen, links oder rechts andockbar; selten genutzte Funktionen im ☰-Menü, das Blatt wird daneben zentriert
 - **Einheitliche Dialoge**: Deckende Fenster ohne doppelte Titel, Seitenauswahl mit Vorschaubildern, größere Bedienelemente in allen Popovern
