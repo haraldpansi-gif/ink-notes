@@ -666,10 +666,16 @@ impl CanvasState {
     pub fn sync_page(&mut self, page: &mut Page) {
         page.rebuild_cache_if_dirty();
         self.set_background(page.background);
+        // PDF-Seite zuerst, darüber die eingefügten Bilder
         self.image_layer.set_quads(
-            page.strokes
+            page.pdf_background
                 .iter()
-                .filter_map(|s| Some((s.image.clone()?, s.image_corners()?)))
+                .map(|pdf| (pdf.key(), pdf.corners()))
+                .chain(
+                    page.strokes
+                        .iter()
+                        .filter_map(|s| Some((s.image.clone()?, s.image_corners()?))),
+                )
                 .collect(),
         );
 
@@ -698,10 +704,18 @@ impl CanvasState {
         );
     }
 
-    /// Lädt Bilder der aktuellen Seite, die noch nicht auf der GPU liegen. Vor jedem
-    /// Zeichnen aufrufen; ohne Änderungen kostet das nichts.
-    pub fn prepare_images(&mut self, assets: &crate::assets::AssetStore) {
-        self.image_layer.prepare(&self.device, &self.queue, assets);
+    /// Lädt Bilder und PDF-Seiten der aktuellen Seite, die noch nicht auf der GPU liegen.
+    /// Vor jedem Zeichnen aufrufen; ohne Änderungen kostet das fast nichts.
+    pub fn prepare_images(
+        &mut self,
+        load: &mut dyn FnMut(&str) -> crate::image_layer::TextureSource,
+    ) {
+        self.image_layer.prepare(&self.device, &self.queue, load);
+    }
+
+    /// Wird noch eine PDF-Seite im Hintergrund gerendert?
+    pub fn is_waiting_for_images(&self) -> bool {
+        self.image_layer.is_waiting()
     }
 
     /// Startet einen neuen Live-Strich in DIN-A4-Seitenkoordinaten.

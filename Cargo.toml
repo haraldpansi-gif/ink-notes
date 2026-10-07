@@ -6,7 +6,7 @@ description = "Latenzoptimierte Vektor-Notizbuch- und Inking-Anwendung für Linu
 repository = "https://gitea.pansi.eu/harald/ink-notes"
 license = "MIT"
 readme = "README.md"
-rust-version = "1.75"
+rust-version = "1.92"
 
 [dependencies]
 # Fenster- & Event-Handling (Wayland/X11, Stylus)
@@ -45,6 +45,7 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 arboard = { version = "3", default-features = false, features = ["image-data"] }
 minisign-verify = "0.3.0"
 fs2 = "0.4"
+hayro = "0.8"
 
 [profile.dev]
 opt-level = 1 # Erhöht Rendering-Performance auch im Debug-Modus

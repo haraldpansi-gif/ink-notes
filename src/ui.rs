@@ -16,7 +16,7 @@ use crate::background::{adapt_ink_color, PaperTheme};
 use crate::document::{
     EraserMode, Notebook, Page, PageBackground, StrokeTool, PAGE_HEIGHT, PAGE_WIDTH,
 };
-use crate::file_picker::FilePicker;
+use crate::file_picker::{FilePicker, PickerKind};
 use crate::settings::{PressureCurve, SidebarSide};
 use crate::storage::NotebookSummary;
 
@@ -154,6 +154,8 @@ pub enum UiAction {
     SavePressureCurve(PressureCurve),
     /// Bilddatei auf der aktuellen Seite einfügen
     InsertImageFile(std::path::PathBuf),
+    /// PDF als neues Notizbuch importieren
+    ImportPdf(std::path::PathBuf),
     // Beenden-Sicherheit bei Fehlschlag
     RetryShutdown,
     ExportRecoveryAndExit,
@@ -215,10 +217,13 @@ pub struct UiState {
     pub pressure_curve: PressureCurve,
     /// Zuletzt gemessener Rohdruck des Stifts (Anzeige in der Druckkurve)
     pub last_raw_pressure: Option<f32>,
-    /// Geöffnete Dateiauswahl „Bild einfügen“
-    pub image_picker: Option<FilePicker>,
+    /// Geöffnete Dateiauswahl („Bild einfügen“ oder „PDF importieren“)
+    pub file_picker: Option<FilePicker>,
+    /// Aktionen, die außerhalb der Oberfläche ausgelöst wurden (z. B. ins Fenster gezogene
+    /// PDF-Datei); `render_ui` gibt sie beim nächsten Bild mit aus
+    pub queued_actions: Vec<UiAction>,
     /// Zuletzt in der Dateiauswahl benutzter Ordner (während der Sitzung)
-    pub last_image_dir: Option<std::path::PathBuf>,
+    pub last_picker_dir: Option<std::path::PathBuf>,
 }
 
 impl Default for UiState {
@@ -259,8 +264,9 @@ impl Default for UiState {
             adapt_ink_colors: true,
             pressure_curve: PressureCurve::default(),
             last_raw_pressure: None,
-            image_picker: None,
-            last_image_dir: None,
+            file_picker: None,
+            queued_actions: Vec::new(),
+            last_picker_dir: None,
         }
     }
 }
@@ -282,14 +288,23 @@ impl UiState {
         self.show_page_jump_popup = false;
         self.is_document_menu_open = false;
         self.is_update_dialog_open = false;
-        self.image_picker = None;
+        self.file_picker = None;
     }
 
     /// Öffnet die Dateiauswahl „Bild einfügen“ im zuletzt benutzten Ordner.
     pub fn open_image_picker(&mut self) {
-        let dir = self.last_image_dir.clone();
+        self.open_file_picker(PickerKind::Image);
+    }
+
+    /// Öffnet die Dateiauswahl „PDF importieren“ im zuletzt benutzten Ordner.
+    pub fn open_pdf_picker(&mut self) {
+        self.open_file_picker(PickerKind::Pdf);
+    }
+
+    fn open_file_picker(&mut self, kind: PickerKind) {
+        let dir = self.last_picker_dir.clone();
         self.close_overlays();
-        self.image_picker = Some(FilePicker::open(dir.as_deref()));
+        self.file_picker = Some(FilePicker::open(kind, dir.as_deref()));
     }
 
     /// Länge der längsten Farbpalette; so viel Platz hält die Leiste immer frei.
@@ -775,6 +790,16 @@ pub fn page_thumbnail_shapes(
     let scale = rect.width() / PAGE_WIDTH;
     let to_screen = |p: glam::Vec2| rect.min + egui::vec2(p.x * scale, p.y * scale);
 
+    // Importierte PDF-Seite als helle Fläche mit Rand
+    if let Some(pdf) = &page.pdf_background {
+        let points: Vec<egui::Pos2> = pdf.corners().iter().map(|&c| to_screen(c)).collect();
+        shapes.push(egui::Shape::convex_polygon(
+            points,
+            egui::Color32::from_rgb(236, 238, 243),
+            egui::Stroke::new(0.8_f32, egui::Color32::from_gray(150)),
+        ));
+    }
+
     // Bilder als Flächen unter der Tinte
     for corners in page.strokes.iter().filter_map(|s| s.image_corners()) {
         shapes.push(egui::Shape::convex_polygon(
@@ -979,20 +1004,39 @@ fn pressure_curve_editor(ui: &mut egui::Ui, state: &mut UiState) -> Option<Press
     save.then_some(state.pressure_curve)
 }
 
-/// Dialog „Bild einfügen“: Schnellzugriffe, Ordnerpfad und Liste aus Ordnern und Bildern.
-fn image_picker_dialog(ctx: &egui::Context, state: &mut UiState, actions: &mut Vec<UiAction>) {
+/// Dialog „Bild einfügen“ bzw. „PDF importieren“: Schnellzugriffe, Ordnerpfad und Liste aus
+/// Ordnern und passenden Dateien.
+fn file_picker_dialog(ctx: &egui::Context, state: &mut UiState, actions: &mut Vec<UiAction>) {
     let mut close = false;
     let mut navigate: Option<std::path::PathBuf> = None;
     let mut go_up = false;
     let mut chosen: Option<std::path::PathBuf> = None;
 
-    let Some(picker) = state.image_picker.as_ref() else {
+    let Some(picker) = state.file_picker.as_ref() else {
         return;
     };
-    dialog_window("Bild einfügen", state, false).show(ctx, |ui| {
+    let picker_kind = picker.kind;
+    let (title, header, file_icon, empty_hint, tip) = match picker.kind {
+        PickerKind::Image => (
+            "Bild einfügen",
+            "🖼 Bild einfügen",
+            "🖼",
+            "Keine Ordner oder Bilder (PNG, JPEG, GIF, WebP, BMP)",
+            "Tipp: Screenshots mit Strg+V einfügen oder Bilddateien ins Fenster ziehen.",
+        ),
+        PickerKind::Pdf => (
+            "PDF importieren",
+            "📄 PDF importieren",
+            "📄",
+            "Keine Ordner oder PDF-Dateien",
+            "Das PDF wird als neues Notizbuch angelegt, eine Seite je PDF-Seite. \
+             Beim Export liegen deine Notizen über den Originalseiten.",
+        ),
+    };
+    dialog_window(title, state, false).show(ctx, |ui| {
         ui.set_width(460.0);
         touch_friendly_spacing(ui);
-        if dialog_header(ui, "🖼 Bild einfügen", true) {
+        if dialog_header(ui, header, true) {
             close = true;
         }
 
@@ -1030,16 +1074,13 @@ fn image_picker_dialog(ctx: &egui::Context, state: &mut UiState, actions: &mut V
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 if picker.entries.is_empty() {
-                    ui.label(
-                        egui::RichText::new("Keine Ordner oder Bilder (PNG, JPEG, GIF, WebP, BMP)")
-                            .color(egui::Color32::from_gray(150)),
-                    );
+                    ui.label(egui::RichText::new(empty_hint).color(egui::Color32::from_gray(150)));
                 }
                 for entry in &picker.entries {
                     let label = if entry.is_dir {
                         format!("📁  {}", entry.name)
                     } else {
-                        format!("🖼  {}", entry.name)
+                        format!("{file_icon}  {}", entry.name)
                     };
                     let button = egui::Button::new(label)
                         .frame(false)
@@ -1057,15 +1098,13 @@ fn image_picker_dialog(ctx: &egui::Context, state: &mut UiState, actions: &mut V
 
         ui.add_space(6.0);
         ui.label(
-            egui::RichText::new(
-                "Tipp: Screenshots mit Strg+V einfügen oder Bilddateien ins Fenster ziehen.",
-            )
-            .size(11.5)
-            .color(egui::Color32::from_gray(150)),
+            egui::RichText::new(tip)
+                .size(11.5)
+                .color(egui::Color32::from_gray(150)),
         );
     });
 
-    if let Some(picker) = state.image_picker.as_mut() {
+    if let Some(picker) = state.file_picker.as_mut() {
         if go_up {
             picker.go_up();
         }
@@ -1074,12 +1113,15 @@ fn image_picker_dialog(ctx: &egui::Context, state: &mut UiState, actions: &mut V
         }
     }
     if let Some(path) = chosen {
-        state.last_image_dir = state.image_picker.as_ref().map(|p| p.dir.clone());
-        actions.push(UiAction::InsertImageFile(path));
+        state.last_picker_dir = state.file_picker.as_ref().map(|p| p.dir.clone());
+        actions.push(match picker_kind {
+            PickerKind::Image => UiAction::InsertImageFile(path),
+            PickerKind::Pdf => UiAction::ImportPdf(path),
+        });
         close = true;
     }
     if close {
-        state.image_picker = None;
+        state.file_picker = None;
     }
 }
 
@@ -1218,7 +1260,7 @@ pub fn render_ui(
     autosave_status: AutosaveStatus,
     updater: &crate::updater::UpdaterController,
 ) -> Vec<UiAction> {
-    let mut actions = Vec::new();
+    let mut actions = std::mem::take(&mut state.queued_actions);
 
     let mut pen_btn_rect = None;
     let mut high_btn_rect = None;
@@ -1975,6 +2017,13 @@ pub fn render_ui(
                             {
                                 state.open_image_picker();
                             }
+                            if ui
+                                .add_sized([ui.available_width(), 30.0], egui::Button::new("📄  PDF importieren …"))
+                                .on_hover_text("Vorlesungsfolien, Übungsblätter oder Formulare als neues Notizbuch öffnen und darauf schreiben")
+                                .clicked()
+                            {
+                                state.open_pdf_picker();
+                            }
 
                             section(ui, "HINTERGRUND DIESER SEITE");
                             let current_bg = notebook.current_page().background;
@@ -2436,8 +2485,8 @@ pub fn render_ui(
     }
 
     // 3c. Dateiauswahl „Bild einfügen“
-    if state.image_picker.is_some() {
-        image_picker_dialog(ctx, state, &mut actions);
+    if state.file_picker.is_some() {
+        file_picker_dialog(ctx, state, &mut actions);
     }
 
     // 3c. Release- & Update-Center (Gitea Releases)

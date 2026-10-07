@@ -1,7 +1,7 @@
-//! Eingebaute, stift- und fingertaugliche Dateiauswahl für Bilder.
+//! Eingebaute, stift- und fingertaugliche Dateiauswahl für Bilder und PDFs.
 //!
 //! Bewusst ohne Systemdialog: der bräuchte GTK oder das Desktop-Portal, die unter WSL und auf
-//! schlanken Systemen oft fehlen. Die Auswahl zeigt Ordner und unterstützte Bilder des
+//! schlanken Systemen oft fehlen. Die Auswahl zeigt Ordner und die passenden Dateien des
 //! aktuellen Ordners; versteckte Dateien bleiben ausgeblendet.
 
 use std::path::{Path, PathBuf};
@@ -16,9 +16,36 @@ pub struct PickerEntry {
     pub is_dir: bool,
 }
 
+/// Welche Dateien die Auswahl anbietet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PickerKind {
+    /// Bilder zum Einfügen auf der aktuellen Seite
+    Image,
+    /// PDF zum Importieren als neues Notizbuch
+    Pdf,
+}
+
+impl PickerKind {
+    /// Passt die Datei zu dieser Auswahl?
+    pub fn accepts(self, path: &Path) -> bool {
+        match self {
+            PickerKind::Image => is_supported_image_path(path),
+            PickerKind::Pdf => is_pdf_path(path),
+        }
+    }
+}
+
+/// Ist die Datei dem Namen nach ein PDF?
+pub fn is_pdf_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("pdf"))
+}
+
 /// Zustand der Dateiauswahl.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FilePicker {
+    pub kind: PickerKind,
     pub dir: PathBuf,
     pub entries: Vec<PickerEntry>,
     /// Ordner nicht lesbar
@@ -26,14 +53,26 @@ pub struct FilePicker {
 }
 
 impl FilePicker {
-    /// Öffnet die Auswahl in `dir`, sonst im Bilder-Ordner, sonst im Home-Ordner.
-    pub fn open(dir: Option<&Path>) -> Self {
+    /// Öffnet die Auswahl in `dir`, sonst im Bilder-Ordner (Bilder) bzw. Downloads (PDF),
+    /// sonst im Home-Ordner.
+    pub fn open(kind: PickerKind, dir: Option<&Path>) -> Self {
         let start = dir
             .filter(|d| d.is_dir())
             .map(Path::to_path_buf)
-            .or_else(|| shortcuts().into_iter().map(|(_, p)| p).find(|p| p.is_dir()))
+            .or_else(|| {
+                let preferred = match kind {
+                    PickerKind::Image => "🖼 Bilder",
+                    PickerKind::Pdf => "⬇ Downloads",
+                };
+                let all = shortcuts();
+                all.iter()
+                    .find(|(label, _)| *label == preferred)
+                    .or_else(|| all.last())
+                    .map(|(_, p)| p.clone())
+            })
             .unwrap_or_else(|| PathBuf::from("/"));
         let mut picker = Self {
+            kind,
             dir: start.clone(),
             entries: Vec::new(),
             error: None,
@@ -44,7 +83,7 @@ impl FilePicker {
 
     /// Wechselt in `dir` und liest den Inhalt neu ein.
     pub fn navigate(&mut self, dir: &Path) {
-        match list_dir(dir) {
+        match list_dir(dir, self.kind) {
             Ok(entries) => {
                 self.dir = dir.to_path_buf();
                 self.entries = entries;
@@ -67,9 +106,9 @@ impl FilePicker {
     }
 }
 
-/// Ordner und unterstützte Bilder in `dir`: erst Ordner, dann Dateien, jeweils alphabetisch
+/// Ordner und passende Dateien in `dir`: erst Ordner, dann Dateien, jeweils alphabetisch
 /// ohne Groß-/Kleinschreibung; versteckte Einträge (Punkt am Anfang) fehlen.
-pub fn list_dir(dir: &Path) -> std::io::Result<Vec<PickerEntry>> {
+pub fn list_dir(dir: &Path, kind: PickerKind) -> std::io::Result<Vec<PickerEntry>> {
     let mut entries: Vec<PickerEntry> = std::fs::read_dir(dir)?
         .filter_map(Result::ok)
         .filter_map(|entry| {
@@ -80,7 +119,7 @@ pub fn list_dir(dir: &Path) -> std::io::Result<Vec<PickerEntry>> {
             let path = entry.path();
             // Symlinks auflösen: ein Link auf einen Ordner ist ein Ordner
             let is_dir = path.is_dir();
-            (is_dir || is_supported_image_path(&path)).then_some(PickerEntry { name, path, is_dir })
+            (is_dir || kind.accepts(&path)).then_some(PickerEntry { name, path, is_dir })
         })
         .collect();
     entries.sort_by(|a, b| {
@@ -143,19 +182,32 @@ mod tests {
     #[test]
     fn test_list_dir_sorts_and_filters() {
         let dir = tempfile::tempdir().unwrap();
-        for name in ["b.png", "A.jpg", "notiz.txt", ".versteckt.png", "c.webp"] {
+        for name in [
+            "b.png",
+            "A.jpg",
+            "notiz.txt",
+            ".versteckt.png",
+            "c.webp",
+            "Skript.PDF",
+        ] {
             std::fs::write(dir.path().join(name), b"x").unwrap();
         }
         std::fs::create_dir(dir.path().join("zOrdner")).unwrap();
         std::fs::create_dir(dir.path().join("aOrdner")).unwrap();
         std::fs::create_dir(dir.path().join(".cache")).unwrap();
 
-        let names: Vec<String> = list_dir(dir.path())
-            .unwrap()
-            .into_iter()
-            .map(|e| e.name)
-            .collect();
-        assert_eq!(names, ["aOrdner", "zOrdner", "A.jpg", "b.png", "c.webp"]);
+        let names = |kind| -> Vec<String> {
+            list_dir(dir.path(), kind)
+                .unwrap()
+                .into_iter()
+                .map(|e| e.name)
+                .collect()
+        };
+        assert_eq!(
+            names(PickerKind::Image),
+            ["aOrdner", "zOrdner", "A.jpg", "b.png", "c.webp"]
+        );
+        assert_eq!(names(PickerKind::Pdf), ["aOrdner", "zOrdner", "Skript.PDF"]);
     }
 
     #[test]
@@ -165,7 +217,7 @@ mod tests {
         std::fs::create_dir(&sub).unwrap();
         std::fs::write(sub.join("tafel.jpg"), b"x").unwrap();
 
-        let mut picker = FilePicker::open(Some(&sub));
+        let mut picker = FilePicker::open(PickerKind::Image, Some(&sub));
         assert_eq!(picker.dir, sub);
         assert_eq!(picker.entries.len(), 1);
 

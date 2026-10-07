@@ -22,6 +22,8 @@ use ink_notes::canvas::CanvasState;
 use ink_notes::document::{Notebook, PageBackground};
 use ink_notes::export::{self, export_notebook_to_pdf, ExportStrategy};
 use ink_notes::geometry::{self, RecognizedShape};
+use ink_notes::image_layer::TextureSource;
+use ink_notes::pdf_doc::PdfRenderService;
 use ink_notes::platform::{self, DisplayBackend};
 use ink_notes::selection::{
     render_selection_overlay, DragMode, SelectionHandleHit, SelectionState,
@@ -234,6 +236,33 @@ fn insert_image_on_page(
         "Bild eingefügt ({} × {} px)",
         imported.width, imported.height
     ));
+}
+
+/// Textur für einen Schlüssel der Bildebene: `<pdf>#<seite>` rendert der Hintergrund-Thread,
+/// alles andere ist eine Bilddatei im Asset-Ordner.
+fn texture_for(
+    key: &str,
+    assets: &AssetStore,
+    pdf_renderer: &mut PdfRenderService,
+) -> TextureSource {
+    let result = match key.split_once('#') {
+        Some((asset, page)) => {
+            let (Ok(path), Ok(page)) = (assets.path_of(asset), page.parse::<usize>()) else {
+                return TextureSource::Failed(format!("Ungültiger PDF-Verweis '{key}'"));
+            };
+            match pdf_renderer.take(key, path, page) {
+                Some(result) => result,
+                None => return TextureSource::Pending,
+            }
+        }
+        None => assets
+            .load_rgba(key, ink_notes::assets::MAX_DISPLAY_DIMENSION)
+            .map_err(|e| e.to_string()),
+    };
+    match result {
+        Ok(image) => TextureSource::Ready(image),
+        Err(err) => TextureSource::Failed(err),
+    }
 }
 
 /// Seitenmitte des sichtbaren Bereichs (Ziel für eingefügte Bilder).
@@ -499,6 +528,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let mut selection_state = SelectionState::new();
     let mut clipboard = ClipboardBridge::new();
+    // PDF-Seiten werden im Hintergrund gerendert und wecken danach den Event-Loop
+    let mut pdf_renderer = {
+        let window = window.clone();
+        PdfRenderService::new(move || window.request_redraw())
+    };
 
     let mut _notebook_lock = match storage::NotebookLock::acquire(&storage_dir) {
         Ok(lock) => {
@@ -972,7 +1006,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                     // Bilddatei ins Fenster gezogen: an der Ablagestelle einfügen
                     WindowEvent::DroppedFile(path) => {
-                        if ink_notes::assets::is_supported_image_path(&path) {
+                        if ink_notes::file_picker::is_pdf_path(&path) {
+                            ui_state.queued_actions.push(UiAction::ImportPdf(path));
+                        } else if ink_notes::assets::is_supported_image_path(&path) {
                             let (sx, sy) = cursor_screen_pos;
                             let center = canvas.screen_to_page_clamped(sx, sy);
                             insert_image_file(
@@ -981,7 +1017,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             );
                             update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
                         } else {
-                            ui_state.set_export_message("Nur Bilder (PNG, JPEG, GIF, WebP, BMP) können eingefügt werden".to_string());
+                            ui_state.set_export_message("Nur Bilder (PNG, JPEG, GIF, WebP, BMP) und PDFs können eingefügt werden".to_string());
                         }
                         window.request_redraw();
                     }
@@ -2426,6 +2462,43 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         }
                                     }
                                 }
+                                UiAction::ImportPdf(path) => {
+                                    let title = path
+                                        .file_stem()
+                                        .map(|s| s.to_string_lossy().into_owned())
+                                        .unwrap_or_else(|| "PDF".to_string());
+                                    let result = std::fs::read(&path)
+                                        .map_err(|e| e.to_string())
+                                        .and_then(|bytes| storage::create_notebook_from_pdf(&storage_base_dir, &title, bytes));
+                                    match result {
+                                        Ok((new_nb, new_manifest, new_dir)) => {
+                                            let _ = autosave.flush();
+                                            _notebook_lock = storage::NotebookLock::acquire(&new_dir).ok();
+                                            autosave.set_read_only(_notebook_lock.is_none());
+                                            autosave.switch_notebook_dir(new_dir.clone());
+                                            notebook = new_nb;
+                                            manifest = new_manifest;
+                                            storage_dir = new_dir;
+                                            selection_state.clear();
+                                            ui_state.current_notebook_id = manifest.id.clone();
+                                            ui_state.document_title = manifest.title.clone();
+                                            ui_state.available_notebooks = storage::list_notebooks(&storage_base_dir);
+                                            canvas.reset_view();
+                                            canvas.sync_page(notebook.current_page_mut());
+                                            update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
+                                            ui_state.set_export_message(format!(
+                                                "'{}' importiert ({} Seiten)",
+                                                manifest.title,
+                                                notebook.pages.len()
+                                            ));
+                                        }
+                                        Err(err) => {
+                                            eprintln!("[PDF-Import] '{}': {err}", path.display());
+                                            ui_state.set_export_message(format!("PDF nicht importiert: {err}"));
+                                        }
+                                    }
+                                    window.request_redraw();
+                                }
                                 UiAction::CreateNotebook(title) => {
                                     let _ = autosave.flush();
                                     match storage::create_new_notebook(&storage_base_dir, &title) {
@@ -2708,7 +2781,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
 
                         // 5. Canvas (Pass 1) und egui UI (Pass 2) in Surface-Textur rendern
-                        canvas.prepare_images(&AssetStore::new(&storage_dir));
+                        let assets = AssetStore::new(&storage_dir);
+                        canvas.prepare_images(&mut |key| texture_for(key, &assets, &mut pdf_renderer));
+                        // Nächste PDF-Seite vorab rendern, damit Blättern sofort klappt
+                        if !canvas.is_waiting_for_images() {
+                            let next = notebook.pages.get(notebook.current_page_index + 1);
+                            if let Some(pdf) = next.and_then(|p| p.pdf_background.as_ref()) {
+                                if let Ok(path) = assets.path_of(&pdf.asset) {
+                                    pdf_renderer.prefetch(&pdf.key(), path, pdf.page as usize);
+                                }
+                            }
+                        }
                         match canvas.render(&clipped_primitives, &screen_descriptor, &full_output.textures_delta) {
                             Ok(_) => {}
                             Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {

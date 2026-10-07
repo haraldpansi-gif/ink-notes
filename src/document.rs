@@ -122,6 +122,47 @@ pub fn point_in_convex_quad(p: glam::Vec2, quad: &[glam::Vec2; 4]) -> bool {
     true
 }
 
+/// Verweis auf eine Seite eines importierten PDFs (Datei im Asset-Ordner).
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct PdfBackground {
+    /// Name der PDF-Datei im Asset-Ordner
+    pub asset: String,
+    /// Seitennummer im PDF, ab 0
+    pub page: u32,
+    /// Angezeigte Größe der PDF-Seite in Punkt (Drehung berücksichtigt)
+    pub width_pt: f32,
+    pub height_pt: f32,
+}
+
+impl PdfBackground {
+    /// Schlüssel für Texturen und Render-Aufträge.
+    pub fn key(&self) -> String {
+        format!("{}#{}", self.asset, self.page)
+    }
+
+    /// Ecken (oben links, oben rechts, unten rechts, unten links) der PDF-Seite auf dem
+    /// A4-Blatt, siehe [`pdf_placement`].
+    pub fn corners(&self) -> [glam::Vec2; 4] {
+        pdf_placement(self.width_pt, self.height_pt)
+    }
+}
+
+/// Lage einer PDF-Seite von `width_pt` × `height_pt` auf dem A4-Blatt: so groß wie möglich,
+/// waagerecht zentriert und oben bündig. Querformat-Folien liegen so oben auf der Seite,
+/// darunter bleibt Platz für Notizen.
+pub fn pdf_placement(width_pt: f32, height_pt: f32) -> [glam::Vec2; 4] {
+    let (w, h) = (width_pt.max(1.0), height_pt.max(1.0));
+    let scale = (PAGE_WIDTH / w).min(PAGE_HEIGHT / h);
+    let size = glam::Vec2::new(w * scale, h * scale);
+    let tl = glam::Vec2::new((PAGE_WIDTH - size.x) / 2.0, 0.0);
+    [
+        tl,
+        tl + glam::Vec2::new(size.x, 0.0),
+        tl + size,
+        tl + glam::Vec2::new(0.0, size.y),
+    ]
+}
+
 /// Seiteneinheiten pro Bildpixel beim Einfügen (96 dpi wie am Bildschirm: 1 px ≈ 0,26 mm).
 pub const IMAGE_UNITS_PER_PIXEL: f32 = UNITS_PER_MM * 25.4 / 96.0;
 
@@ -489,6 +530,8 @@ pub struct Page {
     pub id: u64,
     pub strokes: Vec<Stroke>,
     pub background: PageBackground,
+    /// Importierte PDF-Seite als Hintergrund (unter Bildern und Tinte)
+    pub pdf_background: Option<PdfBackground>,
     pub vertex_cache: Vec<InkVertex>,
     pub stroke_ranges: Vec<Range<u32>>,
     pub is_dirty: bool,
@@ -503,6 +546,7 @@ impl Page {
             id,
             strokes: Vec::new(),
             background,
+            pdf_background: None,
             vertex_cache: Vec::new(),
             stroke_ranges: Vec::new(),
             is_dirty: false,
@@ -518,6 +562,7 @@ impl Page {
             id,
             strokes: Vec::new(),
             background,
+            pdf_background: None,
             vertex_cache: Vec::new(),
             stroke_ranges: Vec::new(),
             is_dirty: false,

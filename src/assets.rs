@@ -78,7 +78,7 @@ pub struct RgbaImage {
     pub pixels: Vec<u8>,
 }
 
-/// Prüft einen Asset-Namen: genau 64 Hex-Zeichen und `.png` oder `.jpg`. Verhindert, dass
+/// Prüft einen Asset-Namen: genau 64 Hex-Zeichen und `.png`, `.jpg` oder `.pdf`. Verhindert, dass
 /// eine manipulierte Seitendatei auf Dateien außerhalb des Asset-Ordners verweist.
 pub fn is_valid_asset_name(name: &str) -> bool {
     let Some((hash, ext)) = name.split_once('.') else {
@@ -88,7 +88,7 @@ pub fn is_valid_asset_name(name: &str) -> bool {
         && hash
             .bytes()
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-        && matches!(ext, "png" | "jpg")
+        && matches!(ext, "png" | "jpg" | "pdf")
 }
 
 /// Bilddateien eines Notizbuchs.
@@ -144,6 +144,17 @@ impl AssetStore {
         };
         let png = encode_png(&decoded)?;
         self.store(&png, "png", decoded.width(), decoded.height())
+    }
+
+    /// Übernimmt eine PDF-Datei unverändert (der Inhalt muss vorher geprüft sein).
+    pub fn import_pdf(&self, bytes: &[u8]) -> Result<String, AssetError> {
+        let hash = Sha256::digest(bytes);
+        let asset = format!("{}.pdf", hex(&hash));
+        let path = self.path_of(&asset)?;
+        if !path.exists() {
+            storage::atomic_write_file(&path, bytes)?;
+        }
+        Ok(asset)
     }
 
     /// Übernimmt rohe RGBA-Pixel (z. B. aus der Zwischenablage) als PNG.

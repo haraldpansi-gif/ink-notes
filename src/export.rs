@@ -117,10 +117,11 @@ pub fn export_notebook_to_pdf<P: AsRef<Path>>(
     strategy: ExportStrategy,
     assets: Option<&AssetStore>,
 ) -> Result<(), Box<dyn Error>> {
+    let bytes = export_notebook_to_bytes(notebook, strategy, assets)?;
     let file = File::create(path)?;
     let mut writer = BufWriter::new(file);
-    let doc = generate_pdf_document(notebook, strategy, assets)?;
-    doc.save(&mut writer)?;
+    std::io::Write::write_all(&mut writer, &bytes)?;
+    std::io::Write::flush(&mut writer)?;
     Ok(())
 }
 
@@ -132,14 +133,88 @@ pub fn export_notebook_to_bytes(
 ) -> Result<Vec<u8>, Box<dyn Error>> {
     let doc = generate_pdf_document(notebook, strategy, assets)?;
     let bytes = doc.save_to_bytes()?;
-    Ok(bytes)
+
+    // Importierte PDF-Seiten als Vektorgrafik unterlegen
+    let underlays = pdf_underlays(notebook);
+    if underlays.is_empty() {
+        return Ok(bytes);
+    }
+    let sources: std::collections::HashMap<String, Vec<u8>> = underlays
+        .iter()
+        .filter_map(|u| Some((u.source.clone(), assets?.read_bytes(&u.source).ok()?)))
+        .collect();
+    let (merged, failed) = crate::pdf_merge::apply_underlays(&bytes, &underlays, &sources)?;
+    if failed.is_empty() {
+        return Ok(merged);
+    }
+
+    // Nicht übernehmbare Seiten (z. B. verschlüsselte PDFs) als Bild einbetten
+    let mut raster = std::collections::HashSet::new();
+    for (underlay, err) in &failed {
+        eprintln!(
+            "[PDF-Export] Seite {} des PDFs als Bild statt als Vektor: {err}",
+            underlay.source_page + 1
+        );
+        raster.insert(underlay.target_page);
+    }
+    let doc = generate_pdf_document_with(notebook, strategy, assets, &raster)?;
+    let bytes = doc.save_to_bytes()?;
+    let remaining: Vec<_> = underlays
+        .into_iter()
+        .filter(|u| !raster.contains(&u.target_page))
+        .collect();
+    if remaining.is_empty() {
+        return Ok(bytes);
+    }
+    let (merged, _) = crate::pdf_merge::apply_underlays(&bytes, &remaining, &sources)?;
+    Ok(merged)
+}
+
+/// Unterlagen für alle Seiten mit importierter PDF-Seite.
+fn pdf_underlays(notebook: &Notebook) -> Vec<crate::pdf_merge::Underlay> {
+    notebook
+        .pages
+        .iter()
+        .enumerate()
+        .filter_map(|(i, page)| {
+            let pdf = page.pdf_background.as_ref()?;
+            let corners = pdf.corners();
+            let top_right = page_to_pdf_pt(corners[1]);
+            let bottom_left = page_to_pdf_pt(corners[3]);
+            let size = top_right - bottom_left;
+            Some(crate::pdf_merge::Underlay {
+                target_page: i,
+                source: pdf.asset.clone(),
+                source_page: pdf.page as usize,
+                rect: [bottom_left.x, bottom_left.y, size.x, size.y],
+            })
+        })
+        .collect()
 }
 
 /// Generiert das `printpdf::PdfDocumentReference` für alle Seiten des Notizbuchs.
+/// Importierte PDF-Seiten sind darin noch nicht enthalten; die legt
+/// [`export_notebook_to_bytes`] anschließend als Vektorgrafik darunter.
 pub fn generate_pdf_document(
     notebook: &Notebook,
     strategy: ExportStrategy,
     assets: Option<&AssetStore>,
+) -> Result<PdfDocumentReference, Box<dyn Error>> {
+    generate_pdf_document_with(
+        notebook,
+        strategy,
+        assets,
+        &std::collections::HashSet::new(),
+    )
+}
+
+/// Wie [`generate_pdf_document`]; die PDF-Seiten der Seiten in `raster_pdf_pages` werden
+/// gerendert und als Bild eingebettet.
+fn generate_pdf_document_with(
+    notebook: &Notebook,
+    strategy: ExportStrategy,
+    assets: Option<&AssetStore>,
+    raster_pdf_pages: &std::collections::HashSet<usize>,
 ) -> Result<PdfDocumentReference, Box<dyn Error>> {
     if notebook.pages.is_empty() {
         return Err("Notizbuch enthält keine Seiten".into());
@@ -164,6 +239,9 @@ pub fn generate_pdf_document(
     let page1_ref = doc.get_page(page1_idx);
     let layer1_bg_ref = page1_ref.get_layer(layer1_bg);
     render_background_layer(&layer1_bg_ref, notebook.pages[0].background);
+    if raster_pdf_pages.contains(&0) {
+        render_pdf_raster(&page1_ref.add_layer("PDF"), &notebook.pages[0], assets);
+    }
     if notebook.pages[0].strokes.iter().any(Stroke::is_image) {
         render_image_layer(&page1_ref.add_layer("Images"), &notebook.pages[0], assets);
     }
@@ -172,11 +250,14 @@ pub fn generate_pdf_document(
     render_ink_layer(&layer1_ink_ref, &notebook.pages[0], strategy);
 
     // 2. Alle nachfolgenden Seiten hinzufügen
-    for page in &notebook.pages[1..] {
+    for (i, page) in notebook.pages.iter().enumerate().skip(1) {
         let (page_idx, layer_bg) = doc.add_page(Mm(A4_WIDTH_MM), Mm(A4_HEIGHT_MM), "Background");
         let page_ref = doc.get_page(page_idx);
         let layer_bg_ref = page_ref.get_layer(layer_bg);
         render_background_layer(&layer_bg_ref, page.background);
+        if raster_pdf_pages.contains(&i) {
+            render_pdf_raster(&page_ref.add_layer("PDF"), page, assets);
+        }
         if page.strokes.iter().any(Stroke::is_image) {
             render_image_layer(&page_ref.add_layer("Images"), page, assets);
         }
@@ -390,17 +471,7 @@ fn pdf_image_xobject(
             rgb.push(((*c as u32 * alpha + 255 * (255 - alpha)) / 255) as u8);
         }
     }
-    Ok(ImageXObject {
-        width: Px(rgba.width() as usize),
-        height: Px(rgba.height() as usize),
-        color_space: ColorSpace::Rgb,
-        bits_per_component: ColorBits::Bit8,
-        interpolate: true,
-        image_data: rgb,
-        image_filter: None,
-        smask: None,
-        clipping_bbox: None,
-    })
+    Ok(rgb_xobject(rgba.width(), rgba.height(), rgb))
 }
 
 /// Rendert die eingefügten Bilder einer Seite. Fehlt eine Bilddatei, erscheint an ihrer
@@ -420,35 +491,93 @@ fn render_image_layer(
                 if let Some(Err(err)) = other {
                     eprintln!("[PDF-Export] Bild '{asset}' fehlt oder ist beschädigt: {err}");
                 }
-                printpdf::ImageXObject {
-                    width: printpdf::Px(1),
-                    height: printpdf::Px(1),
-                    color_space: printpdf::ColorSpace::Rgb,
-                    bits_per_component: printpdf::ColorBits::Bit8,
-                    interpolate: false,
-                    image_data: vec![200, 200, 200],
-                    image_filter: None,
-                    smask: None,
-                    clipping_bbox: None,
-                }
+                placeholder_xobject()
             }
         };
-        let (width, height) = (xobject.width.0 as f32, xobject.height.0 as f32);
-        layer.save_graphics_state();
-        layer.set_ctm(printpdf::CurTransMat::Raw(image_matrix(&corners)));
-        // Bei 72 dpi ist ein Pixel ein Punkt; die Skalierung bildet das Bild auf das
-        // Einheitsquadrat ab, die Matrix oben auf die Bildecken
-        printpdf::Image::from(xobject).add_to_layer(
-            layer.clone(),
-            printpdf::ImageTransform {
-                dpi: Some(72.0),
-                scale_x: Some(1.0 / width),
-                scale_y: Some(1.0 / height),
-                ..Default::default()
-            },
-        );
-        layer.restore_graphics_state();
+        draw_image_xobject(layer, xobject, &corners);
     }
+}
+
+/// Graue 1×1-Fläche für fehlende Bilder.
+fn placeholder_xobject() -> printpdf::ImageXObject {
+    rgb_xobject(1, 1, vec![200, 200, 200])
+}
+
+fn rgb_xobject(width: u32, height: u32, rgb: Vec<u8>) -> printpdf::ImageXObject {
+    printpdf::ImageXObject {
+        width: printpdf::Px(width as usize),
+        height: printpdf::Px(height as usize),
+        color_space: printpdf::ColorSpace::Rgb,
+        bits_per_component: printpdf::ColorBits::Bit8,
+        interpolate: true,
+        image_data: rgb,
+        image_filter: None,
+        smask: None,
+        clipping_bbox: None,
+    }
+}
+
+/// Zeichnet ein Bild so, dass es die Ecken oben links, oben rechts, unten rechts,
+/// unten links ausfüllt.
+fn draw_image_xobject(
+    layer: &printpdf::PdfLayerReference,
+    xobject: printpdf::ImageXObject,
+    corners: &[glam::Vec2; 4],
+) {
+    let (width, height) = (xobject.width.0 as f32, xobject.height.0 as f32);
+    layer.save_graphics_state();
+    layer.set_ctm(printpdf::CurTransMat::Raw(image_matrix(corners)));
+    // Bei 72 dpi ist ein Pixel ein Punkt; die Skalierung bildet das Bild auf das
+    // Einheitsquadrat ab, die Matrix oben auf die Bildecken
+    printpdf::Image::from(xobject).add_to_layer(
+        layer.clone(),
+        printpdf::ImageTransform {
+            dpi: Some(72.0),
+            scale_x: Some(1.0 / width),
+            scale_y: Some(1.0 / height),
+            ..Default::default()
+        },
+    );
+    layer.restore_graphics_state();
+}
+
+/// Auflösung, mit der PDF-Seiten gerendert werden, die nicht als Vektor übernommen
+/// werden können.
+const PDF_RASTER_DPI: f32 = 200.0;
+
+/// Bettet die importierte PDF-Seite als gerendertes Bild ein (Ausweichlösung).
+fn render_pdf_raster(
+    layer: &printpdf::PdfLayerReference,
+    page: &Page,
+    assets: Option<&AssetStore>,
+) {
+    let Some(pdf) = &page.pdf_background else {
+        return;
+    };
+    let longest_pt = pdf.width_pt.max(pdf.height_pt);
+    let max_pixels = (longest_pt / 72.0 * PDF_RASTER_DPI).ceil() as u32;
+    let rendered = assets
+        .ok_or_else(|| "kein Asset-Ordner".to_string())
+        .and_then(|a| a.path_of(&pdf.asset).map_err(|e| e.to_string()))
+        .and_then(|path| crate::pdf_doc::render_file_page(&path, pdf.page as usize, max_pixels));
+    let xobject = match rendered {
+        Ok(image) => {
+            let rgb = image
+                .pixels
+                .chunks_exact(4)
+                .flat_map(|px| [px[0], px[1], px[2]])
+                .collect();
+            rgb_xobject(image.width, image.height, rgb)
+        }
+        Err(err) => {
+            eprintln!(
+                "[PDF-Export] PDF-Seite {} nicht darstellbar: {err}",
+                pdf.page + 1
+            );
+            placeholder_xobject()
+        }
+    };
+    draw_image_xobject(layer, xobject, &pdf.corners());
 }
 
 /// Rendert eine mathematisch bereinigte Form (Gerade, Kreis, Rechteck, Koordinatensystem)
@@ -1206,6 +1335,64 @@ mod tests {
         assert_eq!(image_objects, 3);
 
         // Ohne Asset-Ordner: Export klappt trotzdem (graue Flächen)
+        assert!(export_notebook_to_bytes(&notebook, ExportStrategy::FilledPolygon, None).is_ok());
+    }
+
+    #[test]
+    fn test_pdf_export_underlays_imported_pages() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let source = crate::pdf_doc::tests::sample_pdf(&[(842.0, 595.0, 0), (595.0, 842.0, 90)]);
+        let (mut notebook, _, dir) =
+            crate::storage::create_notebook_from_pdf(temp_dir.path(), "Folien", source).unwrap();
+        crate::storage::load_all_pages(&dir, &mut notebook).unwrap();
+        let assets = AssetStore::new(&dir);
+
+        let bytes =
+            export_notebook_to_bytes(&notebook, ExportStrategy::FilledPolygon, Some(&assets))
+                .unwrap();
+        let doc = printpdf::lopdf::Document::load_mem(&bytes).unwrap();
+        assert_eq!(doc.get_pages().len(), 2);
+        for page_id in doc.get_pages().into_values() {
+            let content = doc.get_page_content(page_id).unwrap();
+            assert!(
+                String::from_utf8_lossy(&content).starts_with("q "),
+                "Originalseite fehlt als Unterlage"
+            );
+        }
+
+        // Exportiertes PDF lässt sich wieder rendern: Folie oben, rotes Quadrat oben links
+        let pdf = hayro::hayro_syntax::Pdf::new(bytes).unwrap();
+        let image = crate::pdf_doc::render_page(&pdf, 0, 600).unwrap();
+        let px = |x: u32, y: u32| {
+            let i = ((y * image.width + x) * 4) as usize;
+            image.pixels[i..i + 3].to_vec()
+        };
+        assert_eq!(px(5, 5), vec![255, 0, 0], "Quadrat der Folie oben links");
+        assert_eq!(
+            px(200, 500),
+            vec![255, 255, 255],
+            "unter der Folie ist Platz"
+        );
+
+        // Gedrehte Seite (/Rotate 90) erscheint wie im PDF-Betrachter: das Quadrat liegt
+        // dort oben rechts, in der Quelle wie im Export
+        let source_pdf = hayro::hayro_syntax::Pdf::new(
+            assets
+                .read_bytes(&notebook.pages[1].pdf_background.as_ref().unwrap().asset)
+                .unwrap(),
+        )
+        .unwrap();
+        let shown = crate::pdf_doc::render_page(&source_pdf, 1, 600).unwrap();
+        let red_at = |img: &crate::assets::RgbaImage, x: u32, y: u32| {
+            let i = ((y * img.width + x) * 4) as usize;
+            img.pixels[i..i + 3] == [255, 0, 0]
+        };
+        assert!(red_at(&shown, shown.width - 5, 5));
+        let exported = crate::pdf_doc::render_page(&pdf, 1, 600).unwrap();
+        assert!(red_at(&exported, exported.width - 5, 5));
+        assert!(!red_at(&exported, 5, 5));
+
+        // Ohne Zugriff auf das PDF: Export klappt trotzdem (graue Ersatzfläche)
         assert!(export_notebook_to_bytes(&notebook, ExportStrategy::FilledPolygon, None).is_ok());
     }
 

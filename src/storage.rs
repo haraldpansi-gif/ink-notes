@@ -151,7 +151,8 @@ impl StrokeData {
 /// - Version 4: eingefügte Bilder (`image` am Strich, Ordner `assets/`). Ältere Versionen würden
 ///   das unbekannte Feld ignorieren, Bilder als Rechteckstrich anzeigen und beim Speichern
 ///   verlieren.
-pub const CURRENT_FORMAT_VERSION: u32 = 4;
+/// - Version 5: importierte PDF-Seiten als Seitenhintergrund (`pdf_background`).
+pub const CURRENT_FORMAT_VERSION: u32 = 5;
 
 /// Standardwert für ältere Dateien ohne explizite Formatversion (Legacy v0).
 pub fn legacy_format_version() -> u32 {
@@ -165,6 +166,9 @@ pub struct PageData {
     pub format_version: u32,
     pub id: u64,
     pub background: PageBackground,
+    /// Importierte PDF-Seite als Hintergrund
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pdf_background: Option<crate::document::PdfBackground>,
     pub strokes: Vec<StrokeData>,
 }
 
@@ -174,6 +178,7 @@ impl From<&Page> for PageData {
             format_version: CURRENT_FORMAT_VERSION,
             id: page.id,
             background: page.background,
+            pdf_background: page.pdf_background.clone(),
             strokes: page.strokes.iter().map(StrokeData::from).collect(),
         }
     }
@@ -183,6 +188,7 @@ impl PageData {
     /// Wandelt die Seitendaten in eine runtime-aktive `Page` mit initialisiertem Cache um.
     pub fn to_page(&self) -> Page {
         let mut page = Page::new(self.id, self.background);
+        page.pdf_background = self.pdf_background.clone();
         for stroke_data in &self.strokes {
             page.strokes.push(stroke_data.to_stroke());
         }
@@ -1054,6 +1060,50 @@ pub fn create_new_notebook(
     save_notebook(&notebook_dir, &notebook, &mut manifest)?;
 
     Ok((notebook, manifest, notebook_dir))
+}
+
+/// Legt ein neues Notizbuch aus einem PDF an: eine Seite je PDF-Seite, die PDF-Seite als
+/// Hintergrund. Das PDF wird unverändert im Asset-Ordner abgelegt; alle Seiten werden sofort
+/// gespeichert.
+pub fn create_notebook_from_pdf(
+    base_dir: &Path,
+    title: &str,
+    pdf_bytes: Vec<u8>,
+) -> Result<(Notebook, NotebookManifest, PathBuf), String> {
+    let sizes = crate::pdf_doc::page_sizes(pdf_bytes.clone())?;
+    let (_, _, dir) = create_new_notebook(base_dir, title).map_err(|e| e.to_string())?;
+    let result = (|| {
+        let asset = crate::assets::AssetStore::new(&dir)
+            .import_pdf(&pdf_bytes)
+            .map_err(|e| e.to_string())?;
+        let pages: Vec<Page> = sizes
+            .iter()
+            .enumerate()
+            .map(|(i, &(width_pt, height_pt))| {
+                let mut page = Page::new(i as u64 + 1, PageBackground::Blank);
+                page.pdf_background = Some(crate::document::PdfBackground {
+                    asset: asset.clone(),
+                    page: i as u32,
+                    width_pt,
+                    height_pt,
+                });
+                page
+            })
+            .collect();
+        let page_count = pages.len() as u64;
+        let notebook = Notebook::from_pages(pages, 0, 1, page_count + 1);
+        let mut manifest = load_manifest(&dir).map_err(|e| e.to_string())?;
+        save_notebook(&dir, &notebook, &mut manifest).map_err(|e| e.to_string())?;
+        Ok((notebook, manifest))
+    })();
+    match result {
+        Ok((notebook, manifest)) => Ok((notebook, manifest, dir)),
+        Err(err) => {
+            // Halbfertiges Notizbuch nicht liegen lassen
+            let _ = fs::remove_dir_all(&dir);
+            Err(err)
+        }
+    }
 }
 
 /// Benennt ein Notizbuch um und aktualisiert das Manifest atomar auf der Festplatte.
@@ -2354,7 +2404,10 @@ mod tests {
             corners,
         ));
         save_notebook(&dir, &notebook, &mut manifest).unwrap();
-        assert_eq!(load_manifest(&dir).unwrap().format_version, 4);
+        assert_eq!(
+            load_manifest(&dir).unwrap().format_version,
+            CURRENT_FORMAT_VERSION
+        );
 
         let (reloaded, _) = load_notebook(&dir).unwrap();
         let image = &reloaded.current_page().strokes[0];
@@ -2363,5 +2416,37 @@ mod tests {
         assert!(image.vertices.is_empty());
         // Bilddatei liegt im Notizbuchordner
         assert!(dir.join("assets").join(&imported.asset).exists());
+    }
+
+    #[test]
+    fn test_create_notebook_from_pdf() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let pdf = crate::pdf_doc::tests::sample_pdf(&[(842.0, 595.0, 0), (595.0, 842.0, 0)]);
+        let (notebook, manifest, dir) =
+            create_notebook_from_pdf(temp_dir.path(), "Vorlesung 3", pdf.clone()).unwrap();
+        assert_eq!(manifest.title, "Vorlesung 3");
+        assert_eq!(notebook.pages.len(), 2);
+        assert_eq!(notebook.next_page_id, 3);
+
+        // Nach dem Neuladen: jede Seite verweist auf ihre PDF-Seite, das PDF liegt unverändert
+        // im Asset-Ordner
+        let (mut reloaded, _) = load_notebook(&dir).unwrap();
+        load_all_pages(&dir, &mut reloaded).unwrap();
+        for (i, page) in reloaded.pages.iter().enumerate() {
+            let bg = page.pdf_background.as_ref().expect("PDF-Hintergrund fehlt");
+            assert_eq!(bg.page, i as u32);
+            assert_eq!(page.background, PageBackground::Blank);
+        }
+        let first = reloaded.pages[0].pdf_background.clone().unwrap();
+        assert_eq!((first.width_pt, first.height_pt), (842.0, 595.0));
+        let assets = crate::assets::AssetStore::new(&dir);
+        assert_eq!(assets.read_bytes(&first.asset).unwrap(), pdf);
+
+        // Kein PDF: Fehler und kein halbfertiges Notizbuch
+        let before = std::fs::read_dir(temp_dir.path()).unwrap().count();
+        assert!(
+            create_notebook_from_pdf(temp_dir.path(), "Kaputt", b"%PDF-kaputt".to_vec()).is_err()
+        );
+        assert_eq!(std::fs::read_dir(temp_dir.path()).unwrap().count(), before);
     }
 }

@@ -1,13 +1,13 @@
 //! GPU-Darstellung eingefügter Bilder: ein texturiertes Viereck pro Bild, gezeichnet nach dem
 //! Papier und vor der Tinte.
 //!
-//! Texturen werden beim ersten Bedarf aus dem Asset-Ordner geladen (verkleinert auf
-//! `assets::MAX_DISPLAY_DIMENSION`) und mit Mipmaps versehen, damit verkleinerte Bilder
-//! beim Herauszoomen nicht flimmern.
+//! Texturen liefert beim ersten Bedarf eine Texturquelle (Bilddatei oder gerenderte
+//! PDF-Seite); sie werden mit Mipmaps versehen, damit verkleinerte Bilder beim
+//! Herauszoomen nicht flimmern.
 
 use std::collections::{HashMap, HashSet};
 
-use crate::assets::{AssetStore, RgbaImage, MAX_DISPLAY_DIMENSION};
+use crate::assets::RgbaImage;
 
 /// Vertex eines Bildvierecks: Seitenkoordinate und Texturkoordinate.
 #[repr(C)]
@@ -67,19 +67,29 @@ pub fn mip_chain(base: &RgbaImage) -> Vec<RgbaImage> {
 
 /// Name der Ersatztextur für Bilder, deren Datei fehlt oder beschädigt ist.
 const MISSING: &str = "";
-/// So viele Texturen bleiben höchstens im Speicher, auch wenn sie auf der aktuellen Seite
-/// nicht mehr gebraucht werden (schnelles Zurückblättern).
-const TEXTURE_CACHE_LIMIT: usize = 24;
+/// Bis zu dieser Grafikspeichermenge bleiben Texturen anderer Seiten erhalten (schnelles
+/// Zurückblättern); darüber werden alle nicht mehr sichtbaren freigegeben.
+const TEXTURE_CACHE_BYTES: u64 = 384 * 1024 * 1024;
+
+/// Antwort einer Texturquelle für einen Schlüssel.
+pub enum TextureSource {
+    Ready(RgbaImage),
+    /// Wird gerade erzeugt; später erneut fragen
+    Pending,
+    Failed(String),
+}
 
 pub struct ImageLayer {
     pipeline: wgpu::RenderPipeline,
     texture_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
-    textures: HashMap<String, wgpu::BindGroup>,
+    /// Texturen nach Schlüssel (Asset-Name bzw. `<pdf>#<seite>`) mit belegtem Speicher
+    textures: HashMap<String, (wgpu::BindGroup, u64)>,
+    texture_bytes: u64,
     /// Bilder der aktuellen Seite: Asset-Name und Ecken
     quads: Vec<(String, [glam::Vec2; 4])>,
     vertex_buffer: Option<wgpu::Buffer>,
-    needs_upload: bool,
+    vertices_dirty: bool,
 }
 
 impl ImageLayer {
@@ -155,9 +165,10 @@ impl ImageLayer {
             texture_layout,
             sampler,
             textures: HashMap::new(),
+            texture_bytes: 0,
             quads: Vec::new(),
             vertex_buffer: None,
-            needs_upload: false,
+            vertices_dirty: false,
         }
     }
 
@@ -165,45 +176,56 @@ impl ImageLayer {
     pub fn set_quads(&mut self, quads: Vec<(String, [glam::Vec2; 4])>) {
         if quads != self.quads {
             self.quads = quads;
-            self.needs_upload = true;
+            self.vertices_dirty = true;
         }
     }
 
     /// Lädt fehlende Texturen und den Vertex-Puffer hoch. Vor jedem Zeichnen aufrufen;
     /// ohne Änderungen kostet das nichts.
-    pub fn prepare(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, assets: &AssetStore) {
-        if !self.needs_upload {
-            return;
-        }
-        self.needs_upload = false;
-
+    pub fn prepare(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        load: &mut dyn FnMut(&str) -> TextureSource,
+    ) {
         let missing: Vec<String> = self
             .quads
             .iter()
-            .map(|(asset, _)| asset)
-            .filter(|asset| !self.textures.contains_key(*asset))
+            .map(|(key, _)| key)
+            .filter(|key| !self.textures.contains_key(*key))
             .cloned()
             .collect();
-        for asset in missing {
-            if self.textures.contains_key(&asset) {
+        for key in missing {
+            if self.textures.contains_key(&key) {
                 continue;
             }
-            let bind_group = match assets.load_rgba(&asset, MAX_DISPLAY_DIMENSION) {
-                Ok(image) => self.upload_texture(device, queue, &asset, &image),
-                Err(err) => {
-                    eprintln!("[Bilder] '{asset}' kann nicht angezeigt werden: {err}");
-                    self.missing_texture(device, queue)
+            let (bind_group, bytes) = match load(&key) {
+                TextureSource::Ready(image) => (
+                    self.upload_texture(device, queue, &key, &image),
+                    image.pixels.len() as u64 * 4 / 3,
+                ),
+                // Noch in Arbeit (PDF-Seite wird gerendert): beim nächsten Bild erneut fragen
+                TextureSource::Pending => continue,
+                TextureSource::Failed(err) => {
+                    eprintln!("[Bilder] '{key}' kann nicht angezeigt werden: {err}");
+                    (self.missing_texture(device, queue), 4)
                 }
             };
-            self.textures.insert(asset, bind_group);
+            self.texture_bytes += bytes;
+            self.textures.insert(key, (bind_group, bytes));
         }
 
-        // Nicht mehr benötigte Texturen freigeben, wenn der Speicher voll wird
-        if self.textures.len() > TEXTURE_CACHE_LIMIT {
+        // Nicht mehr benötigte Texturen freigeben, wenn der Grafikspeicher knapp wird
+        if self.texture_bytes > TEXTURE_CACHE_BYTES {
             let used: HashSet<&String> = self.quads.iter().map(|(a, _)| a).collect();
             self.textures.retain(|name, _| used.contains(name));
+            self.texture_bytes = self.textures.values().map(|(_, b)| b).sum();
         }
 
+        if !self.vertices_dirty {
+            return;
+        }
+        self.vertices_dirty = false;
         let vertices: Vec<ImageVertex> = self
             .quads
             .iter()
@@ -230,18 +252,25 @@ impl ImageLayer {
         }
     }
 
+    /// Fehlen noch Texturen der aktuellen Seite (z. B. PDF-Seite im Hintergrund-Rendering)?
+    pub fn is_waiting(&self) -> bool {
+        self.quads
+            .iter()
+            .any(|(key, _)| !self.textures.contains_key(key))
+    }
+
     /// Zeichnet die Bilder der aktuellen Seite. Bind Group 0 (Kamera) muss gesetzt sein.
     pub fn draw<'a>(&'a self, render_pass: &mut wgpu::RenderPass<'a>) {
         let Some(buffer) = &self.vertex_buffer else {
             return;
         };
-        if self.quads.is_empty() || self.needs_upload {
+        if self.quads.is_empty() || self.vertices_dirty {
             return;
         }
         render_pass.set_pipeline(&self.pipeline);
         render_pass.set_vertex_buffer(0, buffer.slice(..));
         for (i, (asset, _)) in self.quads.iter().enumerate() {
-            let Some(bind_group) = self.textures.get(asset) else {
+            let Some((bind_group, _)) = self.textures.get(asset) else {
                 continue;
             };
             render_pass.set_bind_group(1, bind_group, &[]);

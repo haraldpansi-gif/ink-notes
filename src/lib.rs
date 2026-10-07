@@ -11,6 +11,8 @@ pub mod filter;
 pub mod geometry;
 pub mod history;
 pub mod image_layer;
+pub mod pdf_doc;
+pub mod pdf_merge;
 pub mod platform;
 pub mod selection;
 pub mod settings;
