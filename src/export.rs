@@ -412,76 +412,58 @@ fn render_recognized_shape(
             y_axis_end,
             with_arrows,
         } => {
+            // Gleiche Pfeilspitzen wie auf dem Bildschirm; Achsen enden an der Basis der Spitze
+            // (Linienstärke 1,5 pt ≈ 5,3 Seiteneinheiten, halbe Breite ≈ 2,65)
+            const PDF_SHAPE_HALF_WIDTH: f32 = 2.65;
+            let y_dir = (*y_axis_end - *origin).normalize_or_zero();
+            let x_dir = (*x_axis_end - *origin).normalize_or_zero();
+            let y_arrow = crate::geometry::arrow_head(
+                *y_axis_end,
+                y_dir,
+                PDF_SHAPE_HALF_WIDTH,
+                (*y_axis_end - *origin).length(),
+            );
+            let x_arrow = crate::geometry::arrow_head(
+                *x_axis_end,
+                x_dir,
+                PDF_SHAPE_HALF_WIDTH,
+                (*x_axis_end - *origin).length(),
+            );
+            let (y_line_end, x_line_end) = if *with_arrows {
+                (y_arrow.0, x_arrow.0)
+            } else {
+                (*y_axis_end, *x_axis_end)
+            };
+
             let (ox, oy) = page_to_pdf_mm(origin.x, origin.y);
-            let (xx, xy) = page_to_pdf_mm(x_axis_end.x, x_axis_end.y);
-            let (yx, yy) = page_to_pdf_mm(y_axis_end.x, y_axis_end.y);
-
-            // Achse 1 (Y)
-            let line_y = Line {
-                points: vec![
-                    (Point::new(Mm(ox), Mm(oy)), false),
-                    (Point::new(Mm(yx), Mm(yy)), false),
-                ],
-                is_closed: false,
-            };
-            layer.add_line(line_y);
-
-            // Achse 2 (X)
-            let line_x = Line {
-                points: vec![
-                    (Point::new(Mm(ox), Mm(oy)), false),
-                    (Point::new(Mm(xx), Mm(xy)), false),
-                ],
-                is_closed: false,
-            };
-            layer.add_line(line_x);
+            for end in [y_line_end, x_line_end] {
+                let (ex, ey) = page_to_pdf_mm(end.x, end.y);
+                layer.add_line(Line {
+                    points: vec![
+                        (Point::new(Mm(ox), Mm(oy)), false),
+                        (Point::new(Mm(ex), Mm(ey)), false),
+                    ],
+                    is_closed: false,
+                });
+            }
 
             // Pfeilspitzen als gefüllte Dreiecke
             if *with_arrows {
                 layer.set_fill_color(stroke_color);
-
-                let y_dir = (*y_axis_end - *origin).normalize_or_zero();
-                let arrow_len_page = 25.0;
-                let arrow_w_page = 16.0;
-
-                let base_y = *y_axis_end - y_dir * arrow_len_page;
-                let left_y = base_y + glam::Vec2::new(-y_dir.y, y_dir.x) * (arrow_w_page * 0.5);
-                let right_y = base_y - glam::Vec2::new(-y_dir.y, y_dir.x) * (arrow_w_page * 0.5);
-
-                let (tx, ty) = page_to_pdf_mm(y_axis_end.x, y_axis_end.y);
-                let (lx, ly) = page_to_pdf_mm(left_y.x, left_y.y);
-                let (rx, ry) = page_to_pdf_mm(right_y.x, right_y.y);
-
-                let arrow_poly_y = Polygon {
-                    rings: vec![vec![
-                        (Point::new(Mm(tx), Mm(ty)), false),
-                        (Point::new(Mm(lx), Mm(ly)), false),
-                        (Point::new(Mm(rx), Mm(ry)), false),
-                    ]],
-                    mode: PaintMode::Fill,
-                    winding_order: WindingOrder::NonZero,
-                };
-                layer.add_polygon(arrow_poly_y);
-
-                let x_dir = (*x_axis_end - *origin).normalize_or_zero();
-                let base_x = *x_axis_end - x_dir * arrow_len_page;
-                let left_x = base_x + glam::Vec2::new(-x_dir.y, x_dir.x) * (arrow_w_page * 0.5);
-                let right_x = base_x - glam::Vec2::new(-x_dir.y, x_dir.x) * (arrow_w_page * 0.5);
-
-                let (tx_x, ty_x) = page_to_pdf_mm(x_axis_end.x, x_axis_end.y);
-                let (lx_x, ly_x) = page_to_pdf_mm(left_x.x, left_x.y);
-                let (rx_x, ry_x) = page_to_pdf_mm(right_x.x, right_x.y);
-
-                let arrow_poly_x = Polygon {
-                    rings: vec![vec![
-                        (Point::new(Mm(tx_x), Mm(ty_x)), false),
-                        (Point::new(Mm(lx_x), Mm(ly_x)), false),
-                        (Point::new(Mm(rx_x), Mm(ry_x)), false),
-                    ]],
-                    mode: PaintMode::Fill,
-                    winding_order: WindingOrder::NonZero,
-                };
-                layer.add_polygon(arrow_poly_x);
+                for (tip, (_, left, right)) in [(*y_axis_end, y_arrow), (*x_axis_end, x_arrow)] {
+                    let ring = [tip, left, right]
+                        .iter()
+                        .map(|p| {
+                            let (px, py) = page_to_pdf_mm(p.x, p.y);
+                            (Point::new(Mm(px), Mm(py)), false)
+                        })
+                        .collect();
+                    layer.add_polygon(Polygon {
+                        rings: vec![ring],
+                        mode: PaintMode::Fill,
+                        winding_order: WindingOrder::NonZero,
+                    });
+                }
             }
         }
     }

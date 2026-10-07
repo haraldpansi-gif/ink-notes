@@ -1269,6 +1269,23 @@ fn best_closed_shape(pts: &[Vec2]) -> Option<(f32, RecognizedShape)> {
     .min_by(|a, b| a.0.total_cmp(&b.0))
 }
 
+/// Halber Öffnungswinkel einer Pfeilspitze als Verhältnis halbe Breite zu Länge (tan 20° ≈ 0,36,
+/// also ~40° Öffnung – schlank genug, dass die Spitze spitz wirkt).
+const ARROW_HALF_WIDTH_RATIO: f32 = 0.36;
+
+/// Geometrie einer Pfeilspitze an `tip`, Richtung `dir` (Einheitsvektor), für eine Linie der
+/// halben Breite `half_w` (Seiteneinheiten) und der Länge `line_len`. Liefert (Basismitte,
+/// linke Ecke, rechte Ecke). Die Spitze ist ~4 mm lang (dicke Linien länger), höchstens ein
+/// Fünftel der Linie. Die Linie soll an der Basismitte enden – reicht sie bis zur Spitze,
+/// wirkt diese stumpf.
+pub fn arrow_head(tip: Vec2, dir: Vec2, half_w: f32, line_len: f32) -> (Vec2, Vec2, Vec2) {
+    let len = (half_w * 10.0).max(40.0).min(line_len * 0.2);
+    let half_width = len * ARROW_HALF_WIDTH_RATIO;
+    let base = tip - dir * len;
+    let normal = Vec2::new(-dir.y, dir.x);
+    (base, base + normal * half_width, base - normal * half_width)
+}
+
 /// Abstand eines Punktes zur Strecke `a`–`b`.
 fn segment_distance(p: Vec2, a: Vec2, b: Vec2) -> f32 {
     let ab = b - a;
@@ -1539,11 +1556,20 @@ pub fn shape_to_mesh(
             let mut vertices = Vec::new();
             let mut samples = Vec::new();
 
-            // 1. Y-Achse (von Pfeilspitze oben zum Ursprung)
+            // Achsen enden bei Pfeilen an der Basis der Spitze, sonst überdeckt das Linienband
+            // die Spitze und sie wirkt stumpf
             let y_dir = (*y_axis_end - *origin).normalize_or_zero();
-            let y_norm = Vec2::new(-y_dir.y, y_dir.x) * half_w;
+            let x_dir = (*x_axis_end - *origin).normalize_or_zero();
+            let y_arrow = arrow_head(*y_axis_end, y_dir, half_w, (*y_axis_end - *origin).length());
+            let x_arrow = arrow_head(*x_axis_end, x_dir, half_w, (*x_axis_end - *origin).length());
+            let (y_line_end, x_line_end) = if *with_arrows {
+                (y_arrow.0, x_arrow.0)
+            } else {
+                (*y_axis_end, *x_axis_end)
+            };
 
-            // Y-Linienband
+            // 1. Y-Achse (vom Ursprung zur Spitze)
+            let y_norm = Vec2::new(-y_dir.y, y_dir.x) * half_w;
             vertices.push(InkVertex::new(
                 origin.x + y_norm.x,
                 origin.y + y_norm.y,
@@ -1555,26 +1581,24 @@ pub fn shape_to_mesh(
                 color,
             ));
             vertices.push(InkVertex::new(
-                y_axis_end.x + y_norm.x,
-                y_axis_end.y + y_norm.y,
+                y_line_end.x + y_norm.x,
+                y_line_end.y + y_norm.y,
                 color,
             ));
             vertices.push(InkVertex::new(
-                y_axis_end.x - y_norm.x,
-                y_axis_end.y - y_norm.y,
+                y_line_end.x - y_norm.x,
+                y_line_end.y - y_norm.y,
                 color,
             ));
 
-            // Degenerate Dreiecke für Übergang zur X-Achse
-            let x_dir = (*x_axis_end - *origin).normalize_or_zero();
+            // Degenerierte Dreiecke für den Übergang zur X-Achse
             let x_norm = Vec2::new(-x_dir.y, x_dir.x) * half_w;
-
             let last_v = *vertices.last().unwrap();
             let next_v = InkVertex::new(origin.x + x_norm.x, origin.y + x_norm.y, color);
             vertices.push(last_v);
             vertices.push(next_v);
 
-            // 2. X-Linienband
+            // 2. X-Achse
             vertices.push(next_v);
             vertices.push(InkVertex::new(
                 origin.x - x_norm.x,
@@ -1582,48 +1606,27 @@ pub fn shape_to_mesh(
                 color,
             ));
             vertices.push(InkVertex::new(
-                x_axis_end.x + x_norm.x,
-                x_axis_end.y + x_norm.y,
+                x_line_end.x + x_norm.x,
+                x_line_end.y + x_norm.y,
                 color,
             ));
             vertices.push(InkVertex::new(
-                x_axis_end.x - x_norm.x,
-                x_axis_end.y - x_norm.y,
+                x_line_end.x - x_norm.x,
+                x_line_end.y - x_norm.y,
                 color,
             ));
 
-            // 3. Optionale Pfeilspitzen
+            // 3. Optionale Pfeilspitzen (je ein Dreieck, über degenerierte Dreiecke angehängt)
             if *with_arrows {
-                let arrow_len = (half_w * 5.0).max(18.0);
-                let arrow_w = (half_w * 3.5).max(12.0);
-
-                // Pfeilspitze Y
-                let y_base = *y_axis_end - y_dir * arrow_len;
-                let y_left = y_base + Vec2::new(-y_dir.y, y_dir.x) * arrow_w;
-                let y_right = y_base - Vec2::new(-y_dir.y, y_dir.x) * arrow_w;
-
-                let last_v = *vertices.last().unwrap();
-                let tip_v = InkVertex::new(y_axis_end.x, y_axis_end.y, color);
-                vertices.push(last_v);
-                vertices.push(tip_v);
-
-                vertices.push(tip_v);
-                vertices.push(InkVertex::new(y_left.x, y_left.y, color));
-                vertices.push(InkVertex::new(y_right.x, y_right.y, color));
-
-                // Pfeilspitze X
-                let x_base = *x_axis_end - x_dir * arrow_len;
-                let x_left = x_base + Vec2::new(-x_dir.y, x_dir.x) * arrow_w;
-                let x_right = x_base - Vec2::new(-x_dir.y, x_dir.x) * arrow_w;
-
-                let last_v = *vertices.last().unwrap();
-                let tip_x = InkVertex::new(x_axis_end.x, x_axis_end.y, color);
-                vertices.push(last_v);
-                vertices.push(tip_x);
-
-                vertices.push(tip_x);
-                vertices.push(InkVertex::new(x_left.x, x_left.y, color));
-                vertices.push(InkVertex::new(x_right.x, x_right.y, color));
+                for (tip, (_, left, right)) in [(*y_axis_end, y_arrow), (*x_axis_end, x_arrow)] {
+                    let last_v = *vertices.last().unwrap();
+                    let tip_v = InkVertex::new(tip.x, tip.y, color);
+                    vertices.push(last_v);
+                    vertices.push(tip_v);
+                    vertices.push(tip_v);
+                    vertices.push(InkVertex::new(left.x, left.y, color));
+                    vertices.push(InkVertex::new(right.x, right.y, color));
+                }
             }
 
             // Abtastpunkte
@@ -2399,5 +2402,53 @@ mod tests {
                 timestamp: i as f64 * 0.008,
             })
             .collect()
+    }
+
+    #[test]
+    fn test_arrow_head_is_slender_and_axes_end_at_its_base() {
+        // Spitze schlank (~40° Öffnung) und breiter als die Linie
+        let (base, left, right) = arrow_head(Vec2::new(0.0, 0.0), Vec2::new(0.0, -1.0), 2.5, 500.0);
+        let len = base.length();
+        let half_width = (left - base).length();
+        let opening = 2.0 * (half_width / len).atan().to_degrees();
+        assert!(
+            (35.0..=45.0).contains(&opening),
+            "Öffnungswinkel {opening}°"
+        );
+        assert!(
+            half_width > 2.5 * 2.0,
+            "Spitze muss breiter als die Linie sein"
+        );
+        assert!(((left + right) * 0.5 - base).length() < 1e-4);
+        assert!(len >= 40.0, "Spitze mindestens 4 mm lang: {len}");
+        // Bei kurzen Linien höchstens ein Fünftel der Linie
+        let (short_base, ..) = arrow_head(Vec2::ZERO, Vec2::new(1.0, 0.0), 2.5, 100.0);
+        assert!((short_base.length() - 20.0).abs() < 1e-3);
+
+        // Kein Vertex des Linienbands ragt über die Basis hinaus in die Spitze hinein
+        let origin = Vec2::new(100.0, 300.0);
+        let y_end = Vec2::new(100.0, 100.0);
+        let x_end = Vec2::new(300.0, 300.0);
+        let shape = RecognizedShape::CoordinateSystem {
+            origin,
+            x_axis_end: x_end,
+            y_axis_end: y_end,
+            with_arrows: true,
+        };
+        let (_, vertices) = shape_to_mesh(&shape, 5.0, [0.0, 0.0, 0.0, 1.0]);
+        let (y_base, ..) = arrow_head(y_end, Vec2::new(0.0, -1.0), 2.5, 200.0);
+        let (x_base, ..) = arrow_head(x_end, Vec2::new(1.0, 0.0), 2.5, 200.0);
+        for v in &vertices {
+            let p = Vec2::new(v.position[0], v.position[1]);
+            let is_tip = (p - y_end).length() < 1e-3 || (p - x_end).length() < 1e-3;
+            assert!(
+                is_tip || p.y >= y_base.y - 1e-3,
+                "Y-Achse ragt in die Spitze: {p:?}"
+            );
+            assert!(
+                is_tip || p.x <= x_base.x + 1e-3,
+                "X-Achse ragt in die Spitze: {p:?}"
+            );
+        }
     }
 }
