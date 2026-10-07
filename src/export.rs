@@ -329,6 +329,59 @@ fn render_recognized_shape(
             layer.add_polygon(poly);
         }
 
+        RecognizedShape::Ellipse {
+            center,
+            radius_x,
+            radius_y,
+            rotation,
+        } => {
+            let ring = (0..72)
+                .map(|i| {
+                    let t = i as f32 / 72.0 * std::f32::consts::TAU;
+                    let p =
+                        crate::geometry::ellipse_point(*center, *radius_x, *radius_y, *rotation, t);
+                    let (x, y) = page_to_pdf_mm(p.x, p.y);
+                    (Point::new(Mm(x), Mm(y)), false)
+                })
+                .collect();
+            layer.add_polygon(Polygon {
+                rings: vec![ring],
+                mode: PaintMode::Stroke,
+                winding_order: WindingOrder::NonZero,
+            });
+        }
+
+        RecognizedShape::Arrow { start, end, double } => {
+            // Gleiche Spitzen wie auf dem Bildschirm; der Schaft endet an ihrer Basis
+            const PDF_SHAPE_HALF_WIDTH: f32 = 2.65;
+            let shaft_len = (*end - *start).length();
+            let dir = (*end - *start).normalize_or_zero();
+            let end_head = crate::geometry::arrow_head(*end, dir, PDF_SHAPE_HALF_WIDTH, shaft_len);
+            let start_head =
+                crate::geometry::arrow_head(*start, -dir, PDF_SHAPE_HALF_WIDTH, shaft_len);
+            let line_start = if *double { start_head.0 } else { *start };
+            let to_pdf = |p: glam::Vec2| {
+                let (x, y) = page_to_pdf_mm(p.x, p.y);
+                (Point::new(Mm(x), Mm(y)), false)
+            };
+            layer.add_line(Line {
+                points: vec![to_pdf(line_start), to_pdf(end_head.0)],
+                is_closed: false,
+            });
+            layer.set_fill_color(stroke_color);
+            let mut heads = vec![(*end, end_head)];
+            if *double {
+                heads.push((*start, start_head));
+            }
+            for (tip, (_, left, right)) in heads {
+                layer.add_polygon(Polygon {
+                    rings: vec![vec![to_pdf(tip), to_pdf(left), to_pdf(right)]],
+                    mode: PaintMode::Fill,
+                    winding_order: WindingOrder::NonZero,
+                });
+            }
+        }
+
         RecognizedShape::Rectangle { corners } => {
             let mut ring = Vec::with_capacity(4);
             for c in corners {
@@ -819,6 +872,27 @@ mod tests {
             },
         );
         page.add_stroke(coords_stroke);
+
+        let ellipse_stroke = Stroke::new(40, vec![], vec![], [0.1, 0.5, 0.5, 1.0]).with_shape(
+            crate::geometry::RecognizedShape::Ellipse {
+                center: glam::Vec2::new(1400.0, 600.0),
+                radius_x: 300.0,
+                radius_y: 150.0,
+                rotation: 0.4,
+            },
+        );
+        page.add_stroke(ellipse_stroke);
+
+        for (id, double) in [(41, false), (42, true)] {
+            let arrow_stroke = Stroke::new(id, vec![], vec![], [0.2, 0.2, 0.2, 1.0]).with_shape(
+                crate::geometry::RecognizedShape::Arrow {
+                    start: glam::Vec2::new(1200.0, 1800.0 + id as f32 * 40.0),
+                    end: glam::Vec2::new(1800.0, 1800.0 + id as f32 * 40.0),
+                    double,
+                },
+            );
+            page.add_stroke(arrow_stroke);
+        }
 
         let tri_stroke = Stroke::new(5, vec![], vec![], [0.6, 0.2, 0.7, 1.0]).with_shape(
             crate::geometry::RecognizedShape::Triangle {

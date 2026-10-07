@@ -124,8 +124,12 @@ impl StrokeData {
     }
 }
 
-/// Aktuelle Dateiformat-Version von ink-notes (Version 2: Stroke-Treue mit tool, width, finalized).
-pub const CURRENT_FORMAT_VERSION: u32 = 2;
+/// Aktuelle Dateiformat-Version von ink-notes.
+/// - Version 2: Stroke-Treue mit tool, width, finalized
+/// - Version 3: neue Formen (Ellipse, Pfeil). Ältere App-Versionen kennen sie nicht und würden
+///   betroffene Seiten für beschädigt halten; mit Version 3 lehnen sie das Notizbuch stattdessen
+///   sauber als „neuere Version“ ab.
+pub const CURRENT_FORMAT_VERSION: u32 = 3;
 
 /// Standardwert für ältere Dateien ohne explizite Formatversion (Legacy v0).
 pub fn legacy_format_version() -> u32 {
@@ -2232,5 +2236,50 @@ mod tests {
             before,
             "Seitendatei wurde überschrieben"
         );
+    }
+
+    #[test]
+    fn test_new_shapes_round_trip_through_page_file() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let (mut notebook, mut manifest, dir) =
+            create_new_notebook(temp_dir.path(), "Neue Formen").unwrap();
+        let shapes = [
+            crate::geometry::RecognizedShape::Ellipse {
+                center: glam::Vec2::new(500.0, 600.0),
+                radius_x: 250.0,
+                radius_y: 120.0,
+                rotation: 0.3,
+            },
+            crate::geometry::RecognizedShape::Arrow {
+                start: glam::Vec2::new(100.0, 100.0),
+                end: glam::Vec2::new(700.0, 300.0),
+                double: true,
+            },
+        ];
+        for (i, shape) in shapes.iter().enumerate() {
+            notebook
+                .current_page_mut()
+                .strokes
+                .push(crate::geometry::shape_to_stroke(
+                    shape.clone(),
+                    i as u64 + 1,
+                    [0.0, 0.0, 0.0, 1.0],
+                    5.0,
+                ));
+        }
+        save_notebook(&dir, &notebook, &mut manifest).unwrap();
+        assert_eq!(
+            load_manifest(&dir).unwrap().format_version,
+            CURRENT_FORMAT_VERSION
+        );
+
+        let (reloaded, _) = load_notebook(&dir).unwrap();
+        let loaded: Vec<_> = reloaded
+            .current_page()
+            .strokes
+            .iter()
+            .map(|s| s.shape.clone())
+            .collect();
+        assert_eq!(loaded, shapes.iter().cloned().map(Some).collect::<Vec<_>>());
     }
 }

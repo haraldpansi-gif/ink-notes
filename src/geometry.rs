@@ -15,6 +15,8 @@ use crate::document::{Aabb, Stroke, StylusSample};
 pub enum ShapeKind {
     Line,
     Circle,
+    Ellipse,
+    Arrow,
     Rectangle,
     CoordinateSystem,
     Triangle,
@@ -33,6 +35,20 @@ pub enum RecognizedShape {
     Circle {
         center: Vec2,
         radius: f32,
+    },
+    /// Ellipse mit den Halbachsen `radius_x` (entlang `rotation`) und `radius_y`.
+    Ellipse {
+        center: Vec2,
+        radius_x: f32,
+        radius_y: f32,
+        /// Drehwinkel der ersten Halbachse zur x-Achse (Bogenmaß)
+        rotation: f32,
+    },
+    /// Pfeil vom Schaftende `start` zur Spitze `end`; `double` = Spitzen an beiden Enden.
+    Arrow {
+        start: Vec2,
+        end: Vec2,
+        double: bool,
     },
     Rectangle {
         /// 4 Eckpunkte in umlaufender Reihenfolge (strikt rechtwinklig).
@@ -70,6 +86,8 @@ impl RecognizedShape {
         match self {
             Self::Line { .. } => ShapeKind::Line,
             Self::Circle { .. } => ShapeKind::Circle,
+            Self::Ellipse { .. } => ShapeKind::Ellipse,
+            Self::Arrow { .. } => ShapeKind::Arrow,
             Self::Rectangle { .. } => ShapeKind::Rectangle,
             Self::CoordinateSystem { .. } => ShapeKind::CoordinateSystem,
             Self::Triangle { .. } => ShapeKind::Triangle,
@@ -83,6 +101,9 @@ impl RecognizedShape {
         match self {
             Self::Line { .. } => "Gerade",
             Self::Circle { .. } => "Kreis",
+            Self::Ellipse { .. } => "Ellipse",
+            Self::Arrow { double: false, .. } => "Pfeil",
+            Self::Arrow { double: true, .. } => "Doppelpfeil",
             Self::Rectangle { .. } => "Rechteck",
             Self::CoordinateSystem { .. } => "Koordinatensystem",
             Self::Triangle { .. } => "Dreieck",
@@ -104,8 +125,12 @@ impl RecognizedShape {
                 *start += delta;
                 *end += delta;
             }
-            Self::Circle { center, .. } => {
+            Self::Circle { center, .. } | Self::Ellipse { center, .. } => {
                 *center += delta;
+            }
+            Self::Arrow { start, end, .. } => {
+                *start += delta;
+                *end += delta;
             }
             Self::Rectangle { corners } | Self::Rhombus { corners } => {
                 for c in corners {
@@ -154,6 +179,16 @@ impl RecognizedShape {
             Self::Circle { center, .. } => {
                 *center = rot(*center);
             }
+            Self::Ellipse {
+                center, rotation, ..
+            } => {
+                *center = rot(*center);
+                *rotation += angle_rad;
+            }
+            Self::Arrow { start, end, .. } => {
+                *start = rot(*start);
+                *end = rot(*end);
+            }
             Self::Rectangle { corners } | Self::Rhombus { corners } => {
                 for c in corners {
                     *c = rot(*c);
@@ -197,6 +232,26 @@ impl RecognizedShape {
             Self::Circle { center, radius } => {
                 *center = sc(*center);
                 *radius *= (factors.x.abs() + factors.y.abs()) * 0.5;
+            }
+            Self::Ellipse {
+                center,
+                radius_x,
+                radius_y,
+                rotation,
+            } => {
+                // Halbachsen als Vektoren skalieren (bei schräger Ellipse und ungleicher
+                // Skalierung eine gute Näherung)
+                let (sin, cos) = rotation.sin_cos();
+                let axis_x = Vec2::new(cos, sin) * *radius_x * factors;
+                let axis_y = Vec2::new(-sin, cos) * *radius_y * factors;
+                *center = sc(*center);
+                *radius_x = axis_x.length();
+                *radius_y = axis_y.length();
+                *rotation = axis_x.y.atan2(axis_x.x);
+            }
+            Self::Arrow { start, end, .. } => {
+                *start = sc(*start);
+                *end = sc(*end);
             }
             Self::Rectangle { corners } | Self::Rhombus { corners } => {
                 for c in corners {
@@ -912,6 +967,221 @@ pub fn detect_polygon(points: &[Vec2]) -> Option<RecognizedShape> {
     })
 }
 
+/// Tastet einen Linienzug gleichmäßig entlang der Bogenlänge neu ab (`samples` Abschnitte).
+fn resample_path(points: &[Vec2], samples: usize) -> Vec<Vec2> {
+    let total_len = path_length(points);
+    if points.is_empty() || total_len < 1e-3 || samples == 0 {
+        return points.to_vec();
+    }
+    let step = total_len / samples as f32;
+    let mut resampled = vec![points[0]];
+    let mut carried = 0.0;
+    for w in points.windows(2) {
+        let (a, b) = (w[0], w[1]);
+        let seg = (b - a).length();
+        let mut pos = step - carried;
+        while pos <= seg {
+            resampled.push(a + (b - a) * (pos / seg));
+            pos += step;
+        }
+        carried = seg - (pos - step);
+    }
+    resampled
+}
+
+/// Ellipsen, deren kürzere Halbachse mindestens diesen Anteil der längeren hat, gelten als Kreis.
+const ELLIPSE_MAX_ROUNDNESS: f32 = 0.85;
+/// Ellipsen, die höchstens so viele Grad schief liegen, werden achsenparallel ausgerichtet.
+const ELLIPSE_AXIS_SNAP_DEG: f32 = 8.0;
+
+/// Ellipsenerkennung: geschlossener Pfad, Achsen aus der Hauptkomponentenanalyse der
+/// gleichmäßig abgetasteten Punkte, Halbachsen aus der Ausdehnung entlang dieser Achsen
+/// (2.–98. Perzentil, robust gegen Überstriche). Fast runde Formen bleiben Kreise.
+pub fn detect_ellipse(points: &[Vec2]) -> Option<RecognizedShape> {
+    if points.len() < 8 {
+        return None;
+    }
+    let total_len = path_length(points);
+    if total_len < 40.0 {
+        return None;
+    }
+    let chord_len = (*points.last().unwrap() - points[0]).length();
+    if chord_len > 0.35 * total_len {
+        return None;
+    }
+
+    let pts = resample_path(points, 120);
+    let n = pts.len() as f32;
+    let mean = pts.iter().copied().sum::<Vec2>() / n;
+    let (mut sxx, mut syy, mut sxy) = (0.0_f32, 0.0_f32, 0.0_f32);
+    for p in &pts {
+        let d = *p - mean;
+        sxx += d.x * d.x;
+        syy += d.y * d.y;
+        sxy += d.x * d.y;
+    }
+    let mut rotation = 0.5 * (2.0 * sxy).atan2(sxx - syy);
+
+    // Achsenparallel ausrichten, wenn nur leicht schief
+    let deg = rotation.to_degrees().rem_euclid(90.0);
+    if deg <= ELLIPSE_AXIS_SNAP_DEG || deg >= 90.0 - ELLIPSE_AXIS_SNAP_DEG {
+        rotation = (rotation.to_degrees() / 90.0).round() * 90.0_f32.to_radians();
+    }
+
+    let (sin, cos) = rotation.sin_cos();
+    let mut along: Vec<f32> = pts.iter().map(|p| p.x * cos + p.y * sin).collect();
+    let mut across: Vec<f32> = pts.iter().map(|p| -p.x * sin + p.y * cos).collect();
+    along.sort_by(f32::total_cmp);
+    across.sort_by(f32::total_cmp);
+    let lo = pts.len() * 2 / 100;
+    let hi = pts.len() - 1 - lo;
+    let (a0, a1, b0, b1) = (along[lo], along[hi], across[lo], across[hi]);
+    let mut radius_x = (a1 - a0) * 0.5;
+    let mut radius_y = (b1 - b0) * 0.5;
+    let center = Vec2::new(cos, sin) * (a0 + a1) * 0.5 + Vec2::new(-sin, cos) * (b0 + b1) * 0.5;
+    if radius_x < 10.0 || radius_y < 5.0 {
+        return None;
+    }
+    // Erste Halbachse ist die längere
+    if radius_y > radius_x {
+        std::mem::swap(&mut radius_x, &mut radius_y);
+        rotation += std::f32::consts::FRAC_PI_2;
+    }
+    if radius_y / radius_x >= ELLIPSE_MAX_ROUNDNESS {
+        return None;
+    }
+    // Drehwinkel auf (−90°, 90°] normieren
+    if rotation > std::f32::consts::FRAC_PI_2 {
+        rotation -= std::f32::consts::PI;
+    } else if rotation <= -std::f32::consts::FRAC_PI_2 {
+        rotation += std::f32::consts::PI;
+    }
+
+    Some(RecognizedShape::Ellipse {
+        center,
+        radius_x,
+        radius_y,
+        rotation,
+    })
+}
+
+/// Höchster Abstand der Widerhaken von der Spitze, als Anteil der Schaftlänge.
+const ARROW_HEAD_REACH: f32 = 0.4;
+/// Punkte so nahe an der Spitze gelten als Rückweg zur Spitze, nicht als Widerhaken.
+const ARROW_TIP_ZONE: f32 = 0.08;
+
+/// Pfeilerkennung (auch Doppelpfeil) für einen in einem Zug gezeichneten Pfeil: langer Schaft
+/// und an mindestens einem Ende Widerhaken auf beiden Seiten, schräg nach hinten (10°–80°;
+/// ein T-Ende mit 90° ist kein Pfeil).
+pub fn detect_arrow(points: &[Vec2]) -> Option<RecognizedShape> {
+    if points.len() < 6 {
+        return None;
+    }
+    let total_len = path_length(points);
+    if total_len < 40.0 {
+        return None;
+    }
+    let epsilon = (total_len * 0.02).clamp(3.0, 15.0);
+    let simplified = ramer_douglas_peucker(points, epsilon);
+    if simplified.len() < 4 {
+        return None;
+    }
+
+    // Schaft = längstes Segment, an beiden Enden um fast gerade weiterlaufende Punkte
+    // verlängert (die Vereinfachung teilt den Schaft sonst gern kurz vor der Spitze)
+    let longest = (0..simplified.len() - 1).max_by(|&i, &j| {
+        let li = (simplified[i + 1] - simplified[i]).length();
+        let lj = (simplified[j + 1] - simplified[j]).length();
+        li.total_cmp(&lj)
+    })?;
+    let (mut first, mut last) = (longest, longest + 1);
+    // Ein Folgepunkt gehört zum Schaft, wenn er nahe der Schaftgeraden in Verlängerung liegt
+    // (kein Winkelkriterium: kurze Stücke haben durch das Zittern stark schwankende Richtungen)
+    let continues = |from: Vec2, to: Vec2, next: Vec2| {
+        let dir = (to - from).normalize_or_zero();
+        let beyond = (next - to).dot(dir) > 0.0;
+        let tolerance = (2.0 * epsilon).max(0.05 * (to - from).length());
+        beyond && point_to_line_dist(next, from, to) <= tolerance
+    };
+    while last + 1 < simplified.len()
+        && continues(simplified[first], simplified[last], simplified[last + 1])
+    {
+        last += 1;
+    }
+    while first > 0 && continues(simplified[last], simplified[first], simplified[first - 1]) {
+        first -= 1;
+    }
+    let (a, b) = (simplified[first], simplified[last]);
+    let shaft_len = (b - a).length();
+    if shaft_len < 0.4 * total_len {
+        return None;
+    }
+    let others: Vec<Vec2> = simplified
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| *i < first || *i > last)
+        .map(|(_, p)| *p)
+        .collect();
+
+    // Hat das Schaftende `tip` (mit Gegenende `tail`) Widerhaken auf beiden Seiten?
+    // Liefert None, wenn ein zugeordneter Punkt nicht wie ein Widerhaken liegt.
+    let head_at = |tip: Vec2, tail: Vec2, cluster: &[Vec2]| -> Option<bool> {
+        let back = (tail - tip).normalize_or_zero();
+        let (mut left, mut right) = (false, false);
+        for p in cluster {
+            let v = *p - tip;
+            if v.length() < ARROW_TIP_ZONE * shaft_len {
+                continue;
+            }
+            let angle = back.angle_between(v).to_degrees().abs();
+            if !(10.0..=80.0).contains(&angle) {
+                return None;
+            }
+            if back.perp_dot(v) > 0.0 {
+                left = true;
+            } else {
+                right = true;
+            }
+        }
+        Some(left && right)
+    };
+
+    // Übrige Punkte dem näheren Schaftende zuordnen; sie müssen nahe an diesem liegen
+    let (mut near_a, mut near_b) = (Vec::new(), Vec::new());
+    for p in others {
+        let (da, db) = ((p - a).length(), (p - b).length());
+        if da.min(db) > ARROW_HEAD_REACH * shaft_len {
+            return None;
+        }
+        if da < db {
+            near_a.push(p);
+        } else {
+            near_b.push(p);
+        }
+    }
+    let head_b = head_at(b, a, &near_b)?;
+    let head_a = head_at(a, b, &near_a)?;
+
+    let (start, end, double) = match (head_a, head_b) {
+        (true, true) => (a, b, true),
+        (false, true) if near_a.is_empty() => (a, b, false),
+        (true, false) if near_b.is_empty() => (b, a, false),
+        _ => return None,
+    };
+
+    // Fast waagerechte/senkrechte Pfeile (≤ 5°) gerade ausrichten
+    let dir = end - start;
+    let angle_deg = dir.y.atan2(dir.x).to_degrees().abs();
+    let end = if angle_deg < 5.0 || (angle_deg - 180.0).abs() < 5.0 {
+        Vec2::new(end.x, start.y)
+    } else if (angle_deg - 90.0).abs() < 5.0 {
+        Vec2::new(start.x, end.y)
+    } else {
+        end
+    };
+    Some(RecognizedShape::Arrow { start, end, double })
+}
+
 /// Anteil der gesamten Richtungsänderung, der bei einem Vieleck in der Nähe der Ecken liegen muss.
 const POLYGON_TURNING_AT_CORNERS: f32 = 0.7;
 /// Umgebung einer Ecke als Anteil des Umfangs.
@@ -930,21 +1200,7 @@ fn corner_turning_ratio(points: &[Vec2], corners: &[Vec2]) -> Option<f32> {
     if total_len < 1e-3 || corners.is_empty() {
         return None;
     }
-    // Gleichmäßig neu abtasten (120 Punkte entlang der Bogenlänge)
-    const SAMPLES: usize = 120;
-    let step = total_len / SAMPLES as f32;
-    let mut resampled = vec![points[0]];
-    let mut carried = 0.0;
-    for w in points.windows(2) {
-        let (a, b) = (w[0], w[1]);
-        let seg = (b - a).length();
-        let mut pos = step - carried;
-        while pos <= seg {
-            resampled.push(a + (b - a) * (pos / seg));
-            pos += step;
-        }
-        carried = seg - (pos - step);
-    }
+    let resampled = resample_path(points, 120);
     // Richtungen über einen Abstand von 3 Punkten, um das Zittern zu glätten
     const W: usize = 3;
     if resampled.len() < 2 * W + 2 {
@@ -1177,9 +1433,10 @@ pub fn detect_shape(points: &[StylusSample]) -> Option<RecognizedShape> {
         },
         &|| best_closed.clone(),
         &|| detect_polygon(&pts),
+        // Pfeil vor Koordinatensystem und Gerade: Ein Pfeil ist eine Gerade mit Widerhaken
+        &|| detect_arrow(&pts),
         &|| detect_coordinate_system(&pts),
         &|| detect_line(&pts),
-        &|| None,
     ];
     candidates
         .iter()
@@ -1229,8 +1486,12 @@ pub fn shape_fit_error(points: &[Vec2], shape: &RecognizedShape) -> Option<f32> 
 }
 
 /// Beschreibt die Form den Strich gut genug, um ihn zu ersetzen?
+/// Pfeile sind ausgenommen: Ihre Erkennung prüft die Struktur (Schaft, Widerhaken auf beiden
+/// Seiten) bereits streng, und gezeichnete Widerhaken weichen naturgemäß von der sauberen
+/// Spitze ab.
 fn shape_describes_stroke(points: &[Vec2], shape: &RecognizedShape) -> bool {
-    shape_fit_error(points, shape).is_some_and(|err| err <= SHAPE_MAX_FIT_ERROR)
+    matches!(shape, RecognizedShape::Arrow { .. })
+        || shape_fit_error(points, shape).is_some_and(|err| err <= SHAPE_MAX_FIT_ERROR)
 }
 
 /// Größte zulässige Abweichung (RMS) eines Rechtecks vom Strich, als Anteil der Diagonale.
@@ -1248,7 +1509,7 @@ const CLOSED_SHAPE_GOOD_FIT: f32 = 0.04;
 const RECTANGLE_WEIGHT: f32 = 1.0 / 1.5;
 const CIRCLE_WEIGHT: f32 = 1.5;
 
-/// Wählt unter Kreis, Dreieck, Rechteck, Raute und Vieleck die Form, deren Kontur am besten passt,
+/// Wählt unter Kreis, Ellipse, Dreieck, Rechteck, Raute und Vieleck die Form, deren Kontur am besten passt,
 /// und liefert sie mit ihrer Abweichung (RMS).
 fn best_closed_shape(pts: &[Vec2]) -> Option<(f32, RecognizedShape)> {
     // Gewichtete Abweichung: Bei fast gleicher Passung gewinnt die wahrscheinlichere Absicht.
@@ -1259,6 +1520,7 @@ fn best_closed_shape(pts: &[Vec2]) -> Option<(f32, RecognizedShape)> {
     };
     [
         fit(detect_circle(pts), CIRCLE_WEIGHT),
+        fit(detect_ellipse(pts), 1.0),
         fit(detect_triangle(pts), 1.0),
         fit(detect_rectangle(pts), RECTANGLE_WEIGHT),
         fit(detect_rhombus(pts), 1.0),
@@ -1284,6 +1546,28 @@ pub fn arrow_head(tip: Vec2, dir: Vec2, half_w: f32, line_len: f32) -> (Vec2, Ve
     let base = tip - dir * len;
     let normal = Vec2::new(-dir.y, dir.x);
     (base, base + normal * half_width, base - normal * half_width)
+}
+
+/// Punkt auf einer Ellipse zum Parameter `t` (Bogenmaß).
+pub fn ellipse_point(center: Vec2, radius_x: f32, radius_y: f32, rotation: f32, t: f32) -> Vec2 {
+    let (sin, cos) = rotation.sin_cos();
+    let local = Vec2::new(t.cos() * radius_x, t.sin() * radius_y);
+    center + Vec2::new(local.x * cos - local.y * sin, local.x * sin + local.y * cos)
+}
+
+/// Näherungsweiser Abstand eines Punktes zum Rand einer Ellipse: Abstand zum Mittelpunkt
+/// minus Ellipsenradius in dieser Richtung (für die Formauswahl genau genug).
+fn ellipse_distance(p: Vec2, center: Vec2, radius_x: f32, radius_y: f32, rotation: f32) -> f32 {
+    let d = p - center;
+    let (sin, cos) = rotation.sin_cos();
+    let local = Vec2::new(d.x * cos + d.y * sin, -d.x * sin + d.y * cos);
+    let scaled = Vec2::new(local.x / radius_x.max(1e-3), local.y / radius_y.max(1e-3));
+    let scaled_len = scaled.length();
+    if scaled_len < 1e-6 {
+        return radius_x.min(radius_y);
+    }
+    let radius_in_direction = local.length() / scaled_len;
+    (local.length() - radius_in_direction).abs()
 }
 
 /// Abstand eines Punktes zur Strecke `a`–`b`.
@@ -1316,6 +1600,14 @@ pub fn contour_rms(points: &[Vec2], shape: &RecognizedShape) -> Option<f32> {
             RecognizedShape::Circle { center, radius } => {
                 Some(((p - *center).length() - radius).abs())
             }
+            RecognizedShape::Ellipse {
+                center,
+                radius_x,
+                radius_y,
+                rotation,
+            } => Some(ellipse_distance(
+                p, *center, *radius_x, *radius_y, *rotation,
+            )),
             RecognizedShape::Triangle { corners } => Some(polygon_distance(p, corners)),
             RecognizedShape::Rectangle { corners } | RecognizedShape::Rhombus { corners } => {
                 Some(polygon_distance(p, corners))
@@ -1456,6 +1748,70 @@ pub fn shape_to_mesh(
                 });
             }
 
+            (samples, vertices)
+        }
+
+        RecognizedShape::Ellipse {
+            center,
+            radius_x,
+            radius_y,
+            rotation,
+        } => {
+            const SEGMENTS: usize = 96;
+            let outline: Vec<Vec2> = (0..SEGMENTS)
+                .map(|i| {
+                    let t = i as f32 / SEGMENTS as f32 * 2.0 * PI;
+                    ellipse_point(*center, *radius_x, *radius_y, *rotation, t)
+                })
+                .collect();
+            closed_polygon_to_mesh(&outline, half_w, color)
+        }
+
+        RecognizedShape::Arrow { start, end, double } => {
+            let shaft_len = (*end - *start).length();
+            let dir = (*end - *start).normalize_or_zero();
+            let end_head = arrow_head(*end, dir, half_w, shaft_len);
+            let start_head = arrow_head(*start, -dir, half_w, shaft_len);
+            // Der Schaft endet an der Basis der Spitze(n), damit diese spitz bleiben
+            let line_start = if *double { start_head.0 } else { *start };
+            let line_end = end_head.0;
+
+            let norm = Vec2::new(-dir.y, dir.x) * half_w;
+            let mut vertices = vec![
+                InkVertex::new(line_start.x + norm.x, line_start.y + norm.y, color),
+                InkVertex::new(line_start.x - norm.x, line_start.y - norm.y, color),
+                InkVertex::new(line_end.x + norm.x, line_end.y + norm.y, color),
+                InkVertex::new(line_end.x - norm.x, line_end.y - norm.y, color),
+            ];
+            let mut heads = vec![(*end, end_head)];
+            if *double {
+                heads.push((*start, start_head));
+            }
+            for (tip, (_, left, right)) in &heads {
+                let last_v = *vertices.last().unwrap();
+                let tip_v = InkVertex::new(tip.x, tip.y, color);
+                vertices.push(last_v);
+                vertices.push(tip_v);
+                vertices.push(tip_v);
+                vertices.push(InkVertex::new(left.x, left.y, color));
+                vertices.push(InkVertex::new(right.x, right.y, color));
+            }
+
+            // Abtastpunkte als zusammenhängender Linienzug: (Spitze am Start,) Schaft, Spitze am Ende
+            let sample = |p: Vec2| StylusSample {
+                position: p,
+                pressure: 0.5,
+                timestamp: 0.0,
+            };
+            let mut samples = Vec::new();
+            if *double {
+                let (_, l, r) = start_head;
+                samples.extend([*start, l, r, *start].map(sample));
+            }
+            let steps = ((shaft_len / 5.0).ceil() as usize).max(2);
+            samples.extend((0..=steps).map(|i| sample(start.lerp(*end, i as f32 / steps as f32))));
+            let (_, l, r) = end_head;
+            samples.extend([l, r, *end].map(sample));
             (samples, vertices)
         }
 
@@ -2087,6 +2443,9 @@ mod tests {
         match shape {
             Some(RecognizedShape::Line { .. }) => "Linie",
             Some(RecognizedShape::Circle { .. }) => "Kreis",
+            Some(RecognizedShape::Ellipse { .. }) => "Ellipse",
+            Some(RecognizedShape::Arrow { double: false, .. }) => "Pfeil",
+            Some(RecognizedShape::Arrow { double: true, .. }) => "Doppelpfeil",
             Some(RecognizedShape::Rectangle { .. }) => "Rechteck",
             Some(RecognizedShape::Triangle { .. }) => "Dreieck",
             Some(RecognizedShape::Rhombus { .. }) => "Raute",
@@ -2291,6 +2650,57 @@ mod tests {
                 add("Oval 0.6".to_string(), kind(&detect_shape(&pts)));
             }
         }
+        // Pfeile in einem Zug: Schaft, dann Widerhaken links, zurück zur Spitze, Widerhaken rechts
+        for &len in &[200.0_f32, 400.0, 700.0] {
+            for &angle in &[0.0_f32, 30.0, 135.0, 260.0] {
+                for &barb_deg in &[25.0_f32, 40.0, 55.0] {
+                    for &seed in &seeds[..3] {
+                        let dir = Vec2::from_angle(angle.to_radians());
+                        let tail = c - dir * len * 0.5;
+                        let tip = c + dir * len * 0.5;
+                        let barb = |side: f32| {
+                            tip + Vec2::from_angle(side * barb_deg.to_radians()).rotate(-dir)
+                                * len
+                                * 0.15
+                        };
+                        let single = [tail, tip, barb(1.0), tip, barb(-1.0)];
+                        add(
+                            format!("Pfeil {barb_deg}°"),
+                            kind(&detect_shape(&freehand(&single, false, seed))),
+                        );
+                        let barb_tail = |side: f32| {
+                            tail + Vec2::from_angle(side * barb_deg.to_radians()).rotate(dir)
+                                * len
+                                * 0.15
+                        };
+                        let double = [
+                            barb_tail(1.0),
+                            tail,
+                            barb_tail(-1.0),
+                            tail,
+                            tip,
+                            barb(1.0),
+                            tip,
+                            barb(-1.0),
+                        ];
+                        add(
+                            format!("Doppelpfeil {barb_deg}°"),
+                            kind(&detect_shape(&freehand(&double, false, seed))),
+                        );
+                    }
+                }
+                // Gerade bleibt Gerade
+                let dir = Vec2::from_angle(angle.to_radians());
+                add(
+                    "Linie".to_string(),
+                    kind(&detect_shape(&freehand(
+                        &[c - dir * len * 0.5, c + dir * len * 0.5],
+                        false,
+                        0.3,
+                    ))),
+                );
+            }
+        }
         // Freiformen, die KEIN Rechteck/Kreis werden sollen
         for &seed in &seeds {
             let star: Vec<Vec2> = (0..10)
@@ -2352,8 +2762,19 @@ mod tests {
         for group in stats.keys() {
             let expected = if group.starts_with("Rechteck") {
                 Some("Rechteck")
-            } else if group == "Kreis/Ellipse 1" || group == "Kreis/Ellipse 0.8" {
+            } else if group == "Kreis/Ellipse 1" {
                 Some("Kreis")
+            } else if group == "Kreis/Ellipse 0.8"
+                || group == "Kreis/Ellipse 0.6"
+                || group == "Oval 0.6"
+            {
+                Some("Ellipse")
+            } else if group.starts_with("Pfeil") {
+                Some("Pfeil")
+            } else if group.starts_with("Doppelpfeil") {
+                Some("Doppelpfeil")
+            } else if group.starts_with("Linie") {
+                Some("Linie")
             } else if group == "Dreieck" {
                 Some("Dreieck")
             } else if group.starts_with("Vieleck") {
@@ -2367,7 +2788,7 @@ mod tests {
             if let Some(kind) = expected {
                 let (hits, total) = count(group, kind);
                 // Achteck/Sechseck und leicht ovale Kreise sind von Hand kaum zu unterscheiden
-                let min_share = if group.starts_with("Vieleck") || group == "Kreis/Ellipse 0.8" {
+                let min_share = if group.starts_with("Vieleck") {
                     0.9
                 } else {
                     1.0
@@ -2450,5 +2871,98 @@ mod tests {
                 "X-Achse ragt in die Spitze: {p:?}"
             );
         }
+    }
+
+    #[test]
+    fn test_arrow_negative_cases() {
+        let c = Vec2::new(1000.0, 1400.0);
+        // T-Ende: Querbalken im rechten Winkel ist kein Pfeil
+        let t_shape = [
+            c - Vec2::new(300.0, 0.0),
+            c + Vec2::new(300.0, 0.0),
+            c + Vec2::new(300.0, 60.0),
+            c + Vec2::new(300.0, -60.0),
+        ];
+        assert_ne!(
+            kind(&detect_shape(&freehand(&t_shape, false, 0.4))),
+            "Pfeil"
+        );
+        // Zickzack ist kein Pfeil
+        let zigzag: Vec<Vec2> = (0..8)
+            .map(|i| c + Vec2::new(i as f32 * 80.0, if i % 2 == 0 { 0.0 } else { 60.0 }))
+            .collect();
+        let got = kind(&detect_shape(&freehand(&zigzag, false, 0.4)));
+        assert!(
+            got != "Pfeil" && got != "Doppelpfeil",
+            "Zickzack erkannt als {got}"
+        );
+    }
+
+    #[test]
+    fn test_ellipse_and_arrow_transforms_and_mesh() {
+        let mut ellipse = RecognizedShape::Ellipse {
+            center: Vec2::new(500.0, 500.0),
+            radius_x: 200.0,
+            radius_y: 100.0,
+            rotation: 0.0,
+        };
+        ellipse.translate(Vec2::new(10.0, 20.0));
+        ellipse.rotate(Vec2::new(510.0, 520.0), std::f32::consts::FRAC_PI_2);
+        ellipse.scale(Vec2::new(510.0, 520.0), Vec2::new(2.0, 1.0));
+        if let RecognizedShape::Ellipse {
+            center,
+            radius_x,
+            radius_y,
+            rotation,
+        } = ellipse
+        {
+            assert!((center - Vec2::new(510.0, 520.0)).length() < 1e-3);
+            // Nach 90°-Drehung liegt die lange Achse senkrecht; die x-Skalierung trifft die kurze
+            assert!((radius_x - 200.0).abs() < 1e-2, "radius_x {radius_x}");
+            assert!((radius_y - 200.0).abs() < 1e-2, "radius_y {radius_y}");
+            assert!((rotation.abs() - std::f32::consts::FRAC_PI_2).abs() < 1e-3);
+        } else {
+            panic!("Ellipse erwartet");
+        }
+
+        // Ellipsen-Mesh: alle Abtastpunkte liegen auf der Ellipse
+        let shape = RecognizedShape::Ellipse {
+            center: Vec2::new(0.0, 0.0),
+            radius_x: 300.0,
+            radius_y: 120.0,
+            rotation: 0.5,
+        };
+        let (samples, vertices) = shape_to_mesh(&shape, 5.0, [0.0; 4]);
+        assert!(!vertices.is_empty());
+        let pts: Vec<Vec2> = samples.iter().map(|s| s.position).collect();
+        assert!(contour_rms(&pts, &shape).unwrap() < 1.0);
+
+        // Pfeil: Verschieben/Skalieren bewegt beide Enden, Mesh hat Spitze(n)
+        let mut arrow = RecognizedShape::Arrow {
+            start: Vec2::new(0.0, 0.0),
+            end: Vec2::new(100.0, 0.0),
+            double: true,
+        };
+        arrow.translate(Vec2::new(5.0, 5.0));
+        arrow.scale(Vec2::new(5.0, 5.0), Vec2::new(2.0, 2.0));
+        assert_eq!(
+            arrow,
+            RecognizedShape::Arrow {
+                start: Vec2::new(5.0, 5.0),
+                end: Vec2::new(205.0, 5.0),
+                double: true
+            }
+        );
+        let (_, single_v) = shape_to_mesh(
+            &RecognizedShape::Arrow {
+                start: Vec2::ZERO,
+                end: Vec2::new(300.0, 0.0),
+                double: false,
+            },
+            5.0,
+            [0.0; 4],
+        );
+        let (_, double_v) = shape_to_mesh(&arrow, 5.0, [0.0; 4]);
+        assert_eq!(double_v.len(), single_v.len() + 5, "zweite Spitze fehlt");
     }
 }
