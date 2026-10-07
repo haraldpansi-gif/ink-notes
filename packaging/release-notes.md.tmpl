@@ -3,6 +3,7 @@
 Latenzoptimierte Vektor-Notizbuch- und Inking-Anwendung für Linux (Zorin OS 18 / Ubuntu 24.04).
 
 ### Highlights:
+- **Neue Formen**: Ellipsen sowie in einem Zug gezeichnete Pfeile und Doppelpfeile werden erkannt (Dateiformat-Version 3: ältere Versionen öffnen solche Notizbücher nicht)
 - **Stabiler Start**: Kein Absturz mehr, wenn die Grafikkarte nicht nutzbar ist (z. B. fehlende Rechte auf /dev/dri); Software-Renderer als Ausweichlösung und verständliche Fehlermeldung
 - **WSL (WSLg)**: Läuft unter WSL automatisch über X11 statt Wayland, da WSLg die Wayland-Verbindung abbricht; übersteuerbar mit `INK_NOTES_DISPLAY=x11|wayland`
 - **Wichtige Fehlerbehebung**: Nach einem Neustart auf einer späteren Seite konnte Weiterschreiben den bisherigen Inhalt dieser Seite überschreiben (betrifft v0.2.3 – v0.3.2)
@@ -12,7 +13,7 @@ Latenzoptimierte Vektor-Notizbuch- und Inking-Anwendung für Linux (Zorin OS 18 
 - **Aktive Stylus-Unterstützung (Lazarite / MPP / AES)**: Natives Wayland-Tablet-Protokoll mit präziser Druck- und Neigungserfassung
 - **Touchscreen Multi-Touch**: Stufenloses 2-Finger Pinch-to-Zoom und Panning mit umschaltbarem Finger-Zeichenmodus
 - **Zwei-Stufen-Inking-Modell**: Kausale Echtzeit-Glättung via 1€-Filter & akausale Ecken-Erhaltung (Corner Preservation)
-- **Geometrie- und Formerkennung**: Geraden, Rechtecke, Kreise, Dreiecke, Rauten, Vielecke & Koordinatensysteme (Draw-and-Hold); Rechtecke werden zuverlässig erkannt, Freiformen bleiben unverändert
+- **Geometrie- und Formerkennung**: Geraden, Pfeile & Doppelpfeile, Rechtecke, Kreise, Ellipsen, Dreiecke, Rauten, Vielecke & Koordinatensysteme mit spitzen Pfeilspitzen (Draw-and-Hold); Freiformen bleiben unverändert
 - **Multi-Dokumenten-Manager**: Unbegrenzte Notizbücher mit atomarem Autosave, Papierkorb und fortlaufenden Backups
 - **Datensicherheit**: Versioniertes Dateiformat mit Migration, Quarantäne beschädigter Seiten, Schutz vor Doppelöffnung und Crash-getestetem Speichern
 - **In-App Updater**: Automatische Versionsprüfung und sichere Atomar-Aktualisierung via Gitea Releases – mit Pflicht-Signaturprüfung (Minisign) und durchgängigem HTTPS
