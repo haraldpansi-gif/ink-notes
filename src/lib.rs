@@ -8,6 +8,7 @@ pub mod export;
 pub mod filter;
 pub mod geometry;
 pub mod history;
+pub mod platform;
 pub mod selection;
 pub mod settings;
 pub mod spline;

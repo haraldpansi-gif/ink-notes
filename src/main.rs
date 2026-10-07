@@ -9,8 +9,9 @@ use winit::{
     event::{
         ElementState, Event, KeyEvent, MouseButton, MouseScrollDelta, TouchPhase, WindowEvent,
     },
-    event_loop::{ControlFlow, EventLoop},
+    event_loop::{ControlFlow, EventLoopBuilder},
     keyboard::{Key, ModifiersState, NamedKey},
+    platform::{wayland::EventLoopBuilderExtWayland, x11::EventLoopBuilderExtX11},
     window::{Window, WindowBuilder},
 };
 
@@ -20,6 +21,7 @@ use ink_notes::canvas::CanvasState;
 use ink_notes::document::{Notebook, PageBackground};
 use ink_notes::export::{self, export_notebook_to_pdf, ExportStrategy};
 use ink_notes::geometry::{self, RecognizedShape};
+use ink_notes::platform::{self, DisplayBackend};
 use ink_notes::selection::{
     render_selection_overlay, DragMode, SelectionHandleHit, SelectionState,
 };
@@ -137,7 +139,20 @@ fn commit_stroke_to_notebook(
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let event_loop = EventLoop::new()?;
+    // Anzeigesystem wählen: Unter WSL (WSLg) bricht Wayland ab, X11 (Xwayland) läuft stabil
+    let mut event_loop_builder = EventLoopBuilder::new();
+    match platform::display_backend_from_env() {
+        DisplayBackend::X11 => {
+            eprintln!("[Anzeige] Verwende X11 (unter WSL Standard; übersteuerbar mit INK_NOTES_DISPLAY=wayland)");
+            event_loop_builder.with_x11();
+        }
+        DisplayBackend::Wayland => {
+            eprintln!("[Anzeige] Verwende Wayland (INK_NOTES_DISPLAY=wayland)");
+            event_loop_builder.with_wayland();
+        }
+        DisplayBackend::Automatic => {}
+    }
+    let event_loop = event_loop_builder.build()?;
     let window = Arc::new(
         WindowBuilder::new()
             .with_title("ink-notes (Latenzoptimiertes Linux-Inking)")
