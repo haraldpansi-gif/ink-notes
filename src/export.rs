@@ -564,7 +564,9 @@ fn render_pdf_raster(
         Ok(image) => {
             let rgb = image
                 .pixels
-                .chunks_exact(4)
+                .as_chunks::<4>()
+                .0
+                .iter()
                 .flat_map(|px| [px[0], px[1], px[2]])
                 .collect();
             rgb_xobject(image.width, image.height, rgb)

@@ -615,7 +615,7 @@ impl Page {
             let d = s.distance_to_point(pos);
             if d <= max_dist {
                 let key = (s.is_image(), d);
-                if best.map_or(true, |(_, best_key)| key < best_key) {
+                if best.is_none_or(|(_, best_key)| key < best_key) {
                     best = Some((s, key));
                 }
             }

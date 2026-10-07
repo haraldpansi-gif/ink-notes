@@ -238,7 +238,7 @@ impl ImageLayer {
         let too_small = self
             .vertex_buffer
             .as_ref()
-            .map_or(true, |b| b.size() < bytes.len() as u64);
+            .is_none_or(|b| b.size() < bytes.len() as u64);
         if too_small {
             self.vertex_buffer = Some(device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("Image Vertex Buffer"),
