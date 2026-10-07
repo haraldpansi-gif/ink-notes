@@ -409,7 +409,13 @@ pub fn detect_circle(points: &[Vec2]) -> Option<RecognizedShape> {
     }
 }
 
-/// 3. Rechteckerkennung: Geschlossener Pfad mit 4 dominanten Ecken (~90° +/- 18°).
+/// 3. Rechteckerkennung: kleinstes umschließendes Rechteck eines geschlossenen Pfads.
+///
+/// Statt Ecken über eine grobe Linienvereinfachung zu suchen (das schnitt bei kleinen oder
+/// zittrigen Strichen die Ecken ab), wird über alle Drehwinkel das Rechteck mit der
+/// kleinsten Fläche gesucht. Einzelne Ausreißer (z. B. ein Überstrich am Schluss) zählen
+/// nicht: Die Ausdehnung wird über das 2.–98. Perzentil der Punkte bestimmt. Angenommen
+/// wird das Rechteck nur, wenn es den Strich eng beschreibt.
 pub fn detect_rectangle(points: &[Vec2]) -> Option<RecognizedShape> {
     if points.len() < 8 {
         return None;
@@ -429,78 +435,99 @@ pub fn detect_rectangle(points: &[Vec2]) -> Option<RecognizedShape> {
         return None;
     }
 
-    // RDP mit ca. 5% Pfadlänge als Toleranz
-    let epsilon = (total_len * 0.05).clamp(8.0, 45.0);
-    let simplified = ramer_douglas_peucker(points, epsilon);
+    // Ausdehnung entlang einer Achse (Winkel in Grad), robust gegen Ausreißer
+    let extent = |angle_deg: f32| -> (f32, f32, f32, f32) {
+        let (sin, cos) = angle_deg.to_radians().sin_cos();
+        let mut along: Vec<f32> = points.iter().map(|p| p.x * cos + p.y * sin).collect();
+        let mut across: Vec<f32> = points.iter().map(|p| -p.x * sin + p.y * cos).collect();
+        along.sort_by(f32::total_cmp);
+        across.sort_by(f32::total_cmp);
+        let lo = points.len() * 2 / 100;
+        let hi = points.len() - 1 - lo;
+        (along[lo], along[hi], across[lo], across[hi])
+    };
+    let area = |angle_deg: f32| {
+        let (a0, a1, b0, b1) = extent(angle_deg);
+        (a1 - a0) * (b1 - b0)
+    };
 
-    let corners: Vec<Vec2> =
-        if simplified.len() == 5 && (simplified[0] - simplified[4]).length() < epsilon * 2.5 {
-            simplified[0..4].to_vec()
-        } else if simplified.len() == 4 {
-            simplified
-        } else if simplified.len() > 4 {
-            // Suche die 4 markantesten Ecken (stärkste Richtungsänderung)
-            extract_k_corners(&simplified, 4)?
-        } else {
-            return None;
-        };
+    // Grobsuche in 1°-Schritten, dann Feinsuche in 0,1°-Schritten um das Optimum
+    let mut best_angle = (0..90)
+        .map(|d| d as f32)
+        .min_by(|a, b| area(*a).total_cmp(&area(*b)))
+        .unwrap_or(0.0);
+    best_angle = (-10..=10)
+        .map(|d| best_angle + d as f32 * 0.1)
+        .min_by(|a, b| area(*a).total_cmp(&area(*b)))
+        .unwrap_or(best_angle);
 
-    if corners.len() != 4 {
+    // Nahe an der Achsenparallelität (≤ 10°) gerade ausrichten
+    let rem = best_angle.rem_euclid(90.0);
+    if rem <= RECTANGLE_AXIS_SNAP_DEG || rem >= 90.0 - RECTANGLE_AXIS_SNAP_DEG {
+        best_angle = 0.0;
+    }
+
+    let (mut a0, mut a1, mut b0, mut b1) = extent(best_angle);
+    let (sin, cos) = best_angle.to_radians().sin_cos();
+    let dir = Vec2::new(cos, sin);
+    let norm = Vec2::new(-sin, cos);
+
+    // Kanten in die Mitte des Zitterns legen: Jeder Punkt gehört zur nächsten Kante, die Kante
+    // wandert auf den Median ihrer Punkte (das umschließende Rechteck liegt außen an den Spitzen)
+    let mut sides: [Vec<f32>; 4] = Default::default();
+    for p in points {
+        let (u, v) = (p.dot(dir), p.dot(norm));
+        let d = [
+            (u - a0).abs(),
+            (u - a1).abs(),
+            (v - b0).abs(),
+            (v - b1).abs(),
+        ];
+        let side = (0..4).min_by(|&i, &j| d[i].total_cmp(&d[j])).unwrap_or(0);
+        sides[side].push(if side < 2 { u } else { v });
+    }
+    let median = |values: &mut Vec<f32>, fallback: f32| {
+        if values.is_empty() {
+            return fallback;
+        }
+        values.sort_by(f32::total_cmp);
+        values[values.len() / 2]
+    };
+    a0 = median(&mut sides[0], a0);
+    a1 = median(&mut sides[1], a1);
+    b0 = median(&mut sides[2], b0);
+    b1 = median(&mut sides[3], b1);
+
+    let corners = [
+        dir * a0 + norm * b0,
+        dir * a1 + norm * b0,
+        dir * a1 + norm * b1,
+        dir * a0 + norm * b1,
+    ];
+
+    // Alle vier Ecken müssen gezeichnet sein: Ovale und Kreise schneiden die Ecken ab
+    // (Kreis: ~20 % der Seitenlänge), sonst würden flache Ellipsen zu Rechtecken
+    let shorter_side = (a1 - a0).abs().min((b1 - b0).abs());
+    let corner_reached = |corner: Vec2| {
+        points
+            .iter()
+            .map(|p| (*p - corner).length())
+            .fold(f32::INFINITY, f32::min)
+            <= RECTANGLE_CORNER_REACH * shorter_side
+    };
+    if !corners.iter().all(|c| corner_reached(*c)) {
         return None;
     }
 
-    // Innenwinkel prüfen: 4 Kanten müssen jeweils ~90° (+/- 18°) zueinander stehen
-    let c = [corners[0], corners[1], corners[2], corners[3]];
-    for i in 0..4 {
-        let prev = c[(i + 3) % 4];
-        let curr = c[i];
-        let next = c[(i + 1) % 4];
-        let v1 = (prev - curr).normalize_or_zero();
-        let v2 = (next - curr).normalize_or_zero();
-        let dot = v1.dot(v2).clamp(-1.0, 1.0);
-        let angle_deg = dot.acos().to_degrees();
-        if !(72.0..=108.0).contains(&angle_deg) {
-            return None;
-        }
+    // Nur annehmen, wenn das Rechteck den Strich eng beschreibt (sonst wären beliebige
+    // geschlossene Kritzeleien „Rechtecke“)
+    let rect = RecognizedShape::Rectangle { corners };
+    let err = contour_rms(points, &rect)?;
+    let diagonal = (corners[2] - corners[0]).length();
+    if err > RECTANGLE_MAX_RMS * diagonal {
+        return None;
     }
-
-    // Saubere rechtwinklige Ausrichtung
-    let aabb = Aabb::from_points(&c);
-    let center = (c[0] + c[1] + c[2] + c[3]) * 0.25;
-
-    let e0 = c[1] - c[0];
-    let angle_deg = e0.y.atan2(e0.x).to_degrees().abs();
-
-    // Nahe an Achsenparallelität (< 12°)?
-    let snapped_corners = if angle_deg < 12.0
-        || (angle_deg - 90.0).abs() < 12.0
-        || (angle_deg - 180.0).abs() < 12.0
-    {
-        [
-            Vec2::new(aabb.min.x, aabb.min.y),
-            Vec2::new(aabb.max.x, aabb.min.y),
-            Vec2::new(aabb.max.x, aabb.max.y),
-            Vec2::new(aabb.min.x, aabb.max.y),
-        ]
-    } else {
-        // Rotiertes Rechteck mit exakt 90° Kanten
-        let dir = e0.normalize_or_zero();
-        let norm = Vec2::new(-dir.y, dir.x);
-        let w = 0.5 * ((c[1] - c[0]).length() + (c[2] - c[3]).length());
-        let h = 0.5 * ((c[2] - c[1]).length() + (c[3] - c[0]).length());
-        let hw = w * 0.5;
-        let hh = h * 0.5;
-        [
-            center - dir * hw - norm * hh,
-            center + dir * hw - norm * hh,
-            center + dir * hw + norm * hh,
-            center - dir * hw + norm * hh,
-        ]
-    };
-
-    Some(RecognizedShape::Rectangle {
-        corners: snapped_corners,
-    })
+    Some(rect)
 }
 
 /// Rastet einen Winkel in Radiant an horizontalen, vertikalen oder diagonalen Achsen ein.
@@ -543,12 +570,15 @@ pub fn extract_k_corners(points: &[Vec2], k: usize) -> Option<Vec<Vec2>> {
         let next = points[(i + 1) % n];
         let v1 = (prev - curr).normalize_or_zero();
         let v2 = (next - curr).normalize_or_zero();
-        // Dot product: je kleiner, desto spitzer/schärfer die Richtungsänderung
+        // Skalarprodukt der Richtungen zu den Nachbarn: −1 = gerader Verlauf (180°),
+        // 0 = rechter Winkel, gegen +1 = spitze Ecke. Je größer, desto markanter die Ecke.
         let dot = v1.dot(v2).clamp(-1.0, 1.0);
         scored.push((i, dot));
     }
 
-    scored.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+    // Markanteste Ecken zuerst (größtes Skalarprodukt). Vorher war die Sortierung
+    // umgekehrt und wählte die geradesten Punkte.
+    scored.sort_by(|a, b| b.1.total_cmp(&a.1));
     let mut selected_indices: Vec<usize> = scored.iter().take(k).map(|&(idx, _)| idx).collect();
     selected_indices.sort_unstable();
 
@@ -1035,23 +1065,27 @@ pub fn detect_shape(points: &[StylusSample]) -> Option<RecognizedShape> {
     }
     let pts: Vec<Vec2> = points.iter().map(|s| s.position).collect();
 
-    // 1. Zuerst 3D-Kantenmodelle prüfen (Oktaeder / Doppelpyramide)
-    if let Some(octa) = detect_octahedron(&pts) {
-        return Some(octa);
-    }
+    // 1. Geschlossene Formen: Kreis, Dreieck, Rechteck und Raute konkurrieren; gewählt wird
+    //    die Form, deren Kontur am besten zu den gezeichneten Punkten passt. Eine feste
+    //    Reihenfolge genügt nicht: Auch Quadrate schwanken nur um ~10 % im Abstand zum
+    //    Mittelpunkt und bestünden den Kreistest, und die Dreieckserkennung akzeptiert
+    //    gestreckte Rechtecke.
+    let best_closed = best_closed_shape(&pts);
 
-    // 2. Geschlossene Formen prüfen (Kreis, Dreieck, Rechteck, Raute, Polygon/Oktagon)
-    if let Some(circle) = detect_circle(&pts) {
-        return Some(circle);
+    // 2. 3D-Kantenmodelle (Oktaeder / Doppelpyramide) nur, wenn keine geschlossene Form den
+    //    Strich gut beschreibt: Ein Oktaeder enthält innere Kanten, die weit von jedem Umriss
+    //    entfernt liegen. Ein sauber passender Umriss ist daher kein Oktaeder.
+    let closed_fits_well = best_closed.as_ref().is_some_and(|(err, _)| {
+        let aabb = Aabb::from_points(&pts);
+        *err <= CLOSED_SHAPE_GOOD_FIT * (aabb.max - aabb.min).length()
+    });
+    if !closed_fits_well {
+        if let Some(octa) = detect_octahedron(&pts) {
+            return Some(octa);
+        }
     }
-    if let Some(triangle) = detect_triangle(&pts) {
-        return Some(triangle);
-    }
-    if let Some(rect) = detect_rectangle(&pts) {
-        return Some(rect);
-    }
-    if let Some(rhombus) = detect_rhombus(&pts) {
-        return Some(rhombus);
+    if let Some((_, shape)) = best_closed {
+        return Some(shape);
     }
     if let Some(polygon) = detect_polygon(&pts) {
         return Some(polygon);
@@ -1066,6 +1100,91 @@ pub fn detect_shape(points: &[StylusSample]) -> Option<RecognizedShape> {
     }
 
     None
+}
+
+/// Größte zulässige Abweichung (RMS) eines Rechtecks vom Strich, als Anteil der Diagonale.
+const RECTANGLE_MAX_RMS: f32 = 0.05;
+/// Jede Rechteckecke muss bis auf diesen Anteil der kürzeren Seite gezeichnet sein.
+const RECTANGLE_CORNER_REACH: f32 = 0.15;
+/// Rechtecke, die höchstens so viele Grad schief sind, werden achsenparallel ausgerichtet.
+const RECTANGLE_AXIS_SNAP_DEG: f32 = 10.0;
+
+/// Anteil der Diagonale, bis zu dem die Abweichung einer geschlossenen Form als „passt gut“ gilt.
+const CLOSED_SHAPE_GOOD_FIT: f32 = 0.04;
+/// Ein Rechteck gewinnt gegen die freiere Raute, solange seine Abweichung höchstens um
+/// diesen Faktor größer ist (sonst würden Quadrate meist als Raute erkannt).
+const RECTANGLE_OVER_RHOMBUS: f32 = 1.5;
+
+/// Wählt unter Kreis, Dreieck, Rechteck und Raute die Form, deren Kontur am besten passt,
+/// und liefert sie mit ihrer Abweichung (RMS).
+fn best_closed_shape(pts: &[Vec2]) -> Option<(f32, RecognizedShape)> {
+    let fit = |shape: Option<RecognizedShape>| {
+        shape.and_then(|s| contour_rms(pts, &s).map(|err| (err, s)))
+    };
+    let rectangle = fit(detect_rectangle(pts));
+    let mut rhombus = fit(detect_rhombus(pts));
+    // Rechte Winkel sind die wahrscheinlichere Absicht: Passt das Rechteck fast so gut wie
+    // die Raute, wird die Raute verworfen
+    if let (Some((rect_err, _)), Some((rhombus_err, _))) = (&rectangle, &rhombus) {
+        if *rect_err <= RECTANGLE_OVER_RHOMBUS * *rhombus_err {
+            rhombus = None;
+        }
+    }
+    [
+        fit(detect_circle(pts)),
+        fit(detect_triangle(pts)),
+        rectangle,
+        rhombus,
+    ]
+    .into_iter()
+    .flatten()
+    .min_by(|a, b| a.0.total_cmp(&b.0))
+}
+
+/// Abstand eines Punktes zur Strecke `a`–`b`.
+fn segment_distance(p: Vec2, a: Vec2, b: Vec2) -> f32 {
+    let ab = b - a;
+    let len_sq = ab.length_squared();
+    if len_sq < 1e-9 {
+        return (p - a).length();
+    }
+    let t = ((p - a).dot(ab) / len_sq).clamp(0.0, 1.0);
+    (p - (a + ab * t)).length()
+}
+
+/// Abstand eines Punktes zum Rand eines geschlossenen Polygons.
+fn polygon_distance(p: Vec2, corners: &[Vec2]) -> f32 {
+    (0..corners.len())
+        .map(|i| segment_distance(p, corners[i], corners[(i + 1) % corners.len()]))
+        .fold(f32::INFINITY, f32::min)
+}
+
+/// Mittlere quadratische Abweichung (RMS) der Strichpunkte von der Kontur einer erkannten
+/// geschlossenen Form. Je kleiner, desto besser beschreibt die Form den Strich.
+/// Für offene Formen (Linie, Koordinatensystem, Oktaeder) gibt es keinen Wert.
+pub fn contour_rms(points: &[Vec2], shape: &RecognizedShape) -> Option<f32> {
+    if points.is_empty() {
+        return None;
+    }
+    let distance = |p: Vec2| -> Option<f32> {
+        match shape {
+            RecognizedShape::Circle { center, radius } => {
+                Some(((p - *center).length() - radius).abs())
+            }
+            RecognizedShape::Triangle { corners } => Some(polygon_distance(p, corners)),
+            RecognizedShape::Rectangle { corners } | RecognizedShape::Rhombus { corners } => {
+                Some(polygon_distance(p, corners))
+            }
+            RecognizedShape::Polygon { vertices } => Some(polygon_distance(p, vertices)),
+            _ => None,
+        }
+    };
+    let mut sum_sq = 0.0;
+    for &p in points {
+        let d = distance(p)?;
+        sum_sq += d * d;
+    }
+    Some((sum_sq / points.len() as f32).sqrt())
 }
 
 /// Erzeugt ein gleichmäßiges Triangle-Strip-Mesh für ein geschlossenes Polygon (Dreieck, Rechteck, Raute, N-Eck).
@@ -1736,5 +1855,333 @@ mod tests {
         } else {
             panic!("Falscher Formtyp erkannt");
         }
+    }
+
+    /// Bildet einen Freihandstrich entlang eines Umrisses nach: Punkte alle ~6 Einheiten
+    /// (0,6 mm), seitliches Zittern um ±4 Einheiten und ein nicht ganz exakter Schluss.
+    fn freehand(outline: &[Vec2], closed: bool, seed: f32) -> Vec<StylusSample> {
+        let mut path = outline.to_vec();
+        if closed {
+            path.push(outline[0]);
+        }
+        let mut samples = Vec::new();
+        let mut i = 0usize;
+        for w in path.windows(2) {
+            let (a, b) = (w[0], w[1]);
+            let len = (b - a).length();
+            let dir = (b - a).normalize_or_zero();
+            let normal = Vec2::new(-dir.y, dir.x);
+            let steps = (len / 6.0).ceil().max(1.0) as usize;
+            for k in 0..steps {
+                let t = k as f32 / steps as f32;
+                let jitter =
+                    (i as f32 * 0.9 + seed).sin() * 3.0 + (i as f32 * 2.3 + seed).cos() * 1.0;
+                samples.push(StylusSample {
+                    position: a + (b - a) * t + normal * jitter,
+                    pressure: 0.5,
+                    timestamp: i as f64 * 0.008,
+                });
+                i += 1;
+            }
+        }
+        if closed {
+            // Strich endet knapp vor dem Startpunkt (2 % des Umfangs)
+            let keep = samples.len() - samples.len() / 50;
+            samples.truncate(keep);
+        }
+        samples
+    }
+
+    fn rect_outline(center: Vec2, w: f32, h: f32, angle_deg: f32) -> Vec<Vec2> {
+        let (s, c) = angle_deg.to_radians().sin_cos();
+        let rot = |v: Vec2| center + Vec2::new(v.x * c - v.y * s, v.x * s + v.y * c);
+        vec![
+            rot(Vec2::new(-w / 2.0, -h / 2.0)),
+            rot(Vec2::new(w / 2.0, -h / 2.0)),
+            rot(Vec2::new(w / 2.0, h / 2.0)),
+            rot(Vec2::new(-w / 2.0, h / 2.0)),
+        ]
+    }
+
+    fn circle_outline(center: Vec2, rx: f32, ry: f32) -> Vec<Vec2> {
+        (0..72)
+            .map(|i| {
+                let a = i as f32 / 72.0 * std::f32::consts::TAU;
+                center + Vec2::new(a.cos() * rx, a.sin() * ry)
+            })
+            .collect()
+    }
+
+    fn kind(shape: &Option<RecognizedShape>) -> &'static str {
+        match shape {
+            Some(RecognizedShape::Line { .. }) => "Linie",
+            Some(RecognizedShape::Circle { .. }) => "Kreis",
+            Some(RecognizedShape::Rectangle { .. }) => "Rechteck",
+            Some(RecognizedShape::Triangle { .. }) => "Dreieck",
+            Some(RecognizedShape::Rhombus { .. }) => "Raute",
+            Some(RecognizedShape::Polygon { .. }) => "Polygon",
+            Some(RecognizedShape::CoordinateSystem { .. }) => "Koordinatensystem",
+            Some(RecognizedShape::Octahedron { .. }) => "Oktaeder",
+            None => "nichts",
+        }
+    }
+
+    #[test]
+    fn test_detect_shape_freehand_classification() {
+        let c = Vec2::new(1000.0, 1400.0);
+        let cases: Vec<(&str, Vec<StylusSample>, &str)> = vec![
+            (
+                "Quadrat 40 mm",
+                freehand(&rect_outline(c, 400.0, 400.0, 0.0), true, 0.3),
+                "Rechteck",
+            ),
+            (
+                "Quadrat 15 mm",
+                freehand(&rect_outline(c, 150.0, 150.0, 0.0), true, 1.1),
+                "Rechteck",
+            ),
+            (
+                "Quadrat 60 mm",
+                freehand(&rect_outline(c, 600.0, 600.0, 0.0), true, 2.0),
+                "Rechteck",
+            ),
+            (
+                "Rechteck 60×30 mm",
+                freehand(&rect_outline(c, 600.0, 300.0, 0.0), true, 0.7),
+                "Rechteck",
+            ),
+            (
+                "Rechteck 40×30 mm",
+                freehand(&rect_outline(c, 400.0, 300.0, 0.0), true, 1.7),
+                "Rechteck",
+            ),
+            (
+                "Quadrat gedreht 20°",
+                freehand(&rect_outline(c, 400.0, 400.0, 20.0), true, 0.5),
+                "Rechteck",
+            ),
+            (
+                "Kreis r = 20 mm",
+                freehand(&circle_outline(c, 200.0, 200.0), true, 0.9),
+                "Kreis",
+            ),
+            (
+                "Kreis r = 8 mm",
+                freehand(&circle_outline(c, 80.0, 80.0), true, 1.3),
+                "Kreis",
+            ),
+            (
+                "Kreis r = 35 mm",
+                freehand(&circle_outline(c, 350.0, 350.0), true, 2.4),
+                "Kreis",
+            ),
+            (
+                "Dreieck",
+                freehand(
+                    &[
+                        c + Vec2::new(0.0, -250.0),
+                        c + Vec2::new(230.0, 170.0),
+                        c + Vec2::new(-230.0, 170.0),
+                    ],
+                    true,
+                    0.4,
+                ),
+                "Dreieck",
+            ),
+            (
+                "Linie",
+                freehand(&[c, c + Vec2::new(500.0, 120.0)], false, 0.2),
+                "Linie",
+            ),
+        ];
+        let mut wrong = Vec::new();
+        for (name, samples, expected) in &cases {
+            let got = kind(&detect_shape(samples));
+            if got != *expected {
+                wrong.push(format!("{name}: erwartet {expected}, erkannt {got}"));
+            }
+        }
+        assert!(wrong.is_empty(), "Falsch erkannt:\n{}", wrong.join("\n"));
+    }
+
+    /// Erkennt Rechtecke, Kreise und Dreiecke in vielen Größen, Seitenverhältnissen, Drehungen
+    /// und Zittermustern; Ellipsen und Freiformen dürfen nie zu Rechtecken werden.
+    #[test]
+    fn test_detect_shape_robustness() {
+        let c = Vec2::new(1000.0, 1400.0);
+        let mut stats: std::collections::BTreeMap<String, std::collections::BTreeMap<&str, usize>> =
+            Default::default();
+        let mut add = |group: String, got: &'static str| {
+            *stats.entry(group).or_default().entry(got).or_default() += 1;
+        };
+        let seeds = [0.1_f32, 0.6, 1.2, 1.9, 2.7, 3.4, 4.2, 5.0];
+        for &size in &[150.0_f32, 250.0, 400.0, 600.0] {
+            for &aspect in &[1.0_f32, 0.75, 0.5] {
+                for &angle in &[0.0_f32, 15.0, 30.0, 45.0] {
+                    for &seed in &seeds {
+                        let pts =
+                            freehand(&rect_outline(c, size, size * aspect, angle), true, seed);
+                        add(format!("Rechteck {aspect}"), kind(&detect_shape(&pts)));
+                    }
+                }
+            }
+        }
+        for &r in &[60.0_f32, 120.0, 200.0, 350.0] {
+            for &ry in &[1.0_f32, 0.8, 0.6] {
+                for &seed in &seeds {
+                    let pts = freehand(&circle_outline(c, r, r * ry), true, seed);
+                    add(format!("Kreis/Ellipse {ry}"), kind(&detect_shape(&pts)));
+                }
+            }
+        }
+        for &size in &[150.0_f32, 300.0, 500.0] {
+            for &seed in &seeds {
+                let tri = [
+                    c + Vec2::new(0.0, -size),
+                    c + Vec2::new(size * 0.9, size * 0.7),
+                    c + Vec2::new(-size * 0.9, size * 0.7),
+                ];
+                add(
+                    "Dreieck".to_string(),
+                    kind(&detect_shape(&freehand(&tri, true, seed))),
+                );
+            }
+        }
+        // Realistischere Rechtecke: abgerundete Ecken, schiefe Kanten, Überstrich am Schluss
+        for &size in &[150.0_f32, 300.0, 500.0] {
+            for &aspect in &[1.0_f32, 0.6] {
+                for &seed in &seeds {
+                    let (w, h) = (size, size * aspect);
+                    // Abgerundete Ecken (Radius 10 % der kürzeren Seite)
+                    let r = 0.1 * w.min(h);
+                    let mut rounded = Vec::new();
+                    for (cx, cy, a0) in [
+                        (w / 2.0 - r, -h / 2.0 + r, -90.0_f32),
+                        (w / 2.0 - r, h / 2.0 - r, 0.0),
+                        (-w / 2.0 + r, h / 2.0 - r, 90.0),
+                        (-w / 2.0 + r, -h / 2.0 + r, 180.0),
+                    ] {
+                        for k in 0..=6 {
+                            let a = (a0 + k as f32 * 15.0).to_radians();
+                            rounded.push(c + Vec2::new(cx + a.cos() * r, cy + a.sin() * r));
+                        }
+                    }
+                    add(
+                        format!("Rechteck rund {aspect}"),
+                        kind(&detect_shape(&freehand(&rounded, true, seed))),
+                    );
+                    // Schiefe Kanten: Ecken um bis zu 6 % verschoben
+                    let mut skew = rect_outline(c, w, h, 0.0);
+                    for (i, p) in skew.iter_mut().enumerate() {
+                        let f = 0.06 * w.min(h);
+                        *p += Vec2::new(
+                            ((i as f32 + seed) * 2.1).sin() * f,
+                            ((i as f32 + seed) * 1.3).cos() * f,
+                        );
+                    }
+                    add(
+                        format!("Rechteck schief {aspect}"),
+                        kind(&detect_shape(&freehand(&skew, true, seed))),
+                    );
+                    // Überstrich: Strich läuft 8 % des Umfangs über den Start hinaus
+                    let mut over = freehand(&rect_outline(c, w, h, 0.0), true, seed);
+                    let extra: Vec<StylusSample> =
+                        over.iter().take(over.len() * 8 / 100).copied().collect();
+                    over.extend(extra);
+                    add(
+                        format!("Rechteck Überstrich {aspect}"),
+                        kind(&detect_shape(&over)),
+                    );
+                }
+            }
+        }
+        // Freiformen, die KEIN Rechteck/Kreis werden sollen
+        for &seed in &seeds {
+            let star: Vec<Vec2> = (0..10)
+                .map(|i| {
+                    let a = i as f32 / 10.0 * std::f32::consts::TAU;
+                    let r = if i % 2 == 0 { 300.0 } else { 120.0 };
+                    c + Vec2::new(a.cos() * r, a.sin() * r)
+                })
+                .collect();
+            add(
+                "Freiform Stern".into(),
+                kind(&detect_shape(&freehand(&star, true, seed))),
+            );
+            let cloud: Vec<Vec2> = (0..72)
+                .map(|i| {
+                    let a = i as f32 / 72.0 * std::f32::consts::TAU;
+                    let r = 250.0 * (1.0 + 0.3 * (3.0 * a).sin());
+                    c + Vec2::new(a.cos() * r, a.sin() * r)
+                })
+                .collect();
+            add(
+                "Freiform Wolke".into(),
+                kind(&detect_shape(&freehand(&cloud, true, seed))),
+            );
+            let heart: Vec<Vec2> = (0..72)
+                .map(|i| {
+                    let t = i as f32 / 72.0 * std::f32::consts::TAU;
+                    let x = 16.0 * t.sin().powi(3);
+                    let y = -(13.0 * t.cos()
+                        - 5.0 * (2.0 * t).cos()
+                        - 2.0 * (3.0 * t).cos()
+                        - (4.0 * t).cos());
+                    c + Vec2::new(x, y) * 18.0
+                })
+                .collect();
+            add(
+                "Freiform Herz".into(),
+                kind(&detect_shape(&freehand(&heart, true, seed))),
+            );
+            let spiral: Vec<Vec2> = (0..120)
+                .map(|i| {
+                    let a = i as f32 / 30.0 * std::f32::consts::TAU;
+                    let r = 40.0 + i as f32 * 2.5;
+                    c + Vec2::new(a.cos() * r, a.sin() * r)
+                })
+                .collect();
+            add(
+                "Freiform Spirale".into(),
+                kind(&detect_shape(&freehand(&spiral, false, seed))),
+            );
+        }
+        let count = |group: &str, kind: &str| -> (usize, usize) {
+            let m = stats
+                .get(group)
+                .unwrap_or_else(|| panic!("Gruppe {group} fehlt"));
+            (m.get(kind).copied().unwrap_or(0), m.values().sum())
+        };
+        let mut problems = Vec::new();
+        for group in stats.keys() {
+            let expected = if group.starts_with("Rechteck") {
+                Some("Rechteck")
+            } else if group == "Kreis/Ellipse 1" || group == "Kreis/Ellipse 0.8" {
+                Some("Kreis")
+            } else if group == "Dreieck" {
+                Some("Dreieck")
+            } else {
+                None
+            };
+            if let Some(kind) = expected {
+                let (hits, total) = count(group, kind);
+                if hits != total {
+                    problems.push(format!(
+                        "{group}: {hits}/{total} als {kind} erkannt ({:?})",
+                        stats[group]
+                    ));
+                }
+            } else {
+                // Flache Ellipsen und Freiformen: niemals Rechteck
+                let (rects, _) = count(group, "Rechteck");
+                if rects > 0 {
+                    problems.push(format!(
+                        "{group}: {rects}× fälschlich Rechteck ({:?})",
+                        stats[group]
+                    ));
+                }
+            }
+        }
+        assert!(problems.is_empty(), "{}", problems.join("\n"));
     }
 }
