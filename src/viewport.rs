@@ -8,7 +8,7 @@ use glam::{Mat4, Vec2, Vec4};
 
 /// Minimaler und maximaler Zoomfaktor.
 pub const MIN_ZOOM: f32 = 0.25;
-pub const MAX_ZOOM: f32 = 5.0;
+pub const MAX_ZOOM: f32 = 10.0;
 
 /// Abstand zwischen zwei Seiten in der durchgehenden Ansicht (8 mm).
 pub const PAGE_GAP: f32 = 8.0 * UNITS_PER_MM;

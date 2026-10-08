@@ -911,6 +911,15 @@ impl CanvasState {
             self.image_layer
                 .forget_textures(|key| key.starts_with(TEXT_KEY_PREFIX));
         }
+        // Importierte PDF-Seiten schärfer rendern, sobald die Standardauflösung vergrößert würde
+        let page_long_edge = crate::document::PAGE_HEIGHT.max(crate::document::PAGE_WIDTH)
+            * self.viewport.page_width
+            / crate::document::PAGE_WIDTH
+            * self.camera.zoom;
+        self.image_layer.set_pdf_pixels(
+            (page_long_edge > crate::pdf_doc::DISPLAY_RENDER_PIXELS as f32 * 1.25)
+                .then_some(crate::pdf_doc::ZOOMED_RENDER_PIXELS),
+        );
         let specs = &self.text_specs;
         self.image_layer
             .prepare(&self.device, &self.queue, &mut |key| match specs.get(key) {
@@ -1309,12 +1318,12 @@ fn text_key(text: &crate::text::TextBox, color: [f32; 4]) -> String {
 }
 
 /// Auflösung der Texttexturen für `screen_px_per_unit` Bildschirmpixel je Seiteneinheit:
-/// auf Viertel-Zweierpotenzen aufgerundet (⅛ bis 4). So wird nicht bei jedem Zoomschritt neu
+/// auf Viertel-Zweierpotenzen aufgerundet (⅛ bis 8). So wird nicht bei jedem Zoomschritt neu
 /// gerastert, und die Textur ist höchstens ein Fünftel größer als dargestellt – stärker
 /// verkleinert wirkt die dünne Schrift blass.
 fn text_resolution(screen_px_per_unit: f32) -> f32 {
     let steps = (screen_px_per_unit.max(1e-3).log2() * 4.0).ceil();
-    2.0_f32.powf(steps / 4.0).clamp(0.125, 4.0)
+    2.0_f32.powf(steps / 4.0).clamp(0.125, 8.0)
 }
 
 #[cfg(test)]
@@ -1328,7 +1337,7 @@ mod tests {
             assert!(r >= px - 1e-4 && r < px * 1.2 + 1e-4, "{px} → {r}");
         }
         assert_eq!(text_resolution(0.27), text_resolution(0.28));
-        assert_eq!(text_resolution(100.0), 4.0);
+        assert_eq!(text_resolution(100.0), 8.0);
     }
 
     #[test]

@@ -16,6 +16,19 @@ use crate::assets::RgbaImage;
 
 /// Längste Kante einer gerenderten Seite für die Anzeige in Pixeln (A4 ≈ 220 dpi).
 pub const DISPLAY_RENDER_PIXELS: u32 = 2560;
+/// Längste Kante beim starken Hineinzoomen (A4 ≈ 440 dpi).
+pub const ZOOMED_RENDER_PIXELS: u32 = 5120;
+
+/// Texturschlüssel einer PDF-Seite: `<asset>#<seite>`, gerendert mit mehr als
+/// [`DISPLAY_RENDER_PIXELS`] als `<asset>#<seite>@<pixel>`. Liefert Asset, Seite und Pixel.
+pub fn parse_page_key(key: &str) -> Option<(&str, usize, u32)> {
+    let (asset, rest) = key.split_once('#')?;
+    let (page, pixels) = match rest.split_once('@') {
+        Some((page, pixels)) => (page, pixels.parse().ok()?),
+        None => (rest, DISPLAY_RENDER_PIXELS),
+    };
+    Some((asset, page.parse().ok()?, pixels))
+}
 /// Größte Seitenzahl, die importiert wird.
 pub const MAX_IMPORT_PAGES: usize = 2000;
 
@@ -88,6 +101,7 @@ struct RenderRequest {
     key: String,
     path: PathBuf,
     page: usize,
+    max_pixels: u32,
 }
 
 /// Ergebnis eines Render-Auftrags.
@@ -121,7 +135,7 @@ impl PdfRenderService {
                             .map(|pdf| (request.path.clone(), pdf));
                     }
                     let result = match &open_pdf {
-                        Some((_, pdf)) => render_page(pdf, request.page, DISPLAY_RENDER_PIXELS),
+                        Some((_, pdf)) => render_page(pdf, request.page, request.max_pixels),
                         None => Err("PDF kann nicht geöffnet werden".into()),
                     };
                     if res_tx.send((request.key, result)).is_err() {
@@ -150,7 +164,7 @@ impl PdfRenderService {
         if self.ready.len() >= 2 {
             self.ready.clear();
         }
-        self.request(key, path, page);
+        self.request(key, path, page, DISPLAY_RENDER_PIXELS);
     }
 
     fn collect(&mut self) {
@@ -161,7 +175,7 @@ impl PdfRenderService {
     }
 
     /// Erteilt den Auftrag, falls noch keiner läuft. `false`, wenn der Thread beendet ist.
-    fn request(&mut self, key: &str, path: PathBuf, page: usize) -> bool {
+    fn request(&mut self, key: &str, path: PathBuf, page: usize, max_pixels: u32) -> bool {
         if !self.pending.insert(key.to_string()) {
             return true;
         }
@@ -169,6 +183,7 @@ impl PdfRenderService {
             key: key.to_string(),
             path,
             page,
+            max_pixels,
         };
         if self.requests.send(request).is_err() {
             self.pending.remove(key);
@@ -178,12 +193,19 @@ impl PdfRenderService {
     }
 
     /// Fertiges Ergebnis für `key` abholen; sonst den Auftrag (einmalig) erteilen und `None`.
-    pub fn take(&mut self, key: &str, path: PathBuf, page: usize) -> Option<RenderResult> {
+    /// Die Seite wird so gerendert, dass die längste Kante `max_pixels` lang ist.
+    pub fn take(
+        &mut self,
+        key: &str,
+        path: PathBuf,
+        page: usize,
+        max_pixels: u32,
+    ) -> Option<RenderResult> {
         self.collect();
         if let Some(result) = self.ready.remove(key) {
             return Some(result);
         }
-        if !self.request(key, path, page) {
+        if !self.request(key, path, page, max_pixels) {
             return Some(Err("PDF-Render-Thread beendet".into()));
         }
         None
@@ -272,13 +294,14 @@ pub(crate) mod tests {
         let mut service = PdfRenderService::new(move || {
             let _ = wake_tx.send(());
         });
-        assert!(service.take("a#0", path.clone(), 0).is_none());
+        let px = DISPLAY_RENDER_PIXELS;
+        assert!(service.take("a#0", path.clone(), 0, px).is_none());
         // Zweite Anfrage erteilt keinen weiteren Auftrag
-        assert!(service.take("a#0", path.clone(), 0).is_none());
+        assert!(service.take("a#0", path.clone(), 0, px).is_none());
         wake_rx
             .recv_timeout(std::time::Duration::from_secs(20))
             .unwrap();
-        let image = service.take("a#0", path.clone(), 0).unwrap().unwrap();
+        let image = service.take("a#0", path.clone(), 0, px).unwrap().unwrap();
         assert_eq!(image.width, DISPLAY_RENDER_PIXELS);
 
         // Vorab rendern: danach sofort verfügbar
@@ -286,6 +309,17 @@ pub(crate) mod tests {
         wake_rx
             .recv_timeout(std::time::Duration::from_secs(20))
             .unwrap();
-        assert!(service.take("a#0", path, 0).unwrap().is_ok());
+        assert!(service.take("a#0", path, 0, px).unwrap().is_ok());
+    }
+
+    #[test]
+    fn test_parse_page_key() {
+        assert_eq!(
+            parse_page_key("abc.pdf#3"),
+            Some(("abc.pdf", 3, DISPLAY_RENDER_PIXELS))
+        );
+        assert_eq!(parse_page_key("abc.pdf#3@5120"), Some(("abc.pdf", 3, 5120)));
+        assert_eq!(parse_page_key("abc.png"), None);
+        assert_eq!(parse_page_key("abc.pdf#x"), None);
     }
 }

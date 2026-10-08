@@ -91,6 +91,9 @@ pub struct ImageLayer {
     groups: Vec<Vec<(String, [glam::Vec2; 4])>>,
     vertex_buffer: Option<wgpu::Buffer>,
     vertices_dirty: bool,
+    /// Importierte PDF-Seiten in höherer Auflösung (längste Kante in Pixeln) anzeigen;
+    /// bis sie gerendert ist, bleibt die Standardauflösung sichtbar
+    pdf_pixels: Option<u32>,
 }
 
 impl ImageLayer {
@@ -170,6 +173,7 @@ impl ImageLayer {
             groups: vec![Vec::new()],
             vertex_buffer: None,
             vertices_dirty: false,
+            pdf_pixels: None,
         }
     }
 
@@ -194,6 +198,19 @@ impl ImageLayer {
         self.groups.iter().flatten()
     }
 
+    /// Auflösung importierter PDF-Seiten (`None`: Standard), z. B. beim Hineinzoomen.
+    pub fn set_pdf_pixels(&mut self, pixels: Option<u32>) {
+        self.pdf_pixels = pixels;
+    }
+
+    /// Schlüssel der anzuzeigenden Textur: PDF-Seiten ggf. in höherer Auflösung.
+    fn texture_key(&self, key: &str) -> String {
+        match self.pdf_pixels {
+            Some(pixels) if key.contains('#') => format!("{key}@{pixels}"),
+            _ => key.to_string(),
+        }
+    }
+
     /// Lädt fehlende Texturen und den Vertex-Puffer hoch. Vor jedem Zeichnen aufrufen;
     /// ohne Änderungen kostet das nichts.
     pub fn prepare(
@@ -204,9 +221,8 @@ impl ImageLayer {
     ) {
         let missing: Vec<String> = self
             .all_quads()
-            .map(|(key, _)| key)
-            .filter(|key| !self.textures.contains_key(*key))
-            .cloned()
+            .map(|(key, _)| self.texture_key(key))
+            .filter(|key| !self.textures.contains_key(key))
             .collect();
         for key in missing {
             if self.textures.contains_key(&key) {
@@ -230,7 +246,11 @@ impl ImageLayer {
 
         // Nicht mehr benötigte Texturen freigeben, wenn der Grafikspeicher knapp wird
         if self.texture_bytes > TEXTURE_CACHE_BYTES {
-            let used: HashSet<&String> = self.groups.iter().flatten().map(|(a, _)| a).collect();
+            // Die Standardauflösung bleibt als Ersatz, bis die höhere fertig ist
+            let used: HashSet<String> = self
+                .all_quads()
+                .flat_map(|(key, _)| [key.clone(), self.texture_key(key)])
+                .collect();
             self.textures.retain(|name, _| used.contains(name));
             self.texture_bytes = self.textures.values().map(|(_, b)| b).sum();
         }
@@ -279,7 +299,7 @@ impl ImageLayer {
     /// Fehlen noch Texturen sichtbarer Seiten (z. B. PDF-Seite im Hintergrund-Rendering)?
     pub fn is_waiting(&self) -> bool {
         self.all_quads()
-            .any(|(key, _)| !self.textures.contains_key(key))
+            .any(|(key, _)| !self.textures.contains_key(&self.texture_key(key)))
     }
 
     /// Zeichnet die Bilder einer Seite (Gruppe 0: aktuelle Seite). Bind Group 0 (Kamera der
@@ -298,7 +318,11 @@ impl ImageLayer {
         render_pass.set_pipeline(&self.pipeline);
         render_pass.set_vertex_buffer(0, buffer.slice(..));
         for (i, (asset, _)) in quads.iter().enumerate() {
-            let Some((bind_group, _)) = self.textures.get(asset) else {
+            let Some((bind_group, _)) = self
+                .textures
+                .get(&self.texture_key(asset))
+                .or_else(|| self.textures.get(asset))
+            else {
                 continue;
             };
             render_pass.set_bind_group(1, bind_group, &[]);

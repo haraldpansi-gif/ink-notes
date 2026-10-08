@@ -507,17 +507,19 @@ fn texture_for(
     assets: &AssetStore,
     pdf_renderer: &mut PdfRenderService,
 ) -> TextureSource {
-    let result = match key.split_once('#') {
-        Some((asset, page)) => {
-            let (Ok(path), Ok(page)) = (assets.path_of(asset), page.parse::<usize>()) else {
+    let result = match key.contains('#') {
+        true => {
+            let Some((Ok(path), page, max_pixels)) = ink_notes::pdf_doc::parse_page_key(key)
+                .map(|(asset, page, px)| (assets.path_of(asset), page, px))
+            else {
                 return TextureSource::Failed(format!("Ungültiger PDF-Verweis '{key}'"));
             };
-            match pdf_renderer.take(key, path, page) {
+            match pdf_renderer.take(key, path, page, max_pixels) {
                 Some(result) => result,
                 None => return TextureSource::Pending,
             }
         }
-        None => assets
+        false => assets
             .load_rgba(key, ink_notes::assets::MAX_DISPLAY_DIMENSION)
             .map_err(|e| e.to_string()),
     };
