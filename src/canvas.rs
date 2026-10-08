@@ -12,7 +12,9 @@ use std::sync::Arc;
 use winit::dpi::PhysicalSize;
 use winit::window::Window;
 
-use crate::background::{generate_background_mesh, generate_paper_quad, PaperTheme, PatternColor};
+use crate::background::{
+    generate_paper_quad, generate_pattern_quad, PaperTheme, PatternColor, PatternVertex,
+};
 use crate::document::{Page, PageBackground, PageViewport, Stroke, StylusSample};
 use crate::filter::OneEuroFilter;
 use crate::spline::{self, ControlPoint, SplineConfig};
@@ -150,8 +152,9 @@ struct NeighborPage {
     offset: glam::Vec2,
     camera_buffer: wgpu::Buffer,
     camera_bind_group: wgpu::BindGroup,
-    background_buffer: Option<wgpu::Buffer>,
-    background_vertex_count: u32,
+    /// Papier (Dreiecke) und Muster (Rechteck für `fs_pattern`)
+    paper_buffer: wgpu::Buffer,
+    pattern_buffer: Option<wgpu::Buffer>,
     vertex_buffer: Option<wgpu::Buffer>,
     stroke_ranges: Vec<Range<u32>>,
 }
@@ -187,9 +190,10 @@ pub struct CanvasState {
 
     // Statische Hintergrund-Geometrie
     pub paper_buffer: wgpu::Buffer,
+    /// Musterrechteck der aktuellen Seite (6 Ecken, leer bei blankem Papier)
     pub background_buffer: wgpu::Buffer,
-    pub background_vertex_capacity: usize,
     pub background_vertex_count: u32,
+    pattern_pipeline: wgpu::RenderPipeline,
     pub current_background: PageBackground,
     /// Papierfarbe der Anzeige
     pub paper_theme: PaperTheme,
@@ -246,7 +250,6 @@ pub struct CanvasState {
 impl CanvasState {
     const INITIAL_LIVE_CAPACITY: usize = 4096;
     const INITIAL_COMMITTED_CAPACITY: usize = 65536;
-    const INITIAL_BACKGROUND_CAPACITY: usize = 16384;
     pub const VIEWPORT_MARGIN: f32 = 24.0;
 
     /// Initialisiert den CanvasState für das übergebene Winit-Fenster.
@@ -475,18 +478,45 @@ impl CanvasState {
         queue.write_buffer(&paper_buffer, 0, bytemuck::cast_slice(&paper_quad));
 
         let current_background = PageBackground::Grid5mm;
-        let bg_mesh = generate_background_mesh(
+        let bg_mesh = generate_pattern_quad(
             current_background,
             paper_theme.pattern_color(),
             crate::document::A4_SIZE,
         );
         let background_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Background Mesh Buffer"),
-            size: (Self::INITIAL_BACKGROUND_CAPACITY * std::mem::size_of::<InkVertex>()) as u64,
+            label: Some("Pattern Quad Buffer"),
+            size: (6 * std::mem::size_of::<PatternVertex>()) as u64,
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
         queue.write_buffer(&background_buffer, 0, bytemuck::cast_slice(&bg_mesh));
+
+        // Karo, Linien und Punkte: pro Pixel im Shader berechnet
+        let pattern_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Pattern Pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: "vs_pattern",
+                buffers: &[PatternVertex::desc()],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: "fs_pattern",
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: config.format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState {
+                count: msaa_samples,
+                ..Default::default()
+            },
+            multiview: None,
+        });
 
         // 7. GPU-Puffer für Live- und Committed-Geometrie
         let live_vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -535,8 +565,8 @@ impl CanvasState {
             current_stroke_width_mm: 0.5,
             paper_buffer,
             background_buffer,
-            background_vertex_capacity: Self::INITIAL_BACKGROUND_CAPACITY,
             background_vertex_count: bg_mesh.len() as u32,
+            pattern_pipeline,
             current_background,
             paper_theme,
             adapt_ink: false,
@@ -838,23 +868,12 @@ impl CanvasState {
 
     /// Erzeugt das Muster für Hintergrund und Papierfarbe neu und lädt es auf die GPU.
     fn upload_background_mesh(&mut self) {
-        let mesh = generate_background_mesh(
+        let mesh = generate_pattern_quad(
             self.current_background,
             self.pattern.color(self.paper_theme),
             self.page_size,
         );
         self.background_vertex_count = mesh.len() as u32;
-
-        if mesh.len() > self.background_vertex_capacity {
-            self.background_vertex_capacity = mesh.len() * 2;
-            self.background_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("Background Mesh Buffer (Reallocated)"),
-                size: (self.background_vertex_capacity * std::mem::size_of::<InkVertex>()) as u64,
-                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
-        }
-
         if !mesh.is_empty() {
             self.queue
                 .write_buffer(&self.background_buffer, 0, bytemuck::cast_slice(&mesh));
@@ -962,20 +981,39 @@ impl CanvasState {
                 buffer
             })
         };
-        // Papier und Muster in einem Puffer (Nachbarseiten können anders groß sein)
-        let mut background = generate_paper_quad(self.paper_theme.paper_color(), page.size);
-        background.extend(generate_background_mesh(
+        // Eigenes Papier und Muster (Nachbarseiten können anders groß sein)
+        let paper = generate_paper_quad(self.paper_theme.paper_color(), page.size);
+        let pattern = generate_pattern_quad(
             page.background,
             self.pattern.color(self.paper_theme),
             page.size,
-        ));
+        );
+        let paper_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Neighbor Paper Buffer"),
+            size: std::mem::size_of_val(paper.as_slice()) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        self.queue
+            .write_buffer(&paper_buffer, 0, bytemuck::cast_slice(&paper));
+        let pattern_buffer = (!pattern.is_empty()).then(|| {
+            let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("Neighbor Pattern Buffer"),
+                size: std::mem::size_of_val(pattern.as_slice()) as u64,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            self.queue
+                .write_buffer(&buffer, 0, bytemuck::cast_slice(&pattern));
+            buffer
+        });
         NeighborPage {
             fingerprint,
             offset: glam::Vec2::ZERO,
             camera_buffer,
             camera_bind_group,
-            background_buffer: vertex_buffer_with("Neighbor Background Buffer", &background),
-            background_vertex_count: background.len() as u32,
+            paper_buffer,
+            pattern_buffer,
             vertex_buffer: vertex_buffer_with("Neighbor Strokes Buffer", &page.vertex_cache),
             stroke_ranges: page.stroke_ranges.clone(),
         }
@@ -1311,9 +1349,12 @@ impl CanvasState {
             for (i, neighbor) in self.neighbors.iter().enumerate() {
                 render_pass.set_bind_group(0, &neighbor.camera_bind_group, &[]);
                 render_pass.set_pipeline(&self.triangle_pipeline);
-                if let Some(buffer) = &neighbor.background_buffer {
+                render_pass.set_vertex_buffer(0, neighbor.paper_buffer.slice(..));
+                render_pass.draw(0..6, 0..1);
+                if let Some(buffer) = &neighbor.pattern_buffer {
+                    render_pass.set_pipeline(&self.pattern_pipeline);
                     render_pass.set_vertex_buffer(0, buffer.slice(..));
-                    render_pass.draw(0..neighbor.background_vertex_count, 0..1);
+                    render_pass.draw(0..6, 0..1);
                 }
                 self.image_layer.draw(&mut render_pass, i + 1);
                 if let Some(buffer) = &neighbor.vertex_buffer {
@@ -1337,6 +1378,7 @@ impl CanvasState {
 
             // 2. Hintergrundmuster (5mm-Gitter, liniert oder Punktraster mit Vertex-Farbe)
             if self.background_vertex_count > 0 {
+                render_pass.set_pipeline(&self.pattern_pipeline);
                 render_pass.set_vertex_buffer(0, self.background_buffer.slice(..));
                 render_pass.draw(0..self.background_vertex_count, 0..1);
             }

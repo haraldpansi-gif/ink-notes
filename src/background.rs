@@ -165,115 +165,70 @@ pub fn generate_paper_quad(color: [f32; 4], size: glam::Vec2) -> Vec<InkVertex> 
     ]
 }
 
-/// Fügt ein Quad (2 Dreiecke) zur Vertexliste hinzu.
-#[inline]
-fn push_quad(
-    vertices: &mut Vec<InkVertex>,
-    color: [f32; 4],
-    x_min: f32,
-    y_min: f32,
-    x_max: f32,
-    y_max: f32,
-) {
-    vertices.push(InkVertex::new(x_min, y_min, color));
-    vertices.push(InkVertex::new(x_max, y_min, color));
-    vertices.push(InkVertex::new(x_min, y_max, color));
-    vertices.push(InkVertex::new(x_min, y_max, color));
-    vertices.push(InkVertex::new(x_max, y_min, color));
-    vertices.push(InkVertex::new(x_max, y_max, color));
+/// Oberer und unterer Rand ohne Linien bei liniertem Papier (15 mm).
+pub const LINED_MARGIN: f32 = 150.0;
+
+/// Ecke des Musterrechtecks: Das Muster selbst berechnet der Fragment-Shader (`fs_pattern`)
+/// für jedes Bildschirmpixel. So liegen Linien und Punkte in jedem Zoom exakt gleichmäßig,
+/// sind mindestens ein Pixel breit und kantengeglättet – vorher gerasterte Haarlinien
+/// fielen je nach Lage auf das Pixelraster und wirkten unregelmäßig.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct PatternVertex {
+    /// Seitenkoordinate
+    pub position: [f32; 2],
+    pub color: [f32; 4],
+    /// Art (1 = Karo, 2 = Linien, 3 = Punkte), Abstand, Linienstärke, Punktgröße
+    pub params: [f32; 4],
+    /// Seitenbreite, Seitenhöhe, Rand oben/unten bei Linien, ungenutzt
+    pub bounds: [f32; 4],
 }
 
-/// Generiert das statische Vektor-Mesh für den gewählten Seitenhintergrund in `color` auf
-/// einem Blatt der Größe `size`.
-pub fn generate_background_mesh(
+impl PatternVertex {
+    const ATTRIBUTES: [wgpu::VertexAttribute; 4] = wgpu::vertex_attr_array![
+        0 => Float32x2,
+        1 => Float32x4,
+        2 => Float32x4,
+        3 => Float32x4
+    ];
+
+    pub fn desc() -> wgpu::VertexBufferLayout<'static> {
+        wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<PatternVertex>() as wgpu::BufferAddress,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &Self::ATTRIBUTES,
+        }
+    }
+}
+
+/// Rechteck über das ganze Blatt der Größe `size`, auf dem der Shader das Muster
+/// `background` in `color` zeichnet; leer bei blankem Papier.
+pub fn generate_pattern_quad(
     background: PageBackground,
     color: [f32; 4],
     size: glam::Vec2,
-) -> Vec<InkVertex> {
-    let (page_width, page_height) = (size.x, size.y);
-    match background {
-        PageBackground::Blank => Vec::new(),
-        PageBackground::Grid5mm => {
-            let mut vertices = Vec::with_capacity(1200);
-            let half_t = LINE_THICKNESS / 2.0;
-
-            // Vertikale Linien alle 5 mm
-            let mut x = GRID_5MM_SPACING;
-            while x < page_width {
-                push_quad(
-                    &mut vertices,
-                    color,
-                    x - half_t,
-                    0.0,
-                    x + half_t,
-                    page_height,
-                );
-                x += GRID_5MM_SPACING;
-            }
-
-            // Horizontale Linien alle 5 mm
-            let mut y = GRID_5MM_SPACING;
-            while y < page_height {
-                push_quad(
-                    &mut vertices,
-                    color,
-                    0.0,
-                    y - half_t,
-                    page_width,
-                    y + half_t,
-                );
-                y += GRID_5MM_SPACING;
-            }
-
-            vertices
-        }
-        PageBackground::Lined => {
-            let mut vertices = Vec::with_capacity(600);
-            let half_t = LINE_THICKNESS / 2.0;
-
-            // Oberer und unterer Randabstand (z. B. 15 mm)
-            let margin_top = 150.0;
-            let margin_bottom = 150.0;
-
-            let mut y = margin_top;
-            while y <= page_height - margin_bottom {
-                push_quad(
-                    &mut vertices,
-                    color,
-                    0.0,
-                    y - half_t,
-                    page_width,
-                    y + half_t,
-                );
-                y += LINED_SPACING;
-            }
-
-            vertices
-        }
-        PageBackground::DotGrid => {
-            let mut vertices = Vec::with_capacity(15000);
-            let half_d = DOT_SIZE / 2.0;
-
-            let mut y = GRID_5MM_SPACING;
-            while y < page_height {
-                let mut x = GRID_5MM_SPACING;
-                while x < page_width {
-                    push_quad(
-                        &mut vertices,
-                        color,
-                        x - half_d,
-                        y - half_d,
-                        x + half_d,
-                        y + half_d,
-                    );
-                    x += GRID_5MM_SPACING;
-                }
-                y += GRID_5MM_SPACING;
-            }
-
-            vertices
-        }
-    }
+) -> Vec<PatternVertex> {
+    let params = match background {
+        PageBackground::Blank => return Vec::new(),
+        PageBackground::Grid5mm => [1.0, GRID_5MM_SPACING, LINE_THICKNESS, DOT_SIZE],
+        PageBackground::Lined => [2.0, LINED_SPACING, LINE_THICKNESS, DOT_SIZE],
+        PageBackground::DotGrid => [3.0, GRID_5MM_SPACING, LINE_THICKNESS, DOT_SIZE],
+    };
+    let bounds = [size.x, size.y, LINED_MARGIN, 0.0];
+    let corner = |x: f32, y: f32| PatternVertex {
+        position: [x, y],
+        color,
+        params,
+        bounds,
+    };
+    vec![
+        corner(0.0, 0.0),
+        corner(size.x, 0.0),
+        corner(0.0, size.y),
+        corner(0.0, size.y),
+        corner(size.x, 0.0),
+        corner(size.x, size.y),
+    ]
 }
 
 #[cfg(test)]
@@ -323,32 +278,25 @@ mod tests {
     const PATTERN: [f32; 4] = [0.5, 0.5, 0.5, 1.0];
 
     #[test]
-    fn test_background_meshes() {
-        let blank = generate_background_mesh(PageBackground::Blank, PATTERN, A4_SIZE);
-        assert!(blank.is_empty());
-
-        let grid = generate_background_mesh(PageBackground::Grid5mm, PATTERN, A4_SIZE);
-        assert!(!grid.is_empty());
-        assert_eq!(
-            grid.len() % 6,
-            0,
-            "Muss ein Vielfaches von 6 Vertizes sein (Dreiecke)"
-        );
-
-        let lined = generate_background_mesh(PageBackground::Lined, PATTERN, A4_SIZE);
-        assert!(!lined.is_empty());
-        assert_eq!(lined.len() % 6, 0);
-
-        let dots = generate_background_mesh(PageBackground::DotGrid, PATTERN, A4_SIZE);
-        assert!(!dots.is_empty());
-        assert_eq!(dots.len() % 6, 0);
+    fn test_pattern_quads() {
+        assert!(generate_pattern_quad(PageBackground::Blank, PATTERN, A4_SIZE).is_empty());
+        for (background, kind) in [
+            (PageBackground::Grid5mm, 1.0),
+            (PageBackground::Lined, 2.0),
+            (PageBackground::DotGrid, 3.0),
+        ] {
+            let quad = generate_pattern_quad(background, PATTERN, A4_SIZE);
+            assert_eq!(quad.len(), 6);
+            assert!(quad
+                .iter()
+                .all(|v| v.params[0] == kind && v.color == PATTERN));
+            assert_eq!(quad[5].position, [PAGE_WIDTH, PAGE_HEIGHT]);
+            assert_eq!(quad[0].bounds[..2], [PAGE_WIDTH, PAGE_HEIGHT]);
+        }
     }
 
     #[test]
     fn test_background_mesh_uses_theme_color() {
-        let dark = PaperTheme::Black.pattern_color();
-        let mesh = generate_background_mesh(PageBackground::Lined, dark, A4_SIZE);
-        assert!(mesh.iter().all(|v| v.color == dark));
         let quad = generate_paper_quad(PaperTheme::Cream.paper_color(), A4_SIZE);
         assert!(quad
             .iter()
