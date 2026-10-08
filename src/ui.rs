@@ -2561,7 +2561,8 @@ pub fn render_ui(
                                 }
                             });
                             if ui
-                                .add_sized([ui.available_width(), 30.0], egui::Button::new("➕  Neue Seite anhängen"))
+                                .add_sized([ui.available_width(), 30.0], egui::Button::new("➕  Neue Seite einfügen"))
+                                .on_hover_text("Leere Seite direkt nach der aktuellen Seite")
                                 .clicked()
                             {
                                 actions.push(UiAction::AddPage);
@@ -2883,8 +2884,9 @@ pub fn render_ui(
                             if ui
                                 .add_sized(
                                     [ui.available_width(), 36.0],
-                                    egui::Button::new("➕  Neue Seite anhängen"),
+                                    egui::Button::new("➕  Neue Seite einfügen"),
                                 )
+                                .on_hover_text("Leere Seite direkt nach der aktuellen Seite")
                                 .clicked()
                             {
                                 actions.push(UiAction::AddPage);

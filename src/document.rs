@@ -1149,6 +1149,16 @@ impl Notebook {
         self.pages.len() - 1
     }
 
+    /// Fügt direkt nach der aktuellen Seite eine leere Seite mit dem angegebenen
+    /// Hintergrund ein (die aktuelle Seite bleibt aktuell) und gibt ihren Index zurück.
+    pub fn insert_page_after_current(&mut self, background: PageBackground) -> usize {
+        let id = self.next_page_id;
+        self.next_page_id += 1;
+        let index = (self.current_page_index + 1).min(self.pages.len());
+        self.pages.insert(index, Page::new(id, background));
+        index
+    }
+
     /// Durchgehende Ansicht: Reicht ein neuer Strich auf der letzten Seite bis in deren
     /// unteres Fünftel ([`AUTO_APPEND_ZONE`]), wird darunter eine leere Seite mit gleichem
     /// Hintergrund angehängt. `true`, wenn eine Seite angehängt wurde.
@@ -1807,6 +1817,27 @@ mod tests {
             12.0,
             EraserMode::Partial
         ));
+    }
+
+    #[test]
+    fn test_insert_page_after_current() {
+        let mut nb = Notebook::new();
+        nb.add_page(PageBackground::Lined);
+        nb.add_page(PageBackground::Lined);
+        let ids: Vec<u64> = nb.pages.iter().map(|p| p.id).collect();
+        nb.current_page_index = 1;
+        nb.pages[1].background = PageBackground::DotGrid;
+        let index = nb.insert_page_after_current(PageBackground::DotGrid);
+        assert_eq!(index, 2);
+        assert_eq!(nb.current_page_index, 1);
+        assert_eq!(nb.pages.len(), 4);
+        assert_eq!(nb.pages[0].id, ids[0]);
+        assert_eq!(nb.pages[1].id, ids[1]);
+        assert_eq!(nb.pages[3].id, ids[2], "alte Seite 3 ist jetzt Seite 4");
+        let new = &nb.pages[2];
+        assert!(!ids.contains(&new.id) && new.strokes.is_empty());
+        assert_eq!(new.background, PageBackground::DotGrid);
+        assert!(new.pdf_background.is_none());
     }
 
     #[test]

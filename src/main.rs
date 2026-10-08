@@ -2800,26 +2800,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     }
                                 }
                                 UiAction::AddPage => {
-                                    selection_state.clear();
+                                    // Leere Seite direkt nach der aktuellen (in PDFs: nach der Folie,
+                                    // auf der man gerade ist) und dorthin wechseln
                                     let bg = notebook.current_page().background;
-                                    notebook.add_page(bg);
-                                    manifest.current_page_index = notebook.current_page_index;
-                                    manifest.next_page_id = notebook.next_page_id;
-                                    manifest.pages = notebook
-                                        .pages
-                                        .iter()
-                                        .map(|p| storage::PageMeta {
-                                            id: p.id,
-                                            background: Some(p.background),
-                                            title: p.title.clone(),
-                                        })
-                                        .collect();
-                                    canvas.sync_page(notebook.current_page_mut());
+                                    let index = notebook.insert_page_after_current(bg);
                                     manifest.sync_from_notebook(&notebook);
-                                    autosave.mark_manifest_dirty(&manifest);
-                                    autosave.mark_dirty(&notebook, &mut manifest);
-                                    update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
-                                    window.request_redraw();
+                                    switch_to_page(
+                                        index,
+                                        false,
+                                        &mut canvas,
+                                        &mut notebook,
+                                        &mut manifest,
+                                        &mut autosave,
+                                        &storage_dir,
+                                        &mut selection_state,
+                                        &mut ui_state,
+                                        &window,
+                                    );
+                                    ui_state.set_export_message(format!("Seite {} eingefügt", index + 1));
                                 }
                                 UiAction::LoadAllPages => {
                                     // Für die Vorschaubilder der Seitenauswahl; Fehler werden wie beim
