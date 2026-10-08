@@ -73,6 +73,9 @@ pub struct StrokeData {
     /// Eingefügtes Bild (Name im Asset-Ordner); die Samples sind dann die vier Bildecken
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image: Option<String>,
+    /// Textfeld; die Samples sind dann die vier Ecken des Felds
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<crate::text::TextBox>,
 }
 
 impl From<&Stroke> for StrokeData {
@@ -86,6 +89,7 @@ impl From<&Stroke> for StrokeData {
             width: stroke.width,
             finalized: stroke.finalized,
             image: stroke.image.clone(),
+            text: stroke.text.clone(),
         }
     }
 }
@@ -100,6 +104,14 @@ impl StrokeData {
             .copied()
             .map(StylusSample::from)
             .collect();
+        if let (Some(text), [a, b, c, d, ..]) = (&self.text, stylus_samples.as_slice()) {
+            return Stroke::new_text(
+                self.id,
+                text.clone(),
+                [a.position, b.position, c.position, d.position],
+                self.color,
+            );
+        }
         if let Some(asset) = &self.image {
             if let [a, b, c, d, ..] = stylus_samples.as_slice() {
                 let mut stroke = Stroke::new_image(
@@ -153,7 +165,8 @@ impl StrokeData {
 ///   verlieren.
 /// - Version 5: importierte PDF-Seiten als Seitenhintergrund (`pdf_background`).
 /// - Version 6: Seitentitel (`title` in Seite und Manifest).
-pub const CURRENT_FORMAT_VERSION: u32 = 6;
+/// - Version 7: Textfelder (`text` am Strich).
+pub const CURRENT_FORMAT_VERSION: u32 = 7;
 
 /// Standardwert für ältere Dateien ohne explizite Formatversion (Legacy v0).
 pub fn legacy_format_version() -> u32 {
@@ -2477,6 +2490,39 @@ mod tests {
         assert!(image.vertices.is_empty());
         // Bilddatei liegt im Notizbuchordner
         assert!(dir.join("assets").join(&imported.asset).exists());
+    }
+
+    #[test]
+    fn test_text_boxes_round_trip_through_page_file() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let (mut notebook, mut manifest, dir) =
+            create_new_notebook(temp_dir.path(), "Mit Text").unwrap();
+        let text = crate::text::TextBox::new(
+            "Überschrift\n\tfn main() {}".into(),
+            42.0,
+            crate::text::TextFont::Mono,
+            900.0,
+        );
+        let corners = [
+            glam::Vec2::new(100.0, 100.0),
+            glam::Vec2::new(1000.0, 100.0),
+            glam::Vec2::new(1000.0, 220.0),
+            glam::Vec2::new(100.0, 220.0),
+        ];
+        notebook.current_page_mut().strokes.push(Stroke::new_text(
+            8,
+            text.clone(),
+            corners,
+            [0.15, 0.35, 0.85, 1.0],
+        ));
+        save_notebook(&dir, &notebook, &mut manifest).unwrap();
+
+        let (reloaded, _) = load_notebook(&dir).unwrap();
+        let stroke = &reloaded.current_page().strokes[0];
+        assert_eq!(stroke.text.as_ref(), Some(&text));
+        assert_eq!(stroke.object_corners(), Some(corners));
+        assert_eq!(stroke.color, [0.15, 0.35, 0.85, 1.0]);
+        assert!(stroke.is_text() && !stroke.is_image() && stroke.vertices.is_empty());
     }
 
     #[test]

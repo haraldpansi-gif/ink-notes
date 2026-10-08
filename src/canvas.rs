@@ -6,6 +6,7 @@
 //! - NDC-Transformation der 2D-Vektor-Meshes über Vertex-Shader-Uniforms.
 //! - Alpha-Blending (`wgpu::BlendState::ALPHA_BLENDING`).
 
+use std::collections::HashMap;
 use std::ops::Range;
 use std::sync::Arc;
 use winit::dpi::PhysicalSize;
@@ -186,6 +187,13 @@ pub struct CanvasState {
     pub paper_theme: PaperTheme,
     /// Dunkle Tinte auf dunklem Papier aufhellen
     pub adapt_ink: bool,
+    /// Textfelder der sichtbaren Seiten nach Texturschlüssel (für die Rasterung)
+    text_specs: HashMap<String, TextSpec>,
+    /// Gerade bearbeitetes Textfeld der aktuellen Seite: nicht zeichnen (die Bearbeitung
+    /// zeigt es)
+    hidden_text: Option<u64>,
+    /// Auflösung der Texttexturen in Pixeln je Seiteneinheit
+    text_resolution: f32,
 
     // Pipeline-Trennung: Live-Strich (aktiver Stroke)
     pub live_vertex_buffer: wgpu::Buffer,
@@ -491,6 +499,9 @@ impl CanvasState {
             current_background,
             paper_theme,
             adapt_ink: false,
+            text_specs: HashMap::new(),
+            hidden_text: None,
+            text_resolution: 1.0,
             live_vertex_buffer,
             live_vertex_capacity: Self::INITIAL_LIVE_CAPACITY,
             live_vertex_count: 0,
@@ -789,7 +800,8 @@ impl CanvasState {
         // Die aktuelle Seite kann sich jetzt ändern: als Nachbarseite später neu hochladen
         self.neighbors.retain(|n| n.fingerprint.page_id != page.id);
         self.set_background(page.background);
-        self.image_layer.set_quads(page_image_quads(page));
+        let quads = self.page_image_quads(page, self.hidden_text);
+        self.image_layer.set_quads(quads);
 
         self.committed_vertex_count = page.vertex_cache.len() as u32;
         self.committed_strokes = page.stroke_ranges.clone();
@@ -836,7 +848,7 @@ impl CanvasState {
                 bytemuck::cast_slice(&[self.camera_uniforms(offset)]),
             );
             self.neighbors.push(neighbor);
-            image_groups.push(page_image_quads(page));
+            image_groups.push(self.page_image_quads(page, None));
         }
         self.image_layer.set_neighbor_quads(image_groups);
     }
@@ -890,7 +902,74 @@ impl CanvasState {
         &mut self,
         load: &mut dyn FnMut(&str) -> crate::image_layer::TextureSource,
     ) {
-        self.image_layer.prepare(&self.device, &self.queue, load);
+        // Text schärfer rastern, sobald weiter hineingezoomt wird (und gröber beim Herauszoomen)
+        let resolution = text_resolution(
+            self.viewport.page_width / crate::document::PAGE_WIDTH * self.camera.zoom,
+        );
+        if resolution != self.text_resolution {
+            self.text_resolution = resolution;
+            self.image_layer
+                .forget_textures(|key| key.starts_with(TEXT_KEY_PREFIX));
+        }
+        let specs = &self.text_specs;
+        self.image_layer
+            .prepare(&self.device, &self.queue, &mut |key| match specs.get(key) {
+                Some(spec) => crate::image_layer::TextureSource::Ready(crate::text::rasterize(
+                    &spec.text,
+                    spec.color,
+                    resolution * spec.scale,
+                )),
+                None => load(key),
+            });
+        let layer = &self.image_layer;
+        self.text_specs.retain(|key, _| layer.uses(key));
+    }
+
+    /// Blendet das gerade bearbeitete Textfeld aus (wirksam ab dem nächsten `sync_page`).
+    pub fn set_hidden_text(&mut self, id: Option<u64>) {
+        self.hidden_text = id;
+    }
+
+    /// Bilder einer Seite für die Bildebene: zuerst die PDF-Seite, darüber die eingefügten
+    /// Bilder und Textfelder (außer `hidden`) in ihrer Reihenfolge.
+    fn page_image_quads(
+        &mut self,
+        page: &Page,
+        hidden: Option<u64>,
+    ) -> Vec<(String, [glam::Vec2; 4])> {
+        let adapt = self.adapt_ink && self.paper_theme.is_dark();
+        let mut quads: Vec<_> = page
+            .pdf_background
+            .iter()
+            .map(|pdf| (pdf.key(), pdf.corners()))
+            .collect();
+        for stroke in &page.strokes {
+            let Some(corners) = stroke.object_corners() else {
+                continue;
+            };
+            if let Some(asset) = &stroke.image {
+                quads.push((asset.clone(), corners));
+            } else if let Some(text) = &stroke.text {
+                if Some(stroke.id) == hidden {
+                    continue;
+                }
+                let color = if adapt {
+                    crate::background::adapt_ink_color(stroke.color)
+                } else {
+                    stroke.color
+                };
+                let key = text_key(text, color);
+                let scale = ((corners[1] - corners[0]).length() / text.wrap_width.max(text.size))
+                    .max((corners[3] - corners[0]).length() / text.layout().height());
+                self.text_specs.entry(key.clone()).or_insert(TextSpec {
+                    text: text.clone(),
+                    color,
+                    scale,
+                });
+                quads.push((key, corners));
+            }
+        }
+        quads
     }
 
     /// Wird noch eine PDF-Seite im Hintergrund gerendert?
@@ -1205,22 +1284,52 @@ impl CanvasState {
     }
 }
 
-/// Bilder einer Seite für die Bildebene: zuerst die PDF-Seite, darüber die eingefügten Bilder.
-fn page_image_quads(page: &Page) -> Vec<(String, [glam::Vec2; 4])> {
-    page.pdf_background
-        .iter()
-        .map(|pdf| (pdf.key(), pdf.corners()))
-        .chain(
-            page.strokes
-                .iter()
-                .filter_map(|s| Some((s.image.clone()?, s.image_corners()?))),
-        )
-        .collect()
+/// Zu rasterndes Textfeld.
+struct TextSpec {
+    text: crate::text::TextBox,
+    /// Angezeigte (ggf. aufgehellte) Farbe
+    color: [f32; 4],
+    /// Vergrößerung des Felds durch Skalieren der Auswahl
+    scale: f32,
+}
+
+/// Schlüssel der Texttexturen beginnen hiermit.
+const TEXT_KEY_PREFIX: &str = "text:";
+
+/// Texturschlüssel eines Textfelds: ändert sich mit Inhalt, Satz und Farbe.
+fn text_key(text: &crate::text::TextBox, color: [f32; 4]) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    text.content.hash(&mut hasher);
+    text.font.hash(&mut hasher);
+    for v in [text.size, text.wrap_width].into_iter().chain(color) {
+        v.to_bits().hash(&mut hasher);
+    }
+    format!("{TEXT_KEY_PREFIX}{:016x}", hasher.finish())
+}
+
+/// Auflösung der Texttexturen für `screen_px_per_unit` Bildschirmpixel je Seiteneinheit:
+/// auf Viertel-Zweierpotenzen aufgerundet (⅛ bis 4). So wird nicht bei jedem Zoomschritt neu
+/// gerastert, und die Textur ist höchstens ein Fünftel größer als dargestellt – stärker
+/// verkleinert wirkt die dünne Schrift blass.
+fn text_resolution(screen_px_per_unit: f32) -> f32 {
+    let steps = (screen_px_per_unit.max(1e-3).log2() * 4.0).ceil();
+    2.0_f32.powf(steps / 4.0).clamp(0.125, 4.0)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_text_resolution_is_quantized_and_never_below_screen() {
+        for px in [0.2_f32, 0.27, 0.5, 1.3, 3.9] {
+            let r = text_resolution(px);
+            assert!(r >= px - 1e-4 && r < px * 1.2 + 1e-4, "{px} → {r}");
+        }
+        assert_eq!(text_resolution(0.27), text_resolution(0.28));
+        assert_eq!(text_resolution(100.0), 4.0);
+    }
 
     #[test]
     fn test_choose_present_mode() {

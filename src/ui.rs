@@ -20,6 +20,7 @@ use crate::file_picker::{FilePicker, PickerKind};
 use crate::ruler::{Ruler, RulerHit};
 use crate::settings::{PressureCurve, SidebarSide};
 use crate::storage::NotebookSummary;
+use crate::text::{TextEditing, TextFont, TEXT_SIZES_PT};
 
 /// Aktives Werkzeug für das Zeichnen oder Bearbeiten.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -29,6 +30,8 @@ pub enum ActiveTool {
     Eraser,
     Shape,
     Select,
+    /// Textfelder schreiben und bearbeiten
+    Text,
 }
 
 impl ActiveTool {
@@ -39,6 +42,7 @@ impl ActiveTool {
             ActiveTool::Eraser => "Radierer (Eraser)",
             ActiveTool::Shape => "Formen (Shape)",
             ActiveTool::Select => "Auswahl / Lasso (Select)",
+            ActiveTool::Text => "Text (T)",
         }
     }
 
@@ -264,6 +268,12 @@ pub struct UiState {
     pub adapt_ink_colors: bool,
     /// Seiten hängen untereinander und werden durchgehend gescrollt
     pub continuous_scroll: bool,
+    /// Text-Werkzeug: Farbe, Schriftgröße (Punkt) und Schriftart neuer Textfelder
+    pub text_color: [f32; 4],
+    pub text_size_pt: f32,
+    pub text_font: TextFont,
+    /// Laufende Bearbeitung eines Textfelds
+    pub text_edit: Option<TextEditing>,
     /// Druckkurve des Stifts
     pub pressure_curve: PressureCurve,
     /// Zuletzt gemessener Rohdruck des Stifts (Anzeige in der Druckkurve)
@@ -326,6 +336,10 @@ impl Default for UiState {
             paper_theme: PaperTheme::White,
             adapt_ink_colors: true,
             continuous_scroll: true,
+            text_color: PEN_COLOR_PRESETS[0].0,
+            text_size_pt: crate::text::DEFAULT_TEXT_SIZE_PT,
+            text_font: TextFont::Sans,
+            text_edit: None,
             pressure_curve: PressureCurve::default(),
             last_raw_pressure: None,
             file_picker: None,
@@ -422,9 +436,10 @@ impl UiState {
     /// Größte Knopfgröße (40 px, schrittweise bis 28 px), bei der die Leiste mit allen Elementen
     /// des aktiven Werkzeugs in `max_height` passt.
     pub fn sidebar_button_size(tool: ActiveTool, max_height: f32) -> f32 {
-        let select = tool == ActiveTool::Select;
-        // Notizbücher, 5 Werkzeuge, Undo/Redo, 3× Seiten, Menü (+ 4 Auswahl-Aktionen)
-        let buttons = 12 + if select { 4 } else { 0 };
+        let select = matches!(tool, ActiveTool::Select | ActiveTool::Text);
+        // Notizbücher, 6 Werkzeuge, Undo/Redo, 3× Seiten, Menü (+ 4 Auswahl-Aktionen bzw.
+        // Schriftknöpfe)
+        let buttons = 13 + if select { 4 } else { 0 };
         let dividers = 5 + usize::from(select);
         let spacing = 3.0;
         let needed = |b: f32| {
@@ -456,6 +471,7 @@ impl UiState {
         match self.active_tool {
             ActiveTool::Pen | ActiveTool::Shape | ActiveTool::Select => self.pen_color,
             ActiveTool::Highlighter => self.highlighter_color,
+            ActiveTool::Text => self.text_color,
             ActiveTool::Eraser => [0.0, 0.0, 0.0, 0.0],
         }
     }
@@ -463,7 +479,9 @@ impl UiState {
     /// Gibt die aktuelle Strichbreite in mm zurück.
     pub fn current_stroke_width_mm(&self) -> f32 {
         match self.active_tool {
-            ActiveTool::Pen | ActiveTool::Shape | ActiveTool::Select => self.pen_stroke_width_mm,
+            ActiveTool::Pen | ActiveTool::Shape | ActiveTool::Select | ActiveTool::Text => {
+                self.pen_stroke_width_mm
+            }
             ActiveTool::Highlighter => self.highlighter_stroke_width_mm,
             ActiveTool::Eraser => 3.0,
         }
@@ -951,7 +969,33 @@ pub fn page_thumbnail_shapes(
     let total: usize = page.strokes.iter().map(|s| s.points.len()).sum();
     let step = total.div_ceil(THUMBNAIL_POINT_BUDGET).max(1);
 
-    for stroke in page.strokes.iter().filter(|s| !s.is_image()) {
+    // Textfelder: je Zeile ein Strich in Textfarbe auf Höhe der Kleinbuchstaben
+    for stroke in &page.strokes {
+        let (Some(text), Some(corners)) = (&stroke.text, stroke.object_corners()) else {
+            continue;
+        };
+        let ink = if adapt {
+            adapt_ink_color(stroke.color)
+        } else {
+            stroke.color
+        };
+        let color = color32_from(ink).gamma_multiply(0.7);
+        let layout = text.layout();
+        let (origin, [right, down]) = crate::text::frame_axes(&corners, text.box_size());
+        let width = (text.size * 0.45 * down.length() * scale).clamp(0.6, 6.0);
+        for (i, line) in layout.lines.iter().enumerate() {
+            if line.width <= 0.0 {
+                continue;
+            }
+            let start = origin + down * (layout.baseline(i) - text.size * 0.25);
+            shapes.push(egui::Shape::line_segment(
+                [to_screen(start), to_screen(start + right * line.width)],
+                egui::Stroke::new(width, color),
+            ));
+        }
+    }
+
+    for stroke in page.strokes.iter().filter(|s| !s.is_object()) {
         let ink = if adapt {
             adapt_ink_color(stroke.color)
         } else {
@@ -977,6 +1021,126 @@ pub fn page_thumbnail_shapes(
         }
     }
     shapes
+}
+
+/// Knöpfe für Schriftart und -größe des Text-Werkzeugs. Änderungen gelten auch für das
+/// gerade bearbeitete Textfeld.
+fn text_style_buttons(ui: &mut egui::Ui, btn: f32, state: &mut UiState) {
+    let size = state.text_size_pt;
+    let smaller = TEXT_SIZES_PT
+        .iter()
+        .rev()
+        .copied()
+        .find(|&s| s < size - 0.01);
+    let larger = TEXT_SIZES_PT.iter().copied().find(|&s| s > size + 0.01);
+    let smaller_tip = format!("Kleinere Schrift (jetzt {size} pt)");
+    let larger_tip = format!("Größere Schrift (jetzt {size} pt)");
+    enum Change {
+        Font(TextFont),
+        /// Neue Größe; `None`: keine kleinere bzw. größere mehr
+        Size(Option<f32>),
+    }
+    let buttons = [
+        (
+            SidebarIcon::Text("Aa"),
+            "Normale Schrift",
+            Change::Font(TextFont::Sans),
+        ),
+        (
+            SidebarIcon::Text("{ }"),
+            "Code-Schrift (feste Zeichenbreite, Tab rückt ein)",
+            Change::Font(TextFont::Mono),
+        ),
+        (SidebarIcon::Text("A−"), &smaller_tip, Change::Size(smaller)),
+        (SidebarIcon::Text("A+"), &larger_tip, Change::Size(larger)),
+    ];
+    for (icon, tooltip, change) in buttons {
+        let (active, enabled) = match change {
+            Change::Font(font) => (state.text_font == font, true),
+            Change::Size(new_size) => (false, new_size.is_some()),
+        };
+        if !sidebar_button(ui, btn, icon, active, enabled, None, tooltip).clicked() {
+            continue;
+        }
+        match change {
+            Change::Font(font) => state.text_font = font,
+            Change::Size(Some(new_size)) => {
+                state.text_size_pt = new_size;
+                state.set_export_message(format!("Schriftgröße {new_size} pt"));
+            }
+            Change::Size(None) => {}
+        }
+        if let Some(edit) = &mut state.text_edit {
+            edit.text.font = state.text_font;
+            edit.text.size = state.text_size_pt * crate::text::UNITS_PER_PT;
+            edit.focus = true;
+        }
+    }
+}
+
+/// Bearbeitung eines Textfelds: egui-Textfeld an der Stelle und in der Größe des Felds auf
+/// dem Blatt (ungedreht), mit derselben Schrift. Esc beendet die Bearbeitung.
+fn text_edit_overlay(ctx: &egui::Context, state: &mut UiState) {
+    let adapt = state.adapt_ink_colors && state.paper_theme.is_dark();
+    let (Some(view), Some(edit)) = (state.page_view, state.text_edit.as_mut()) else {
+        return;
+    };
+    let [sx, sy] = edit.axes.map(|a| a.length());
+    let font_size = (edit.text.size * sy * view.scale).clamp(2.0, 400.0);
+    // egui rundet die Glyphenhöhe auf ganze Pixel: die Umbruchbreite im selben Verhältnis
+    // anpassen, damit die Zeilen an denselben Stellen umbrechen wie auf dem Blatt
+    let height_px = font_size * ctx.pixels_per_point() * edit.text.font.height_per_em();
+    let rounding = height_px.round().max(1.0) / height_px;
+    let width = (edit.text.wrap_width.max(edit.text.size) * sx * view.scale * rounding).max(8.0);
+    let color = linear_color32(if adapt {
+        adapt_ink_color(edit.color)
+    } else {
+        edit.color
+    });
+    egui::Area::new(egui::Id::new("text_edit_area"))
+        .fixed_pos(view.to_screen(edit.origin))
+        .order(egui::Order::Middle)
+        .show(ctx, |ui| {
+            egui::Frame::none()
+                .stroke(egui::Stroke::new(
+                    1.0_f32,
+                    egui::Color32::from_rgba_unmultiplied(70, 130, 230, 200),
+                ))
+                .show(ui, |ui| {
+                    let response = ui.add(
+                        egui::TextEdit::multiline(&mut edit.text.content)
+                            .id(egui::Id::new("text_edit_field"))
+                            .frame(false)
+                            .margin(egui::vec2(0.0, 0.0))
+                            .font(egui::FontId::new(font_size, edit.text.font.egui_family()))
+                            .text_color(color)
+                            .desired_width(width)
+                            .desired_rows(1)
+                            .lock_focus(true),
+                    );
+                    if edit.focus {
+                        response.request_focus();
+                        edit.focus = false;
+                    }
+                    // egui 0.27 zählt Enter in einem fokussierten Feld als Klick und fordert
+                    // den Fokus neu an – dabei geht die Tab-Sperre verloren und Tab würde
+                    // danach den Fokus wegnehmen statt einzurücken
+                    ui.memory_mut(|m| {
+                        m.set_focus_lock_filter(
+                            response.id,
+                            egui::EventFilter {
+                                tab: true,
+                                horizontal_arrows: true,
+                                vertical_arrows: true,
+                                escape: false,
+                            },
+                        )
+                    });
+                });
+        });
+    if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+        edit.finish = true;
+    }
 }
 
 /// Linearer Farbwert (wie auf der GPU) als egui-Farbe (sRGB).
@@ -1594,6 +1758,7 @@ pub fn render_ui(
     let mut actions = std::mem::take(&mut state.queued_actions);
     state.screen_size = ctx.screen_rect().size();
     ruler_overlay(ctx, state);
+    text_edit_overlay(ctx, state);
 
     let mut pen_btn_rect = None;
     let mut high_btn_rect = None;
@@ -1760,6 +1925,12 @@ pub fn render_ui(
                                         SidebarIcon::Lasso,
                                         "Auswählen: verschieben, drehen, skalieren, kopieren (V)",
                                     ),
+                                    (
+                                        ActiveTool::Text,
+                                        SidebarIcon::Glyph("T"),
+                                        "Text (T): ins Blatt tippen und schreiben, vorhandenen Text \
+                                         antippen zum Ändern; Esc beendet",
+                                    ),
                                 ] {
                                     if sidebar_button(
                                         ui,
@@ -1806,6 +1977,9 @@ pub fn render_ui(
                                             &HIGHLIGHTER_COLOR_PRESETS[..],
                                             state.highlighter_color,
                                         )),
+                                        ActiveTool::Text => {
+                                            Some((&PEN_COLOR_PRESETS[..], state.text_color))
+                                        }
                                         ActiveTool::Eraser => None,
                                     };
                                 // Fester Platz für die längste Palette, damit die Knöpfe darunter
@@ -1821,10 +1995,18 @@ pub fn render_ui(
                                         if color_circle_swatch(ui, color, is_sel, label, swatch)
                                             .clicked()
                                         {
-                                            if state.active_tool == ActiveTool::Highlighter {
-                                                state.highlighter_color = color;
-                                            } else {
-                                                state.pen_color = color;
+                                            match state.active_tool {
+                                                ActiveTool::Highlighter => {
+                                                    state.highlighter_color = color
+                                                }
+                                                ActiveTool::Text => {
+                                                    state.text_color = color;
+                                                    if let Some(edit) = &mut state.text_edit {
+                                                        edit.color = color;
+                                                        edit.focus = true;
+                                                    }
+                                                }
+                                                _ => state.pen_color = color,
                                             }
                                             actions.push(UiAction::SetColor(color));
                                         }
@@ -1899,6 +2081,12 @@ pub fn render_ui(
                                             actions.push(action);
                                         }
                                     }
+                                }
+
+                                // --- Schrift des Text-Werkzeugs ---
+                                if state.active_tool == ActiveTool::Text {
+                                    sidebar_divider(ui, btn);
+                                    text_style_buttons(ui, btn, state);
                                 }
 
                                 sidebar_divider(ui, btn);
@@ -3562,6 +3750,79 @@ mod tests {
     }
 
     #[test]
+    fn test_text_edit_overlay_takes_typing_and_escape() {
+        let notebook = Notebook::new();
+        let mut state = UiState::new();
+        state.active_tool = ActiveTool::Text;
+        state.page_view = Some(PageView {
+            origin: egui::pos2(300.0, 50.0),
+            scale: 0.3,
+        });
+        state.text_edit = Some(TextEditing::new_at(
+            notebook.current_page().id,
+            glam::Vec2::new(200.0, 300.0),
+            42.0,
+            TextFont::Sans,
+            [0.0, 0.0, 0.0, 1.0],
+        ));
+        let ctx = egui::Context::default();
+        let updater = crate::updater::UpdaterController::new();
+        let frame = |state: &mut UiState, events: Vec<egui::Event>| {
+            ctx.begin_frame(egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1280.0, 850.0),
+                )),
+                events,
+                ..Default::default()
+            });
+            let _ = render_ui(&ctx, state, &notebook, AutosaveStatus::Saved, &updater);
+            let _ = ctx.end_frame();
+        };
+        frame(&mut state, Vec::new());
+        assert!(ctx.wants_keyboard_input(), "Textfeld hat den Fokus");
+        frame(&mut state, vec![egui::Event::Text("Hallo".into())]);
+        assert_eq!(state.text_edit.as_ref().unwrap().text.content, "Hallo");
+        // Zeilenumbruch und Tab (Einrücken) bleiben im Textfeld
+        frame(
+            &mut state,
+            vec![egui::Event::Key {
+                key: egui::Key::Enter,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::default(),
+            }],
+        );
+        frame(
+            &mut state,
+            vec![egui::Event::Key {
+                key: egui::Key::Tab,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::default(),
+            }],
+        );
+        frame(&mut state, vec![egui::Event::Text("x".into())]);
+        assert_eq!(state.text_edit.as_ref().unwrap().text.content, "Hallo\n\tx");
+
+        frame(
+            &mut state,
+            vec![egui::Event::Key {
+                key: egui::Key::Escape,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::default(),
+            }],
+        );
+        let edit = state.text_edit.as_ref().unwrap();
+        assert!(edit.finish);
+        assert_eq!(edit.text.content, "Hallo\n\tx");
+    }
+
+    #[test]
     fn test_sidebar_is_vertical_and_docked_to_chosen_side() {
         let notebook = Notebook::new();
 
@@ -3687,6 +3948,7 @@ mod tests {
             ActiveTool::Shape,
             ActiveTool::Eraser,
             ActiveTool::Select,
+            ActiveTool::Text,
         ] {
             assert!(
                 found.contains(&tool),
@@ -3705,6 +3967,7 @@ mod tests {
                 ActiveTool::Shape,
                 ActiveTool::Eraser,
                 ActiveTool::Select,
+                ActiveTool::Text,
             ] {
                 let mut state = UiState::new();
                 state.active_tool = tool;

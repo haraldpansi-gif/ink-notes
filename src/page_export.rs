@@ -215,6 +215,87 @@ mod tests {
         assert!(svg.trim_end().ends_with("</svg>"));
     }
 
+    /// Begrenzungsrechteck (x0, y0, x1, y1) der deckenden Pixel.
+    fn ink_bounds(width: u32, pixels: &[u8]) -> (u32, u32, u32, u32) {
+        let mut b = (u32::MAX, u32::MAX, 0, 0);
+        for (i, p) in pixels.as_chunks::<4>().0.iter().enumerate() {
+            if p[3] > 128 {
+                let (x, y) = (i as u32 % width, i as u32 / width);
+                b = (b.0.min(x), b.1.min(y), b.2.max(x), b.3.max(y));
+            }
+        }
+        b
+    }
+
+    fn page_with_text() -> (Page, crate::text::TextBox) {
+        let text = crate::text::TextBox::new(
+            "Hallo Welt\nzweite Zeile".into(),
+            100.0,
+            crate::text::TextFont::Sans,
+            1200.0,
+        );
+        let size = glam::Vec2::new(1200.0, text.layout().height());
+        let corners = crate::text::frame_corners(
+            glam::Vec2::new(300.0, 400.0),
+            [glam::Vec2::X, glam::Vec2::Y],
+            size,
+        );
+        let mut page = Page::new(1, PageBackground::Grid5mm);
+        page.strokes.push(Stroke::new_text(
+            3,
+            text.clone(),
+            corners,
+            [0.0, 0.0, 0.0, 1.0],
+        ));
+        (page, text)
+    }
+
+    #[test]
+    fn test_exported_text_matches_screen_rendering() {
+        let (page, text) = page_with_text();
+        let png = decode(&page_png(&page, None, ImageBackground::Transparent).unwrap());
+        let px_per_unit = png.width() as f32 / PAGE_WIDTH;
+        let exported = ink_bounds(png.width(), png.as_raw());
+
+        // Dieselbe Stelle, wie sie die Bildschirmtextur zeigt
+        let screen = crate::text::rasterize(&text, [0.0, 0.0, 0.0, 1.0], px_per_unit);
+        let local = ink_bounds(screen.width, &screen.pixels);
+        let (ox, oy) = ((300.0 * px_per_unit) as u32, (400.0 * px_per_unit) as u32);
+        let expected = (local.0 + ox, local.1 + oy, local.2 + ox, local.3 + oy);
+        for (a, b) in [
+            (exported.0, expected.0),
+            (exported.1, expected.1),
+            (exported.2, expected.2),
+            (exported.3, expected.3),
+        ] {
+            assert!(
+                a.abs_diff(b) <= 3,
+                "PDF {exported:?} ≠ Bildschirm {expected:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_exported_text_follows_rotation() {
+        let (mut page, _) = page_with_text();
+        let png = decode(&page_png(&page, None, ImageBackground::Transparent).unwrap());
+        let straight = ink_bounds(png.width(), png.as_raw());
+
+        let center = page.strokes[0].aabb.min;
+        page.strokes[0].rotate(center, std::f32::consts::FRAC_PI_2);
+        let png = decode(&page_png(&page, None, ImageBackground::Transparent).unwrap());
+        let rotated = ink_bounds(png.width(), png.as_raw());
+        // 90° im Uhrzeigersinn: Breite und Höhe tauschen, Text liegt links vom Drehpunkt
+        let (w, h) = (straight.2 - straight.0, straight.3 - straight.1);
+        let (rw, rh) = (rotated.2 - rotated.0, rotated.3 - rotated.1);
+        assert!(
+            rw.abs_diff(h) <= 4 && rh.abs_diff(w) <= 4,
+            "{straight:?} → {rotated:?}"
+        );
+        let px_per_unit = png.width() as f32 / PAGE_WIDTH;
+        assert!((rotated.2 as f32) < 300.0 * px_per_unit + 2.0);
+    }
+
     #[test]
     fn test_selection_image_is_cropped() {
         let page = page_with_line();

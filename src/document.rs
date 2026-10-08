@@ -371,6 +371,9 @@ pub struct Stroke {
     /// Bildecken oben links, oben rechts, unten rechts, unten links; Verschieben, Drehen und
     /// Skalieren wirken so automatisch auch auf Bilder. Bilder liegen immer unter der Tinte.
     pub image: Option<String>,
+    /// Textfeld (Text-Werkzeug); die vier Punkte sind wie bei Bildern die Ecken des Felds.
+    /// Textfelder liegen wie Bilder unter der Tinte.
+    pub text: Option<crate::text::TextBox>,
 }
 
 impl Stroke {
@@ -404,6 +407,7 @@ impl Stroke {
             width: 5.0,
             finalized: true,
             image: None,
+            text: None,
         }
     }
 
@@ -423,9 +427,46 @@ impl Stroke {
         stroke
     }
 
+    /// Erzeugt ein Textfeld mit den Ecken oben links, oben rechts, unten rechts, unten links.
+    pub fn new_text(
+        id: u64,
+        text: crate::text::TextBox,
+        corners: [glam::Vec2; 4],
+        color: [f32; 4],
+    ) -> Self {
+        let mut stroke = Self::new_image(id, String::new(), corners);
+        stroke.image = None;
+        stroke.color = color;
+        stroke.text = Some(text);
+        stroke
+    }
+
     /// Ist dieses Objekt ein Bild?
     pub fn is_image(&self) -> bool {
         self.image.is_some()
+    }
+
+    /// Ist dieses Objekt ein Textfeld?
+    pub fn is_text(&self) -> bool {
+        self.text.is_some()
+    }
+
+    /// Bild oder Textfeld (Objekt mit vier Ecken statt Tinte)?
+    pub fn is_object(&self) -> bool {
+        self.is_image() || self.is_text()
+    }
+
+    /// Ecken eines Bildes oder Textfelds (oben links, oben rechts, unten rechts, unten links).
+    pub fn object_corners(&self) -> Option<[glam::Vec2; 4]> {
+        if !self.is_object() || self.points.len() < 4 {
+            return None;
+        }
+        Some([
+            self.points[0].position,
+            self.points[1].position,
+            self.points[2].position,
+            self.points[3].position,
+        ])
     }
 
     /// Bildecken (oben links, oben rechts, unten rechts, unten links), falls ein Bild.
@@ -474,9 +515,9 @@ impl Stroke {
     }
 
     /// Berechnet den minimalen euklidischen Abstand eines Punktes zu diesem Strich.
-    /// Bei Bildern ist der Abstand innerhalb der Bildfläche 0.
+    /// Bei Bildern und Textfeldern ist der Abstand innerhalb der Fläche 0.
     pub fn distance_to_point(&self, p: glam::Vec2) -> f32 {
-        if let Some(corners) = self.image_corners() {
+        if let Some(corners) = self.object_corners() {
             if point_in_convex_quad(p, &corners) {
                 return 0.0;
             }
@@ -731,7 +772,8 @@ impl Page {
     }
 
     /// Findet den nächsten Strich an Position `pos` innerhalb eines maximalen Suchradius.
-    /// Tinte hat Vorrang vor Bildern darunter, damit Notizen auf einem Bild auswählbar bleiben.
+    /// Tinte hat Vorrang vor Bildern und Textfeldern darunter, damit Notizen darauf
+    /// auswählbar bleiben.
     pub fn find_stroke_at(&self, pos: glam::Vec2, max_dist: f32) -> Option<&Stroke> {
         let mut best: Option<(&Stroke, (bool, f32))> = None;
         for s in &self.strokes {
@@ -740,7 +782,7 @@ impl Page {
             }
             let d = s.distance_to_point(pos);
             if d <= max_dist {
-                let key = (s.is_image(), d);
+                let key = (s.is_object(), d);
                 if best.is_none_or(|(_, best_key)| key < best_key) {
                     best = Some((s, key));
                 }
@@ -783,7 +825,7 @@ impl Page {
         let mut hit_indices = Vec::new();
 
         for (i, stroke) in self.strokes.iter().enumerate() {
-            if !stroke.is_image()
+            if !stroke.is_object()
                 && mode.erases(stroke.tool)
                 && stroke.intersects_eraser(eraser_pos, eraser_radius, max_stroke_radius)
             {
@@ -811,8 +853,8 @@ impl Page {
 
     /// Teilradierer: entfernt den Teil aller Striche im Kreis um `eraser_pos`. Getroffene
     /// Striche werden durch ihre übrig gebliebenen Stücke ersetzt (neue IDs aus `next_id`),
-    /// Formen als Ganzes entfernt, Bilder nie. Aufeinanderfolgende Schnitte eines Radierzugs
-    /// bilden einen gemeinsamen Undo-Schritt. Gibt `true` zurück, wenn sich etwas geändert hat.
+    /// Formen als Ganzes entfernt, Bilder und Textfelder nie. Aufeinanderfolgende Schnitte
+    /// eines Radierzugs bilden einen gemeinsamen Undo-Schritt. Gibt `true` zurück, wenn sich etwas geändert hat.
     pub fn erase_partial_at(
         &mut self,
         eraser_pos: glam::Vec2,
@@ -824,7 +866,7 @@ impl Page {
         let mut result = Vec::with_capacity(self.strokes.len());
         for stroke in std::mem::take(&mut self.strokes) {
             let reach = eraser_radius + stroke.width / 2.0;
-            if stroke.is_image() || !stroke.aabb.expanded(reach).contains_point(eraser_pos) {
+            if stroke.is_object() || !stroke.aabb.expanded(reach).contains_point(eraser_pos) {
                 result.push(stroke);
                 continue;
             }
@@ -900,8 +942,8 @@ impl Page {
     }
 
     /// Findet die IDs aller Striche, die die gegebene Auswahlbox schneiden oder darin liegen.
-    /// Bilder werden nur ausgewählt, wenn sie ganz in der Box liegen – sonst würde jede
-    /// Auswahl von Notizen auf einem Bild das Bild mitnehmen.
+    /// Bilder und Textfelder werden nur ausgewählt, wenn sie ganz in der Box liegen – sonst
+    /// würde jede Auswahl von Notizen auf einem Bild das Bild mitnehmen.
     pub fn find_strokes_in_box(&self, box_min: glam::Vec2, box_max: glam::Vec2) -> Vec<u64> {
         let sel_box = Aabb::new(
             glam::Vec2::new(box_min.x.min(box_max.x), box_min.y.min(box_max.y)),
@@ -910,7 +952,7 @@ impl Page {
         self.strokes
             .iter()
             .filter(|s| {
-                if s.is_image() {
+                if s.is_object() {
                     sel_box.contains_point(s.aabb.min) && sel_box.contains_point(s.aabb.max)
                 } else {
                     s.aabb.intersects(&sel_box)

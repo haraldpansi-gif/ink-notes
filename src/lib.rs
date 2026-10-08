@@ -20,6 +20,7 @@ pub mod selection;
 pub mod settings;
 pub mod spline;
 pub mod storage;
+pub mod text;
 pub mod ui;
 pub mod updater;
 pub mod viewport;

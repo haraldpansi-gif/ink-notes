@@ -264,6 +264,18 @@ impl ImageLayer {
         }
     }
 
+    /// Wird die Textur `key` von einer sichtbaren Seite verwendet?
+    pub fn uses(&self, key: &str) -> bool {
+        self.all_quads().any(|(k, _)| k == key)
+    }
+
+    /// Gibt alle Texturen frei, deren Schlüssel `matches` erfüllt (sie werden beim nächsten
+    /// `prepare` neu angefordert).
+    pub fn forget_textures(&mut self, mut matches: impl FnMut(&str) -> bool) {
+        self.textures.retain(|key, _| !matches(key));
+        self.texture_bytes = self.textures.values().map(|(_, b)| b).sum();
+    }
+
     /// Fehlen noch Texturen sichtbarer Seiten (z. B. PDF-Seite im Hintergrund-Rendering)?
     pub fn is_waiting(&self) -> bool {
         self.all_quads()

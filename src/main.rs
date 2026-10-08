@@ -253,13 +253,15 @@ fn page_to_focus(
     (!grabs_selection).then_some(index)
 }
 
-/// Zwischenablage: interne Objekte (Strg+C in ink-notes) und Bilder aus der
-/// Systemzwischenablage (Screenshots, aus anderen Programmen kopierte Bilder).
+/// Zwischenablage: interne Objekte (Strg+C in ink-notes), Bilder aus der
+/// Systemzwischenablage (Screenshots, aus anderen Programmen kopierte Bilder) und Text.
 struct ClipboardBridge {
     system: Option<arboard::Clipboard>,
     /// Prüfsumme des Systembildes zum Zeitpunkt des letzten internen Kopierens: Strg+V fügt
     /// das Systembild nur ein, wenn es danach kopiert wurde (die jüngste Kopie gewinnt)
     image_hash_at_copy: Option<[u8; 32]>,
+    /// Text der Systemzwischenablage zum Zeitpunkt des letzten internen Kopierens (wie oben)
+    text_at_copy: Option<String>,
     /// Notizbuch, aus dem kopiert wurde (für Bilder beim Einfügen in ein anderes Notizbuch)
     source_dir: Option<PathBuf>,
 }
@@ -269,6 +271,7 @@ impl ClipboardBridge {
         Self {
             system: None,
             image_hash_at_copy: None,
+            text_at_copy: None,
             source_dir: None,
         }
     }
@@ -290,9 +293,20 @@ impl ClipboardBridge {
         Some((image.to_owned_img(), hash))
     }
 
-    /// Merkt sich beim internen Kopieren das aktuelle Systembild und das Quell-Notizbuch.
+    /// Text in der Systemzwischenablage (nicht nur Leerraum).
+    fn system_text(&mut self) -> Option<String> {
+        if self.system.is_none() {
+            self.system = arboard::Clipboard::new().ok();
+        }
+        let text = self.system.as_mut()?.get_text().ok()?;
+        (!text.trim().is_empty()).then_some(text)
+    }
+
+    /// Merkt sich beim internen Kopieren das aktuelle Systembild, den Text und das
+    /// Quell-Notizbuch.
     fn note_internal_copy(&mut self, storage_dir: &Path) {
         self.image_hash_at_copy = self.system_image().map(|(_, hash)| hash);
+        self.text_at_copy = self.system_text();
         self.source_dir = Some(storage_dir.to_path_buf());
     }
 
@@ -366,6 +380,124 @@ fn insert_image_on_page(
         "Bild eingefügt ({} × {} px)",
         imported.width, imported.height
     ));
+}
+
+/// Fügt `content` als Textfeld (Schrift des Text-Werkzeugs) in der Mitte des sichtbaren
+/// Bereichs ein, wählt es aus und schaltet auf das Auswahlwerkzeug zum Verschieben.
+#[allow(clippy::too_many_arguments)]
+fn insert_text_on_page(
+    content: &str,
+    canvas: &mut CanvasState,
+    notebook: &mut Notebook,
+    manifest: &mut NotebookManifest,
+    autosave: &mut AutosaveController,
+    selection_state: &mut SelectionState,
+    ui_state: &mut UiState,
+) {
+    let center = visible_page_center(canvas);
+    let mut edit = ink_notes::text::TextEditing::new_at(
+        notebook.current_page().id,
+        Vec2::new((center.x - 600.0).max(150.0), center.y),
+        ui_state.text_size_pt * ink_notes::text::UNITS_PER_PT,
+        ui_state.text_font,
+        ui_state.text_color,
+    );
+    edit.text.content = content.replace("\r\n", "\n").replace('\r', "\n");
+    let id = notebook.next_stroke_id();
+    let Some(stroke) = edit.to_stroke(id) else {
+        return;
+    };
+    let page = notebook.current_page_mut();
+    page.add_stroke(stroke);
+    canvas.sync_page(page);
+    manifest.next_stroke_id = notebook.next_stroke_id;
+    autosave.mark_dirty(notebook, manifest);
+    selection_state.select_single(id);
+    ui_state.active_tool = ActiveTool::Select;
+    ui_state.set_export_message("Text eingefügt – mit dem Text-Werkzeug (T) änderbar");
+}
+
+/// Beendet eine laufende Textbearbeitung: übernimmt das Feld (neu, geändert oder – wenn
+/// geleert – entfernt) als einen Undo-Schritt auf seiner Seite.
+fn finish_text_edit(
+    canvas: &mut CanvasState,
+    notebook: &mut Notebook,
+    manifest: &mut NotebookManifest,
+    autosave: &mut AutosaveController,
+    ui_state: &mut UiState,
+) {
+    let Some(edit) = ui_state.text_edit.take() else {
+        return;
+    };
+    canvas.set_hidden_text(None);
+    if let Some(index) = notebook.pages.iter().position(|p| p.id == edit.page_id) {
+        if edit.is_changed() && !notebook.pages[index].is_readonly() {
+            let id = match &edit.original {
+                Some(original) => original.id,
+                None => notebook.next_stroke_id(),
+            };
+            manifest.next_stroke_id = notebook.next_stroke_id;
+            let page = &mut notebook.pages[index];
+            match (edit.original.clone(), edit.to_stroke(id)) {
+                (None, Some(stroke)) => page.add_stroke(stroke),
+                (Some(before), Some(after)) => {
+                    page.commit_modified_strokes(vec![before], vec![after])
+                }
+                (Some(before), None) => {
+                    page.remove_strokes_by_ids(&[before.id]);
+                }
+                (None, None) => {}
+            }
+            manifest.sync_from_notebook(notebook);
+            autosave.mark_page_dirty(&notebook.pages[index], manifest);
+        }
+    }
+    canvas.sync_page(notebook.current_page_mut());
+}
+
+/// Text-Werkzeug: Tippen auf das Blatt beendet eine laufende Bearbeitung und öffnet das
+/// Textfeld unter `page_pt` zum Bearbeiten – oder ein neues an dieser Stelle.
+fn text_tool_click(
+    page_pt: Vec2,
+    canvas: &mut CanvasState,
+    notebook: &mut Notebook,
+    manifest: &mut NotebookManifest,
+    autosave: &mut AutosaveController,
+    ui_state: &mut UiState,
+) {
+    finish_text_edit(canvas, notebook, manifest, autosave, ui_state);
+    let page = notebook.current_page();
+    if page.is_readonly() {
+        return;
+    }
+    let hit = page
+        .strokes
+        .iter()
+        .rev()
+        .find(|s| s.is_text() && s.distance_to_point(page_pt) <= 0.0);
+    let edit = match hit {
+        Some(stroke) => {
+            let edit = ink_notes::text::TextEditing::of_stroke(page.id, stroke);
+            if let Some(edit) = &edit {
+                // Die Schriftknöpfe zeigen die Schrift des Felds und ändern sie
+                ui_state.text_size_pt =
+                    (edit.text.size / ink_notes::text::UNITS_PER_PT * 2.0).round() / 2.0;
+                ui_state.text_font = edit.text.font;
+                ui_state.text_color = edit.color;
+                canvas.set_hidden_text(Some(stroke.id));
+            }
+            edit
+        }
+        None => Some(ink_notes::text::TextEditing::new_at(
+            page.id,
+            page_pt,
+            ui_state.text_size_pt * ink_notes::text::UNITS_PER_PT,
+            ui_state.text_font,
+            ui_state.text_color,
+        )),
+    };
+    ui_state.text_edit = edit;
+    canvas.sync_page(notebook.current_page_mut());
 }
 
 /// Textur für einen Schlüssel der Bildebene: `<pdf>#<seite>` rendert der Hintergrund-Thread,
@@ -499,6 +631,23 @@ fn paste(
                 }
                 Err(err) => ui_state.set_export_message(format!("Bild nicht eingefügt: {err}")),
             }
+            return;
+        }
+    }
+
+    // Aus anderen Programmen kopierter Text wird ein Textfeld
+    if let Some(text) = clipboard.system_text() {
+        if selection_state.clipboard.is_empty() || clipboard.text_at_copy.as_deref() != Some(&text)
+        {
+            insert_text_on_page(
+                &text,
+                canvas,
+                notebook,
+                manifest,
+                autosave,
+                selection_state,
+                ui_state,
+            );
             return;
         }
     }
@@ -739,10 +888,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // Initiale Seite und Werkzeugeinstellungen mit Canvas synchronisieren
+    canvas.set_paper_theme(ui_state.paper_theme, ui_state.adapt_ink_colors);
     canvas.sync_page(notebook.current_page_mut());
     canvas.set_stroke_color(ui_state.pen_color);
     canvas.set_stroke_width_mm(ui_state.pen_stroke_width_mm);
-    canvas.set_paper_theme(ui_state.paper_theme, ui_state.adapt_ink_colors);
 
     let start_time = Instant::now();
     let mut cursor_screen_pos = (0.0_f32, 0.0_f32);
@@ -801,7 +950,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("=== ink-notes (Multi-Color & Objektauswahl/Transformation) bereit ===");
     println!("Toolbar:");
-    println!("  Stift / Textmarker / Formen (Auto-Snap) / Radierer / Auswählen (Lasso)");
+    println!("  Stift / Textmarker / Formen (Auto-Snap) / Radierer / Auswählen (Lasso) / Text");
     println!("  Farbpalette (Multicolor), Strichbreite, Undo/Redo, Zoom, Navigation & PDF-Export");
     println!("Objektauswahl & Transformation:");
     println!("  V              : Auswahlwerkzeug (Lasso) umschalten");
@@ -813,6 +962,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  Palette-Klick  : Ausgewählte Objekte direkt umfärben");
     println!("  Strg + C / V   : Ausgewählte Objekte kopieren & einfügen");
     println!("  Entf/Backspace : Ausgewählte Objekte löschen (Undo mit Strg+Z)");
+    println!("Text:");
+    println!("  T              : Text-Werkzeug umschalten");
+    println!("  Klick ins Blatt: Neues Textfeld (vorhandenes Textfeld: bearbeiten)");
+    println!("  Esc            : Textbearbeitung beenden");
     println!("Tastatur- & Maus-Shortcuts:");
     println!("  Mausrad        : Scrollen (durchgehende Ansicht), sonst Zoom");
     println!("  Strg + Mausrad : Stufenloser Zoom zentriert auf Cursor");
@@ -1044,7 +1197,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             || stylus_barrel_pressed
                                             || ui_state.active_tool == ActiveTool::Eraser;
 
-                                        if should_erase {
+                                        if !should_erase && ui_state.active_tool == ActiveTool::Text {
+                                            if let Some(page_pt) = canvas.screen_to_page(sx, sy) {
+                                                text_tool_click(page_pt, &mut canvas, &mut notebook, &mut manifest, &mut autosave, &mut ui_state);
+                                                update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
+                                                window.request_redraw();
+                                            }
+                                        } else if should_erase {
                                             is_erasing = true;
                                             if let Some(page_pt) = canvas.screen_to_page(sx, sy) {
                                                 if notebook.erase_at(page_pt,
@@ -1206,6 +1365,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 match event {
                     WindowEvent::CloseRequested => {
+                        finish_text_edit(&mut canvas, &mut notebook, &mut manifest, &mut autosave, &mut ui_state);
                         println!("[Shutdown] Sichere alle ungespeicherten Daten auf Festplatte...");
                         match autosave.shutdown() {
                             Ok(()) => {
@@ -1288,6 +1448,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             return;
                         }
 
+                        // Offenes Textfeld ohne Fokus (z. B. nach einem Klick in die Leiste):
+                        // Tasten nicht als Kürzel deuten, sondern das Feld wieder fokussieren
+                        if let Some(edit) = &mut ui_state.text_edit {
+                            if key_state == ElementState::Pressed
+                                && !matches!(logical_key, Key::Named(NamedKey::Escape))
+                            {
+                                edit.focus = true;
+                                window.request_redraw();
+                                return;
+                            }
+                        }
+
                         if let Key::Named(NamedKey::Space) = &logical_key {
                             is_space_pressed = key_state == ElementState::Pressed;
                             if !is_space_pressed && is_panning {
@@ -1322,8 +1494,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     ui_state.is_update_dialog_open = false;
                                     ui_state.show_updater_config = false;
                                     changed = true;
-                                }
- else if !selection_state.is_empty() {
+                                } else if let Some(edit) = &mut ui_state.text_edit {
+                                    edit.finish = true;
+                                    changed = true;
+                                } else if !selection_state.is_empty() {
                                     selection_state.clear();
                                     changed = true;
                                 }
@@ -1334,6 +1508,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                             // Undo: Strg + Z
                             Key::Character(c) if c.eq_ignore_ascii_case("z") && ctrl && !shift => {
+                                finish_text_edit(&mut canvas, &mut notebook, &mut manifest, &mut autosave, &mut ui_state);
                                 if notebook.current_page_mut().undo() {
                                     selection_state.clear();
                                     canvas.sync_page(notebook.current_page_mut());
@@ -1348,6 +1523,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 if (c.eq_ignore_ascii_case("y") && ctrl)
                                     || (c.eq_ignore_ascii_case("z") && ctrl && shift) =>
                             {
+                                finish_text_edit(&mut canvas, &mut notebook, &mut manifest, &mut autosave, &mut ui_state);
                                 if notebook.current_page_mut().redo() {
                                     selection_state.clear();
                                     canvas.sync_page(notebook.current_page_mut());
@@ -1438,7 +1614,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             // Radierer umschalten: E
                             Key::Character(c) if c.eq_ignore_ascii_case("e") && !ctrl => {
                                 ui_state.active_tool = match ui_state.active_tool {
-                                    ActiveTool::Pen | ActiveTool::Highlighter | ActiveTool::Shape | ActiveTool::Select => ActiveTool::Eraser,
+                                    ActiveTool::Pen | ActiveTool::Highlighter | ActiveTool::Shape | ActiveTool::Select | ActiveTool::Text => ActiveTool::Eraser,
                                     ActiveTool::Eraser => ActiveTool::Pen,
                                 };
                                 ui_state.is_pen_menu_open = false;
@@ -1630,6 +1806,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 window.request_redraw();
                             }
 
+                            // Text-Werkzeug umschalten: T
+                            Key::Character(c) if c.eq_ignore_ascii_case("t") && !ctrl => {
+                                ui_state.active_tool = if ui_state.active_tool == ActiveTool::Text {
+                                    ActiveTool::Pen
+                                } else {
+                                    ActiveTool::Text
+                                };
+                                ui_state.is_pen_menu_open = false;
+                                ui_state.is_highlighter_menu_open = false;
+                                update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
+                                window.request_redraw();
+                            }
+
                             // Formen-Werkzeug umschalten: S (ohne Strg) oder F
                             Key::Character(c) if (c.eq_ignore_ascii_case("s") || c.eq_ignore_ascii_case("f")) && !ctrl => {
                                 ui_state.active_tool = if ui_state.active_tool == ActiveTool::Shape {
@@ -1643,6 +1832,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                             // Beenden: Strg + Q
                             Key::Character(c) if c.eq_ignore_ascii_case("q") && ctrl => {
+                                finish_text_edit(&mut canvas, &mut notebook, &mut manifest, &mut autosave, &mut ui_state);
                                 println!("[Shutdown] Sichere alle ungespeicherten Daten auf Festplatte...");
                                 match autosave.shutdown() {
                                     Ok(()) => {
@@ -1699,6 +1889,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     }
                                 } else if button == MouseButton::Left {
                                     let (sx, sy) = cursor_screen_pos;
+
+                                    // Text-Werkzeug: Textfeld öffnen
+                                    if ui_state.active_tool == ActiveTool::Text {
+                                        if let Some(page_pt) = canvas.screen_to_page(sx, sy) {
+                                            text_tool_click(page_pt, &mut canvas, &mut notebook, &mut manifest, &mut autosave, &mut ui_state);
+                                            update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
+                                            window.request_redraw();
+                                        }
+                                        return;
+                                    }
 
                                     // 2. Objektauswahl & Transformation im Select-Modus
                                     if ui_state.active_tool == ActiveTool::Select {
@@ -2119,6 +2319,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                     window.request_redraw();
                                                 }
                                             }
+                                        } else if ui_state.active_tool == ActiveTool::Text {
+                                            if let Some(page_pt) = canvas.screen_to_page(tx, ty) {
+                                                text_tool_click(page_pt, &mut canvas, &mut notebook, &mut manifest, &mut autosave, &mut ui_state);
+                                                update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
+                                                window.request_redraw();
+                                            }
                                         } else if ui_state.active_tool == ActiveTool::Select {
                                             let screen_vec = Vec2::new(tx, ty);
                                             let hit = selection_state.hit_test_handles(notebook.current_page(), &canvas, screen_vec, egui_ctx.pixels_per_point());
@@ -2409,7 +2615,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 || is_erasing
                                 || !selection_state.is_empty()
                                 || selection_state.drag_mode != DragMode::None
-                                || ui_state.ruler_drag.is_some();
+                                || ui_state.ruler_drag.is_some()
+                                || ui_state.text_edit.is_some();
                             if scrolled && !busy {
                                 last_scroll = Some(scroll);
                                 let target = canvas
@@ -2474,7 +2681,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             canvas.set_stroke_color(ui_state.pen_color);
                                             canvas.set_stroke_width_mm(ui_state.pen_stroke_width_mm);
                                         }
-                                        ActiveTool::Eraser | ActiveTool::Select => {}
+                                        ActiveTool::Eraser | ActiveTool::Select | ActiveTool::Text => {}
                                     }
                                     update_window_title(&window, &notebook, &manifest, tool, autosave.status());
                                     window.request_redraw();
@@ -2495,7 +2702,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             ui_state.highlighter_color = color;
                                             canvas.set_stroke_color(color);
                                         }
-                                        ActiveTool::Eraser | ActiveTool::Select => {}
+                                        ActiveTool::Eraser | ActiveTool::Select | ActiveTool::Text => {}
                                     }
                                     window.request_redraw();
                                 }
@@ -2509,7 +2716,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             ui_state.highlighter_stroke_width_mm = width;
                                             canvas.set_stroke_width_mm(width);
                                         }
-                                        ActiveTool::Eraser | ActiveTool::Select => {}
+                                        ActiveTool::Eraser | ActiveTool::Select | ActiveTool::Text => {}
                                     }
                                     window.request_redraw();
                                 }
@@ -2579,6 +2786,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     window.request_redraw();
                                 }
                                 UiAction::Undo => {
+                                    finish_text_edit(&mut canvas, &mut notebook, &mut manifest, &mut autosave, &mut ui_state);
                                     if notebook.current_page_mut().undo() {
                                         selection_state.clear();
                                         canvas.sync_page(notebook.current_page_mut());
@@ -2588,6 +2796,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     }
                                 }
                                 UiAction::Redo => {
+                                    finish_text_edit(&mut canvas, &mut notebook, &mut manifest, &mut autosave, &mut ui_state);
                                     if notebook.current_page_mut().redo() {
                                         selection_state.clear();
                                         canvas.sync_page(notebook.current_page_mut());
@@ -3031,6 +3240,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                                 UiAction::SetPaperTheme { theme, adapt_ink } => {
                                     canvas.set_paper_theme(theme, adapt_ink);
+                                    canvas.sync_page(notebook.current_page_mut());
                                     ui_settings.paper_theme = theme;
                                     ui_settings.adapt_ink_colors = adapt_ink;
                                     save_ui_settings(&ui_settings, ui_settings_path.as_deref(), &mut ui_state);
@@ -3050,6 +3260,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     target.exit();
                                 }
                             }
+                        }
+
+                        // Textbearbeitung beenden: Esc, anderes Werkzeug oder andere Seite
+                        let finish_text = ui_state.text_edit.as_ref().is_some_and(|edit| {
+                            edit.finish
+                                || ui_state.active_tool != ActiveTool::Text
+                                || edit.page_id != notebook.current_page().id
+                        });
+                        if finish_text {
+                            finish_text_edit(&mut canvas, &mut notebook, &mut manifest, &mut autosave, &mut ui_state);
+                            update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
+                            window.request_redraw();
                         }
 
                         // 4. egui Frame beenden & Primitives tessellieren

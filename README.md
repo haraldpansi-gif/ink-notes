@@ -18,6 +18,7 @@ Eine latenzoptimierte, hardwarebeschleunigte Inking- und Notizbuch-Anwendung fü
   - **Stift (Pen):** Feine, variable Strichstärken (0.3 mm bis 1.2 mm) mit Notiz-Farben (Schwarz, Blau, Rot, Grün, Grau).
   - **Textmarker (Highlighter):** Breite, halbtransparente Striche (4.0 mm bis 8.0 mm) mit Multiplikations-Blending.
   - **Radierer (Eraser):** Segment- und abstandsbasierte Löschung einzelner Striche auf dem DIN-A4-Canvas.
+  - **Text (`T`):** Ins Blatt tippen und mit der Tastatur schreiben – für Überschriften, Code-Schnipsel oder kopierten Text. Normale Schrift oder Code-Schrift (feste Zeichenbreite, Tab rückt ein), 8 bis 36 pt, Farben der Stiftpalette; Zeilen werden am rechten Rand des Textfelds umbrochen. Vorhandenen Text antippen zum Ändern, `Esc` beendet. Textfelder lassen sich wie Bilder verschieben, drehen und skalieren; im PDF-Export ist der Text echt (durchsuchbar und kopierbar). Aus anderen Programmen kopierter Text wird mit `Strg + V` zum Textfeld.
 
 ### 🔍 Stufenloser Zoom & Pan (Kamera)
 - **Viewport-Transformation:** 2D-Projektionsmatrix im WGSL-Vertex-Shader.
@@ -225,6 +226,7 @@ cargo run --release
 | **Zoom zurücksetzen (100 %)** | `Strg + 0` |
 | **Zoom In / Out** | `Strg + +` / `Strg + -` |
 | **Auswahlwerkzeug (Lasso)** | `V` |
+| **Text-Werkzeug** | `T`, dann ins Blatt klicken; `Esc` beendet die Eingabe |
 | **Auswahl um 90° drehen** | `R` |
 | **Kopieren & Einfügen** | `Strg + C` / `Strg + V` |
 | **Auswahl löschen** | `Entf` oder `Backspace` |

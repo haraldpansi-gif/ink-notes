@@ -2,13 +2,15 @@
 //!
 //! Features:
 //! - Hochformat DIN A4 (210 mm x 297 mm)
-//! - Layer pro Seite: "Background", "Images" (nur bei eingefügten Bildern) und "Ink"
+//! - Layer pro Seite: "Background", "Images" (nur bei eingefügten Bildern), "Text" (nur bei
+//!   Textfeldern; echter, durchsuchbarer Text mit eingebetteter Schrift) und "Ink"
 //! - Y-Achsen-Spiegelung (PDF-Ursprung unten links vs. Bildschirmursprung oben links)
 //! - Vektor-Hintergründe (Kariert 5mm, Liniert, Punktraster, Blanko)
 //! - Zwei Export-Strategien:
 //!   - `FilledPolygon`: Glatte gefüllte Polygone aus den Triangle-Strip-Hüllen (variable Pinselstärke)
 //!   - `BezierCurve`: Glatte kubische Bézier-Kurven via `printpdf::Line`
 
+use std::collections::HashMap;
 use std::error::Error;
 use std::fs::File;
 use std::io::BufWriter;
@@ -22,6 +24,9 @@ use crate::background::{GRID_5MM_SPACING, LINED_SPACING};
 use crate::document::{
     Notebook, Page, PageBackground, Stroke, A4_HEIGHT_MM, A4_WIDTH_MM, PAGE_HEIGHT, PAGE_WIDTH,
 };
+use ab_glyph::Font as _;
+
+use crate::text::TextFont;
 
 /// Bereinigt einen Titel für die Verwendung in Dateinamen (entfernt illegale Zeichen).
 pub fn sanitize_filename_component(title: &str) -> String {
@@ -291,6 +296,7 @@ fn generate_pdf_document_with(
     let title = "ink-notes Notebook";
     let (doc, page1_idx, layer1_bg) =
         PdfDocument::new(title, Mm(A4_WIDTH_MM), Mm(A4_HEIGHT_MM), "Background");
+    let fonts = embed_text_fonts(&doc, notebook)?;
 
     // Seitentitel werden zu Lesezeichen (Inhaltsverzeichnis im PDF-Betrachter)
     if let Some(title) = &notebook.pages[0].title {
@@ -306,6 +312,9 @@ fn generate_pdf_document_with(
     }
     if notebook.pages[0].strokes.iter().any(Stroke::is_image) {
         render_image_layer(&page1_ref.add_layer("Images"), &notebook.pages[0], assets);
+    }
+    if notebook.pages[0].strokes.iter().any(Stroke::is_text) {
+        render_text_layer(&page1_ref.add_layer("Text"), &notebook.pages[0], &fonts);
     }
 
     let layer1_ink_ref = page1_ref.add_layer("Ink");
@@ -325,6 +334,9 @@ fn generate_pdf_document_with(
         }
         if page.strokes.iter().any(Stroke::is_image) {
             render_image_layer(&page_ref.add_layer("Images"), page, assets);
+        }
+        if page.strokes.iter().any(Stroke::is_text) {
+            render_text_layer(&page_ref.add_layer("Text"), page, &fonts);
         }
 
         let layer_ink_ref = page_ref.add_layer("Ink");
@@ -425,7 +437,7 @@ fn render_background_layer(layer: &printpdf::PdfLayerReference, background: Page
 /// Rendert alle Striche einer Seite auf Layer 2 ("Ink").
 fn render_ink_layer(layer: &printpdf::PdfLayerReference, page: &Page, strategy: ExportStrategy) {
     for stroke in &page.strokes {
-        if stroke.is_image() {
+        if stroke.is_object() {
             continue;
         }
         if let Some(ref shape) = stroke.shape {
@@ -560,6 +572,80 @@ fn render_image_layer(
             }
         };
         draw_image_xobject(layer, xobject, &corners);
+    }
+}
+
+/// Bettet die von Textfeldern des Notizbuchs verwendeten Schriften ein.
+fn embed_text_fonts(
+    doc: &PdfDocumentReference,
+    notebook: &Notebook,
+) -> Result<HashMap<TextFont, printpdf::IndirectFontRef>, Box<dyn Error>> {
+    let mut fonts = HashMap::new();
+    let used = notebook
+        .pages
+        .iter()
+        .flat_map(|p| &p.strokes)
+        .filter_map(|s| s.text.as_ref().map(|t| t.font));
+    for font in used {
+        if let std::collections::hash_map::Entry::Vacant(entry) = fonts.entry(font) {
+            entry.insert(doc.add_external_font(font.bytes())?);
+        }
+    }
+    Ok(fonts)
+}
+
+/// Rendert die Textfelder einer Seite als echten Text: Jedes Feld wird in seinem eigenen
+/// Koordinatensystem (eine Einheit = eine Seiteneinheit, y nach oben) gesetzt, das eine
+/// Transformationsmatrix auf seine Ecken abbildet – so stimmen Drehung und Skalierung.
+fn render_text_layer(
+    layer: &printpdf::PdfLayerReference,
+    page: &Page,
+    fonts: &HashMap<TextFont, printpdf::IndirectFontRef>,
+) {
+    for stroke in &page.strokes {
+        let (Some(text), Some(corners)) = (&stroke.text, stroke.object_corners()) else {
+            continue;
+        };
+        let Some(font) = fonts.get(&text.font) else {
+            continue;
+        };
+        let layout = text.layout();
+        let size = glam::Vec2::new(text.wrap_width.max(text.size), layout.height());
+        let (origin, [right, down]) = crate::text::frame_axes(&corners, size);
+        // Seite → PDF-Punkte: x · k, Höhe − y · k
+        let k = A4_WIDTH_MM / PAGE_WIDTH * 72.0 / 25.4;
+        let o = page_to_pdf_pt(origin);
+        let matrix = [right.x * k, -right.y * k, -down.x * k, down.y * k, o.x, o.y];
+        layer.save_graphics_state();
+        layer.set_ctm(printpdf::CurTransMat::Raw(matrix));
+        layer.set_fill_color(Color::Rgb(Rgb::new(
+            stroke.color[0],
+            stroke.color[1],
+            stroke.color[2],
+            None,
+        )));
+        layer.begin_text_section();
+        layer.set_font(font, text.size);
+        for (i, line) in layout.lines.iter().enumerate() {
+            if line.text.trim().is_empty() {
+                continue;
+            }
+            layer.set_text_matrix(printpdf::TextMatrix::Translate(
+                printpdf::Pt(0.0),
+                printpdf::Pt(-layout.baseline(i)),
+            ));
+            // Glyphen samt Unterschneidung wie auf dem Bildschirm (Abstände in 1/1000 Em)
+            let face = text.font.face();
+            let per_em = 1000.0 / face.units_per_em().unwrap_or(1000.0);
+            let mut previous: Option<ab_glyph::GlyphId> = None;
+            layer.write_positioned_codepoints(line.glyphs.iter().map(|&(id, _)| {
+                let kern = previous.map_or(0.0, |p| face.kern_unscaled(p, id));
+                previous = Some(id);
+                ((-kern * per_em).round() as i64, id.0)
+            }));
+        }
+        layer.end_text_section();
+        layer.restore_graphics_state();
     }
 }
 

@@ -48,6 +48,9 @@ fs2 = "0.4"
 hayro = "0.8"
 hayro-svg = "0.8"
 
+# Text-Werkzeug: Schriftmetriken und Rasterung (Schriften aus egui)
+ab_glyph = "0.2"
+
 [profile.dev]
 opt-level = 1 # Erhöht Rendering-Performance auch im Debug-Modus
 
