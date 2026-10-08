@@ -18,6 +18,7 @@ use winit::{
 use glam::Vec2;
 use ink_notes::assets::{AssetStore, ImportedImage};
 use ink_notes::autosave::{AutosaveController, AutosaveStatus};
+use ink_notes::background::PatternColor;
 use ink_notes::canvas::CanvasState;
 use ink_notes::document::{Notebook, PageBackground};
 use ink_notes::export::{self, export_notebook_to_pdf, ExportStrategy};
@@ -85,6 +86,7 @@ fn start_pdf_export(
     notebook: &Notebook,
     storage_dir: &Path,
     title: &str,
+    pattern: PatternColor,
     result_tx: Sender<Result<PathBuf, String>>,
     window: Arc<Window>,
 ) {
@@ -106,6 +108,7 @@ fn start_pdf_export(
                     &export_path,
                     ExportStrategy::FilledPolygon,
                     Some(&assets),
+                    pattern,
                 )
                 .map_err(|err| err.to_string())
             });
@@ -746,6 +749,7 @@ fn start_page_export(
     notebook: &Notebook,
     storage_dir: &Path,
     title: &str,
+    pattern: PatternColor,
     result_tx: Sender<Result<PathBuf, String>>,
     window: Arc<Window>,
 ) {
@@ -762,11 +766,15 @@ fn start_page_export(
     std::thread::spawn(move || {
         let assets = AssetStore::new(&storage_dir);
         let bytes = match kind {
-            ui::PageExportKind::Png => page_png(&page, Some(&assets), ImageBackground::Paper),
-            ui::PageExportKind::PngTransparent => {
-                page_png(&page, Some(&assets), ImageBackground::Transparent)
+            ui::PageExportKind::Png => {
+                page_png(&page, Some(&assets), ImageBackground::Paper, pattern)
             }
-            ui::PageExportKind::Svg => page_svg(&page, Some(&assets)).map(String::into_bytes),
+            ui::PageExportKind::PngTransparent => {
+                page_png(&page, Some(&assets), ImageBackground::Transparent, pattern)
+            }
+            ui::PageExportKind::Svg => {
+                page_svg(&page, Some(&assets), pattern).map(String::into_bytes)
+            }
         };
         let result = bytes
             .map_err(|e| e.to_string())
@@ -1047,6 +1055,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ui_state.sidebar_side = ui_settings.sidebar_side;
     ui_state.paper_theme = ui_settings.paper_theme;
     ui_state.adapt_ink_colors = ui_settings.adapt_ink_colors;
+    ui_state.pattern_color = ui_settings.pattern_color;
     ui_state.pressure_curve = ui_settings.pressure_curve;
     ui_state.continuous_scroll = ui_settings.continuous_scroll;
     ui_state.current_notebook_id = manifest.id.clone();
@@ -1084,6 +1093,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Initiale Seite und Werkzeugeinstellungen mit Canvas synchronisieren
     canvas.set_paper_theme(ui_state.paper_theme, ui_state.adapt_ink_colors);
+    canvas.set_pattern_color(ui_state.pattern_color);
     canvas.sync_page(notebook.current_page_mut());
     canvas.set_stroke_color(ui_state.pen_color);
     canvas.set_stroke_width_mm(ui_state.pen_stroke_width_mm);
@@ -1825,7 +1835,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                             // PDF-Export: Strg + E
                             Key::Character(c) if c.eq_ignore_ascii_case("e") && ctrl => {
-                                start_pdf_export(&notebook, &storage_dir, &manifest.title, export_tx.clone(), window.clone());
+                                start_pdf_export(&notebook, &storage_dir, &manifest.title, ui_state.pattern_color, export_tx.clone(), window.clone());
                                 ui_state.set_export_message("PDF-Export läuft…");
                                 window.request_redraw();
                             }
@@ -2782,7 +2792,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     window.request_redraw();
                                 }
                                 UiAction::ExportPage(kind) => {
-                                    start_page_export(kind, &notebook, &storage_dir, &manifest.title, export_tx.clone(), window.clone());
+                                    start_page_export(kind, &notebook, &storage_dir, &manifest.title, ui_state.pattern_color, export_tx.clone(), window.clone());
                                     ui_state.set_export_message("Seite wird exportiert …".to_string());
                                     window.request_redraw();
                                 }
@@ -2848,7 +2858,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     window.request_redraw();
                                 }
                                 UiAction::ExportPdf => {
-                                    start_pdf_export(&notebook, &storage_dir, &manifest.title, export_tx.clone(), window.clone());
+                                    start_pdf_export(&notebook, &storage_dir, &manifest.title, ui_state.pattern_color, export_tx.clone(), window.clone());
                                     ui_state.set_export_message("PDF-Export läuft…");
                                     window.request_redraw();
                                 }
@@ -3181,6 +3191,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     canvas.sync_page(notebook.current_page_mut());
                                     ui_settings.paper_theme = theme;
                                     ui_settings.adapt_ink_colors = adapt_ink;
+                                    save_ui_settings(&ui_settings, ui_settings_path.as_deref(), &mut ui_state);
+                                    window.request_redraw();
+                                }
+                                UiAction::SetPatternColor(pattern) => {
+                                    canvas.set_pattern_color(pattern);
+                                    ui_settings.pattern_color = pattern;
                                     save_ui_settings(&ui_settings, ui_settings_path.as_deref(), &mut ui_state);
                                     window.request_redraw();
                                 }

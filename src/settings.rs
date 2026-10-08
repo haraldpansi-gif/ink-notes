@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::background::PaperTheme;
+use crate::background::{PaperTheme, PatternColor};
 use crate::storage::{self, StorageError};
 
 /// Fensterseite, an der die Werkzeugleiste angedockt ist.
@@ -82,6 +82,8 @@ pub struct UiSettings {
     pub paper_theme: PaperTheme,
     /// Dunkle Stiftfarben auf dunklem Papier aufhellen
     pub adapt_ink_colors: bool,
+    /// Farbe von Karos, Linien und Punkten (Anzeige und Export)
+    pub pattern_color: PatternColor,
     /// Druckkennlinie des Stifts
     pub pressure_curve: PressureCurve,
     /// Seiten durchgehend untereinander anzeigen (sonst einzeln blättern)
@@ -94,6 +96,7 @@ impl Default for UiSettings {
             sidebar_side: SidebarSide::default(),
             paper_theme: PaperTheme::default(),
             adapt_ink_colors: true,
+            pattern_color: PatternColor::default(),
             pressure_curve: PressureCurve::default(),
             continuous_scroll: true,
         }
@@ -148,6 +151,7 @@ mod tests {
             sidebar_side: SidebarSide::Right,
             paper_theme: PaperTheme::Black,
             adapt_ink_colors: false,
+            pattern_color: PatternColor::Strong,
             pressure_curve: PressureCurve {
                 exponent: 1.8,
                 threshold: 0.1,
@@ -178,6 +182,7 @@ mod tests {
         assert!(settings.adapt_ink_colors);
         assert_eq!(settings.pressure_curve, PressureCurve::default());
         assert!(settings.continuous_scroll);
+        assert_eq!(settings.pattern_color, PatternColor::Light);
 
         // Unsinnige Werte aus einer von Hand bearbeiteten Datei werden begrenzt
         std::fs::write(

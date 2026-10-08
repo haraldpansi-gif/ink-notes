@@ -2338,12 +2338,24 @@ mod tests {
         let (mut loaded, _) = load_notebook(&dir).unwrap();
         assert!(!loaded.pages[1].is_loaded);
         // Ohne Nachladen verweigert der Export, statt leere Seiten zu erzeugen
-        assert!(crate::export::generate_pdf_document(&loaded, Default::default(), None).is_err());
+        assert!(crate::export::generate_pdf_document(
+            &loaded,
+            Default::default(),
+            None,
+            Default::default()
+        )
+        .is_err());
 
         load_all_pages(&dir, &mut loaded).unwrap();
         assert_eq!(loaded.pages[1].strokes.len(), 1);
         assert_eq!(loaded.pages[1].background, PageBackground::Lined);
-        assert!(crate::export::generate_pdf_document(&loaded, Default::default(), None).is_ok());
+        assert!(crate::export::generate_pdf_document(
+            &loaded,
+            Default::default(),
+            None,
+            Default::default()
+        )
+        .is_ok());
     }
 
     #[test]

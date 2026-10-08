@@ -1,7 +1,7 @@
 //! GPU-Canvas-Renderpipeline mit wgpu und Low-Latency-Verwaltung.
 //!
 //! Features:
-//! - Zero-Latency-Pufferung via `PresentMode::Mailbox` (Fallback: `Fifo`) und `desired_maximum_frame_latency: 1`.
+//! - Geringe Bildverzögerung durch `PresentMode::Mailbox` (Fallback: `Fifo`) und `desired_maximum_frame_latency: 1`.
 //! - Strikte Pipeline-Trennung: DIN-A4-Hintergrund, permanente Striche und temporäre Live-Geometrie.
 //! - NDC-Transformation der 2D-Vektor-Meshes über Vertex-Shader-Uniforms.
 //! - Alpha-Blending (`wgpu::BlendState::ALPHA_BLENDING`).
@@ -12,7 +12,7 @@ use std::sync::Arc;
 use winit::dpi::PhysicalSize;
 use winit::window::Window;
 
-use crate::background::{generate_background_mesh, generate_paper_quad, PaperTheme};
+use crate::background::{generate_background_mesh, generate_paper_quad, PaperTheme, PatternColor};
 use crate::document::{Page, PageBackground, PageViewport, Stroke, StylusSample};
 use crate::filter::OneEuroFilter;
 use crate::spline::{self, ControlPoint, SplineConfig};
@@ -122,18 +122,20 @@ struct NeighborFingerprint {
     background: PageBackground,
     size: [u32; 2],
     paper_theme: PaperTheme,
+    pattern: PatternColor,
     vertex_count: usize,
     stroke_count: usize,
     last_stroke_id: Option<u64>,
 }
 
 impl NeighborFingerprint {
-    fn of(page: &Page, paper_theme: PaperTheme) -> Self {
+    fn of(page: &Page, paper_theme: PaperTheme, pattern: PatternColor) -> Self {
         Self {
             page_id: page.id,
             background: page.background,
             size: page.size.to_array().map(f32::to_bits),
             paper_theme,
+            pattern,
             vertex_count: page.vertex_cache.len(),
             stroke_count: page.strokes.len(),
             last_stroke_id: page.strokes.last().map(|s| s.id),
@@ -190,6 +192,8 @@ pub struct CanvasState {
     pub paper_theme: PaperTheme,
     /// Dunkle Tinte auf dunklem Papier aufhellen
     pub adapt_ink: bool,
+    /// Farbe von Karos, Linien und Punkten
+    pattern: PatternColor,
     /// Größe der aktuellen Seite und Rahmen, in den alle Seiten des Notizbuchs passen
     page_size: glam::Vec2,
     fit_box: glam::Vec2,
@@ -299,7 +303,7 @@ impl CanvasState {
             )
             .await?;
 
-        // 4. Zero-Latency-Pufferung (Mailbox, sonst Fifo) & Frame-Latency 1
+        // 4. Geringe Bildverzögerung (Mailbox, sonst Fifo) & Frame-Latency 1
         let surface_format = surface_caps
             .formats
             .iter()
@@ -509,6 +513,7 @@ impl CanvasState {
             current_background,
             paper_theme,
             adapt_ink: false,
+            pattern: PatternColor::default(),
             page_size: crate::document::A4_SIZE,
             fit_box: crate::document::A4_SIZE,
             text_specs: HashMap::new(),
@@ -785,6 +790,14 @@ impl CanvasState {
         self.update_uniforms();
     }
 
+    /// Setzt die Farbe von Karos, Linien und Punkten.
+    pub fn set_pattern_color(&mut self, pattern: PatternColor) {
+        if self.pattern != pattern {
+            self.pattern = pattern;
+            self.upload_background_mesh();
+        }
+    }
+
     /// Setzt den Seitenhintergrund und aktualisiert bei Bedarf den Vertex-Puffer.
     pub fn set_background(&mut self, background: PageBackground) {
         if self.current_background == background {
@@ -798,7 +811,7 @@ impl CanvasState {
     fn upload_background_mesh(&mut self) {
         let mesh = generate_background_mesh(
             self.current_background,
-            self.paper_theme.pattern_color(),
+            self.pattern.color(self.paper_theme),
             self.page_size,
         );
         self.background_vertex_count = mesh.len() as u32;
@@ -874,7 +887,7 @@ impl CanvasState {
         let mut old = std::mem::take(&mut self.neighbors);
         let mut image_groups = Vec::with_capacity(pages.len());
         for &(offset, page) in pages {
-            let fingerprint = NeighborFingerprint::of(page, self.paper_theme);
+            let fingerprint = NeighborFingerprint::of(page, self.paper_theme, self.pattern);
             let mut neighbor = match old.iter().position(|n| n.fingerprint == fingerprint) {
                 Some(i) => old.swap_remove(i),
                 None => self.upload_neighbor(page, fingerprint),
@@ -924,7 +937,7 @@ impl CanvasState {
         let mut background = generate_paper_quad(self.paper_theme.paper_color(), page.size);
         background.extend(generate_background_mesh(
             page.background,
-            self.paper_theme.pattern_color(),
+            self.pattern.color(self.paper_theme),
             page.size,
         ));
         NeighborPage {

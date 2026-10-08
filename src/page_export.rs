@@ -12,6 +12,7 @@ use hayro::vello_cpu::color::palette::css::{TRANSPARENT, WHITE};
 use hayro::{PixmapSettings, RenderCache, RenderSettings};
 
 use crate::assets::{AssetStore, RgbaImage};
+use crate::background::PatternColor;
 use crate::document::{Aabb, Notebook, Page, PageBackground, A4_WIDTH_MM, PAGE_WIDTH};
 use crate::export::{export_notebook_to_bytes, ExportStrategy};
 
@@ -30,9 +31,13 @@ pub enum ImageBackground {
 }
 
 /// Erzeugt ein einseitiges PDF aus `page`.
-fn single_page_pdf(page: &Page, assets: Option<&AssetStore>) -> Result<Vec<u8>, Box<dyn Error>> {
+fn single_page_pdf(
+    page: &Page,
+    assets: Option<&AssetStore>,
+    pattern: PatternColor,
+) -> Result<Vec<u8>, Box<dyn Error>> {
     let notebook = Notebook::from_pages(vec![page.clone()], 0, 1, page.id + 1);
-    export_notebook_to_bytes(&notebook, ExportStrategy::FilledPolygon, assets)
+    export_notebook_to_bytes(&notebook, ExportStrategy::FilledPolygon, assets, pattern)
 }
 
 /// Seite ohne Raster und PDF-Hintergrund (für transparenten Export und Auswahlen).
@@ -91,11 +96,14 @@ pub fn page_png(
     page: &Page,
     assets: Option<&AssetStore>,
     background: ImageBackground,
+    pattern: PatternColor,
 ) -> Result<Vec<u8>, Box<dyn Error>> {
     let image = match background {
-        ImageBackground::Paper => rasterize(single_page_pdf(page, assets)?, PAGE_PNG_DPI, false)?,
+        ImageBackground::Paper => {
+            rasterize(single_page_pdf(page, assets, pattern)?, PAGE_PNG_DPI, false)?
+        }
         ImageBackground::Transparent => rasterize(
-            single_page_pdf(&content_only(page), assets)?,
+            single_page_pdf(&content_only(page), assets, pattern)?,
             PAGE_PNG_DPI,
             true,
         )?,
@@ -104,9 +112,13 @@ pub fn page_png(
 }
 
 /// Seite als SVG (Vektor; Schriften importierter PDFs werden zu Pfaden).
-pub fn page_svg(page: &Page, assets: Option<&AssetStore>) -> Result<String, Box<dyn Error>> {
-    let pdf =
-        Pdf::new(single_page_pdf(page, assets)?).map_err(|e| format!("PDF nicht lesbar: {e:?}"))?;
+pub fn page_svg(
+    page: &Page,
+    assets: Option<&AssetStore>,
+    pattern: PatternColor,
+) -> Result<String, Box<dyn Error>> {
+    let pdf = Pdf::new(single_page_pdf(page, assets, pattern)?)
+        .map_err(|e| format!("PDF nicht lesbar: {e:?}"))?;
     let pdf_page = pdf.pages().first().ok_or("PDF ohne Seite")?;
     Ok(hayro_svg::convert(
         pdf_page,
@@ -133,7 +145,11 @@ pub fn selection_image(
     let max_width = selected.strokes.iter().map(|s| s.width).fold(0.0, f32::max);
     let bounds: Aabb = bounds.expanded(max_width / 2.0 + 4.0);
 
-    let full = rasterize(single_page_pdf(&selected, assets)?, SELECTION_PNG_DPI, true)?;
+    let full = rasterize(
+        single_page_pdf(&selected, assets, PatternColor::default())?,
+        SELECTION_PNG_DPI,
+        true,
+    )?;
     // Seiteneinheiten → Pixel
     let px_per_unit = SELECTION_PNG_DPI / 25.4 * A4_WIDTH_MM / PAGE_WIDTH;
     let x0 = ((bounds.min.x * px_per_unit).floor().max(0.0) as u32).min(full.width);
@@ -190,12 +206,22 @@ mod tests {
     #[test]
     fn test_page_png_paper_and_transparent() {
         let page = page_with_line();
-        let paper = decode(&page_png(&page, None, ImageBackground::Paper).unwrap());
+        let paper = decode(
+            &page_png(&page, None, ImageBackground::Paper, PatternColor::default()).unwrap(),
+        );
         // A4 mit 200 dpi
         assert_eq!(paper.width(), (A4_WIDTH_MM / 25.4 * PAGE_PNG_DPI) as u32);
         assert_eq!(paper.get_pixel(5, 5).0[3], 255, "Papier ist deckend");
 
-        let clear = decode(&page_png(&page, None, ImageBackground::Transparent).unwrap());
+        let clear = decode(
+            &page_png(
+                &page,
+                None,
+                ImageBackground::Transparent,
+                PatternColor::default(),
+            )
+            .unwrap(),
+        );
         assert_eq!(clear.get_pixel(5, 5).0[3], 0, "Hintergrund ist transparent");
         // Die Linie ist rot und deckend
         let px_per_unit = clear.width() as f32 / PAGE_WIDTH;
@@ -208,8 +234,21 @@ mod tests {
     }
 
     #[test]
+    fn test_export_uses_pattern_color() {
+        // Kariertes Blatt: das kräftige Muster ist im Export dunkler als das helle
+        let page = Page::new(1, PageBackground::Grid5mm);
+        let darkest = |pattern| {
+            let png = decode(&page_png(&page, None, ImageBackground::Paper, pattern).unwrap());
+            png.pixels().map(|p| p.0[1]).min().unwrap()
+        };
+        let light = darkest(PatternColor::Light);
+        let strong = darkest(PatternColor::Strong);
+        assert!(strong + 60 < light, "hell {light}, kräftig {strong}");
+    }
+
+    #[test]
     fn test_page_svg_contains_ink() {
-        let svg = page_svg(&page_with_line(), None).unwrap();
+        let svg = page_svg(&page_with_line(), None, PatternColor::default()).unwrap();
         assert!(svg.starts_with("<svg") || svg.contains("<svg"));
         assert!(svg.contains("<path"));
         assert!(svg.trim_end().ends_with("</svg>"));
@@ -253,7 +292,15 @@ mod tests {
     #[test]
     fn test_exported_text_matches_screen_rendering() {
         let (page, text) = page_with_text();
-        let png = decode(&page_png(&page, None, ImageBackground::Transparent).unwrap());
+        let png = decode(
+            &page_png(
+                &page,
+                None,
+                ImageBackground::Transparent,
+                PatternColor::default(),
+            )
+            .unwrap(),
+        );
         let px_per_unit = png.width() as f32 / PAGE_WIDTH;
         let exported = ink_bounds(png.width(), png.as_raw());
 
@@ -278,12 +325,28 @@ mod tests {
     #[test]
     fn test_exported_text_follows_rotation() {
         let (mut page, _) = page_with_text();
-        let png = decode(&page_png(&page, None, ImageBackground::Transparent).unwrap());
+        let png = decode(
+            &page_png(
+                &page,
+                None,
+                ImageBackground::Transparent,
+                PatternColor::default(),
+            )
+            .unwrap(),
+        );
         let straight = ink_bounds(png.width(), png.as_raw());
 
         let center = page.strokes[0].aabb.min;
         page.strokes[0].rotate(center, std::f32::consts::FRAC_PI_2);
-        let png = decode(&page_png(&page, None, ImageBackground::Transparent).unwrap());
+        let png = decode(
+            &page_png(
+                &page,
+                None,
+                ImageBackground::Transparent,
+                PatternColor::default(),
+            )
+            .unwrap(),
+        );
         let rotated = ink_bounds(png.width(), png.as_raw());
         // 90° im Uhrzeigersinn: Breite und Höhe tauschen, Text liegt links vom Drehpunkt
         let (w, h) = (straight.2 - straight.0, straight.3 - straight.1);
@@ -302,7 +365,15 @@ mod tests {
         let mut page = page_with_line();
         page.size = glam::Vec2::new(2970.0, 1671.0);
         page.strokes[0].translate(glam::Vec2::new(1900.0, 500.0)); // x 2400–2800, y 1500
-        let png = decode(&page_png(&page, None, ImageBackground::Transparent).unwrap());
+        let png = decode(
+            &page_png(
+                &page,
+                None,
+                ImageBackground::Transparent,
+                PatternColor::default(),
+            )
+            .unwrap(),
+        );
         let ratio = png.width() as f32 / png.height() as f32;
         assert!((ratio - 2970.0 / 1671.0).abs() < 0.01, "{ratio}");
         let px_per_unit = png.width() as f32 / 2970.0;
@@ -312,7 +383,7 @@ mod tests {
         };
         assert!(at(2600.0, 1500.0)[3] > 200, "Strich liegt unten rechts");
         assert!(at(2600.0, 1300.0)[3] == 0);
-        let svg = page_svg(&page, None).unwrap();
+        let svg = page_svg(&page, None, PatternColor::default()).unwrap();
         assert!(svg.contains("<path"));
     }
 

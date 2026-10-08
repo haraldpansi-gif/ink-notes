@@ -12,7 +12,7 @@
 use std::time::Instant;
 
 use crate::autosave::AutosaveStatus;
-use crate::background::{adapt_ink_color, PaperTheme};
+use crate::background::{adapt_ink_color, PaperTheme, PatternColor};
 use crate::document::{
     EraserMode, Notebook, Page, PageBackground, StrokeTool, PAGE_HEIGHT, PAGE_WIDTH,
 };
@@ -198,6 +198,8 @@ pub enum UiAction {
     SavePressureCurve(PressureCurve),
     /// Seiten durchgehend untereinander statt einzeln anzeigen (wird gespeichert)
     SetContinuousScroll(bool),
+    /// Farbe von Karos, Linien und Punkten (wird gespeichert, gilt auch für den Export)
+    SetPatternColor(PatternColor),
     /// Bilddatei auf der aktuellen Seite einfügen
     InsertImageFile(std::path::PathBuf),
     /// PDF als neues Notizbuch importieren
@@ -266,6 +268,8 @@ pub struct UiState {
     pub paper_theme: PaperTheme,
     /// Dunkle Tinte auf dunklem Papier aufhellen
     pub adapt_ink_colors: bool,
+    /// Farbe von Karos, Linien und Punkten
+    pub pattern_color: PatternColor,
     /// Seiten hängen untereinander und werden durchgehend gescrollt
     pub continuous_scroll: bool,
     /// Text-Werkzeug: Farbe, Schriftgröße (Punkt) und Schriftart neuer Textfelder
@@ -335,6 +339,7 @@ impl Default for UiState {
             eraser_mode: EraserMode::All,
             paper_theme: PaperTheme::White,
             adapt_ink_colors: true,
+            pattern_color: PatternColor::Light,
             continuous_scroll: true,
             text_color: PEN_COLOR_PRESETS[0].0,
             text_size_pt: crate::text::DEFAULT_TEXT_SIZE_PT,
@@ -1281,6 +1286,49 @@ fn paper_theme_button(ui: &mut egui::Ui, theme: PaperTheme, selected: bool) -> e
         egui::Stroke::new(1.0_f32, egui::Color32::from_gray(120)),
     );
     response
+}
+
+/// Knopf für eine Musterfarbe: Vorschau (kleines Karo auf der aktuellen Papierfarbe) und
+/// Bezeichnung.
+fn pattern_color_button(
+    ui: &mut egui::Ui,
+    pattern: PatternColor,
+    paper: PaperTheme,
+    selected: bool,
+) -> egui::Response {
+    let response = ui.add_sized(
+        [82.0, 28.0],
+        egui::SelectableLabel::new(selected, format!("      {}", pattern.label())),
+    );
+    let swatch = egui::Rect::from_center_size(
+        egui::pos2(response.rect.min.x + 15.0, response.rect.center().y),
+        egui::vec2(16.0, 16.0),
+    );
+    let painter = ui.painter();
+    painter.rect_filled(
+        swatch,
+        egui::Rounding::same(3.0),
+        linear_color32(paper.paper_color()),
+    );
+    let line = egui::Stroke::new(1.5_f32, linear_color32(pattern.color(paper)));
+    for t in [0.33, 0.67] {
+        let x = swatch.min.x + swatch.width() * t;
+        let y = swatch.min.y + swatch.height() * t;
+        painter.line_segment(
+            [egui::pos2(x, swatch.min.y), egui::pos2(x, swatch.max.y)],
+            line,
+        );
+        painter.line_segment(
+            [egui::pos2(swatch.min.x, y), egui::pos2(swatch.max.x, y)],
+            line,
+        );
+    }
+    painter.rect_stroke(
+        swatch,
+        egui::Rounding::same(3.0),
+        egui::Stroke::new(1.0_f32, egui::Color32::from_gray(120)),
+    );
+    response.on_hover_text("Gilt für alle Seiten, auch beim Export")
 }
 
 /// Schieberegler für die Druckkurve mit Vorschau der Kennlinie. Änderungen gelten sofort
@@ -2663,6 +2711,25 @@ pub fn render_ui(
                                     adapt_ink: state.adapt_ink_colors,
                                 });
                             }
+
+                            section(ui, "KAROS, LINIEN UND PUNKTE");
+                            ui.horizontal_wrapped(|ui| {
+                                ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
+                                for pattern in PatternColor::ALL {
+                                    if pattern_color_button(
+                                        ui,
+                                        pattern,
+                                        state.paper_theme,
+                                        state.pattern_color == pattern,
+                                    )
+                                    .clicked()
+                                        && state.pattern_color != pattern
+                                    {
+                                        state.pattern_color = pattern;
+                                        actions.push(UiAction::SetPatternColor(pattern));
+                                    }
+                                }
+                            });
 
                             section(ui, "ANSICHT");
                             if ui

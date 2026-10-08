@@ -20,7 +20,7 @@ use printpdf::path::{PaintMode, WindingOrder};
 use printpdf::{Color, Line, Mm, PdfDocument, PdfDocumentReference, Point, Polygon, Rgb};
 
 use crate::assets::AssetStore;
-use crate::background::{GRID_5MM_SPACING, LINED_SPACING};
+use crate::background::{PatternColor, DOT_SIZE, GRID_5MM_SPACING, LINED_SPACING};
 use crate::document::{
     Notebook, Page, PageBackground, Stroke, A4_HEIGHT_MM, A4_WIDTH_MM, PAGE_HEIGHT, PAGE_WIDTH,
 };
@@ -155,14 +155,16 @@ fn end_page_layer(layer: &printpdf::PdfLayerReference) {
 }
 
 /// Erzeugt ein PDF-Dokument aus einem Notizbuch und speichert es als Datei.
-/// `assets`: Bilder des Notizbuchs (ohne werden Bilder als graue Fläche ausgegeben).
+/// `assets`: Bilder des Notizbuchs (ohne werden Bilder als graue Fläche ausgegeben);
+/// `pattern`: Farbe von Karos, Linien und Punkten.
 pub fn export_notebook_to_pdf<P: AsRef<Path>>(
     notebook: &Notebook,
     path: P,
     strategy: ExportStrategy,
     assets: Option<&AssetStore>,
+    pattern: PatternColor,
 ) -> Result<(), Box<dyn Error>> {
-    let bytes = export_notebook_to_bytes(notebook, strategy, assets)?;
+    let bytes = export_notebook_to_bytes(notebook, strategy, assets, pattern)?;
     let file = File::create(path)?;
     let mut writer = BufWriter::new(file);
     std::io::Write::write_all(&mut writer, &bytes)?;
@@ -175,8 +177,9 @@ pub fn export_notebook_to_bytes(
     notebook: &Notebook,
     strategy: ExportStrategy,
     assets: Option<&AssetStore>,
+    pattern: PatternColor,
 ) -> Result<Vec<u8>, Box<dyn Error>> {
-    let doc = generate_pdf_document(notebook, strategy, assets)?;
+    let doc = generate_pdf_document(notebook, strategy, assets, pattern)?;
     let bytes = fix_text_encoding(doc.save_to_bytes()?, notebook)?;
 
     // Importierte PDF-Seiten als Vektorgrafik unterlegen
@@ -202,7 +205,7 @@ pub fn export_notebook_to_bytes(
         );
         raster.insert(underlay.target_page);
     }
-    let doc = generate_pdf_document_with(notebook, strategy, assets, &raster)?;
+    let doc = generate_pdf_document_with(notebook, strategy, assets, pattern, &raster)?;
     let bytes = fix_text_encoding(doc.save_to_bytes()?, notebook)?;
     let remaining: Vec<_> = underlays
         .into_iter()
@@ -289,11 +292,13 @@ pub fn generate_pdf_document(
     notebook: &Notebook,
     strategy: ExportStrategy,
     assets: Option<&AssetStore>,
+    pattern: PatternColor,
 ) -> Result<PdfDocumentReference, Box<dyn Error>> {
     generate_pdf_document_with(
         notebook,
         strategy,
         assets,
+        pattern,
         &std::collections::HashSet::new(),
     )
 }
@@ -304,6 +309,7 @@ fn generate_pdf_document_with(
     notebook: &Notebook,
     strategy: ExportStrategy,
     assets: Option<&AssetStore>,
+    pattern: PatternColor,
     raster_pdf_pages: &std::collections::HashSet<usize>,
 ) -> Result<PdfDocumentReference, Box<dyn Error>> {
     if notebook.pages.is_empty() {
@@ -338,7 +344,7 @@ fn generate_pdf_document_with(
             doc.add_bookmark(title.clone(), page_idx);
         }
         let page_ref = doc.get_page(page_idx);
-        render_background_layer(&page_ref.get_layer(layer_bg), page);
+        render_background_layer(&page_ref.get_layer(layer_bg), page, pattern);
         let layer = |name: &str, render: &dyn Fn(&printpdf::PdfLayerReference)| {
             let layer = page_ref.add_layer(name);
             begin_page_layer(&layer, page);
@@ -361,10 +367,16 @@ fn generate_pdf_document_with(
 }
 
 /// Rendert das Vektorraster auf Layer 1 ("Background").
-fn render_background_layer(layer: &printpdf::PdfLayerReference, page: &Page) {
+fn render_background_layer(
+    layer: &printpdf::PdfLayerReference,
+    page: &Page,
+    pattern: PatternColor,
+) {
     let background = page.background;
     let (Mm(page_width_mm), Mm(page_height_mm)) = pdf_page_mm(page);
-    let grid_color = Color::Rgb(Rgb::new(0.88, 0.88, 0.88, None));
+    // Exportiert wird immer auf weißem Papier
+    let [r, g, b, _] = pattern.color(crate::background::PaperTheme::White);
+    let grid_color = Color::Rgb(Rgb::new(r, g, b, None));
     layer.set_outline_color(grid_color.clone());
     layer.set_outline_thickness(0.4); // Feine 0.15 mm Haarlinie (ca. 0.4 pt)
     layer.set_fill_color(grid_color);
@@ -425,7 +437,7 @@ fn render_background_layer(layer: &printpdf::PdfLayerReference, page: &Page) {
 
         PageBackground::DotGrid => {
             let spacing_mm = GRID_5MM_SPACING / 10.0; // 5.0 mm
-            let half_dot = 0.2; // 0.4 mm Kantenlänge
+            let half_dot = DOT_SIZE / 20.0; // Kantenlänge in mm wie am Bildschirm
 
             let mut y = spacing_mm;
             while y < page_height_mm {
@@ -1259,8 +1271,13 @@ mod tests {
         let temp_dir = std::env::temp_dir();
         let pdf_path = temp_dir.join("ink_notes_test_export.pdf");
 
-        let export_res =
-            export_notebook_to_pdf(&notebook, &pdf_path, ExportStrategy::FilledPolygon, None);
+        let export_res = export_notebook_to_pdf(
+            &notebook,
+            &pdf_path,
+            ExportStrategy::FilledPolygon,
+            None,
+            PatternColor::default(),
+        );
         assert!(
             export_res.is_ok(),
             "PDF-Export zu Datei muss erfolgreich sein"
@@ -1286,7 +1303,12 @@ mod tests {
         );
 
         // 3. Export als Bytes testen (Strategie B: BezierCurve)
-        let bytes_res = export_notebook_to_bytes(&notebook, ExportStrategy::BezierCurve, None);
+        let bytes_res = export_notebook_to_bytes(
+            &notebook,
+            ExportStrategy::BezierCurve,
+            None,
+            PatternColor::default(),
+        );
         assert!(bytes_res.is_ok());
         let bytes = bytes_res.unwrap();
         assert!(bytes.len() > 1024);
@@ -1409,7 +1431,12 @@ mod tests {
         );
         page.add_stroke(octahedron_stroke);
 
-        let bytes_res = export_notebook_to_bytes(&notebook, ExportStrategy::FilledPolygon, None);
+        let bytes_res = export_notebook_to_bytes(
+            &notebook,
+            ExportStrategy::FilledPolygon,
+            None,
+            PatternColor::default(),
+        );
         assert!(bytes_res.is_ok(), "Shape export must succeed");
         let bytes = bytes_res.unwrap();
         assert!(bytes.len() > 1024);
@@ -1478,9 +1505,13 @@ mod tests {
             ));
         }
 
-        let bytes =
-            export_notebook_to_bytes(&notebook, ExportStrategy::FilledPolygon, Some(&assets))
-                .expect("Export mit Bildern");
+        let bytes = export_notebook_to_bytes(
+            &notebook,
+            ExportStrategy::FilledPolygon,
+            Some(&assets),
+            PatternColor::default(),
+        )
+        .expect("Export mit Bildern");
         let contains = |needle: &[u8]| bytes.windows(needle.len()).any(|w| w == needle);
         assert!(
             contains(b"/DCTDecode"),
@@ -1504,7 +1535,13 @@ mod tests {
         assert_eq!(image_objects, 3);
 
         // Ohne Asset-Ordner: Export klappt trotzdem (graue Flächen)
-        assert!(export_notebook_to_bytes(&notebook, ExportStrategy::FilledPolygon, None).is_ok());
+        assert!(export_notebook_to_bytes(
+            &notebook,
+            ExportStrategy::FilledPolygon,
+            None,
+            PatternColor::default()
+        )
+        .is_ok());
     }
 
     #[test]
@@ -1516,9 +1553,13 @@ mod tests {
         crate::storage::load_all_pages(&dir, &mut notebook).unwrap();
         let assets = AssetStore::new(&dir);
 
-        let bytes =
-            export_notebook_to_bytes(&notebook, ExportStrategy::FilledPolygon, Some(&assets))
-                .unwrap();
+        let bytes = export_notebook_to_bytes(
+            &notebook,
+            ExportStrategy::FilledPolygon,
+            Some(&assets),
+            PatternColor::default(),
+        )
+        .unwrap();
         let doc = printpdf::lopdf::Document::load_mem(&bytes).unwrap();
         assert_eq!(doc.get_pages().len(), 2);
         for page_id in doc.get_pages().into_values() {
@@ -1563,7 +1604,13 @@ mod tests {
         assert!(!red_at(&exported, 5, 5));
 
         // Ohne Zugriff auf das PDF: Export klappt trotzdem (graue Ersatzfläche)
-        assert!(export_notebook_to_bytes(&notebook, ExportStrategy::FilledPolygon, None).is_ok());
+        assert!(export_notebook_to_bytes(
+            &notebook,
+            ExportStrategy::FilledPolygon,
+            None,
+            PatternColor::default()
+        )
+        .is_ok());
     }
 
     #[test]
@@ -1574,8 +1621,13 @@ mod tests {
         let ids: Vec<u64> = notebook.pages.iter().map(|p| p.id).collect();
         notebook.set_page_title(ids[0], "Einleitung");
         notebook.set_page_title(ids[2], "Übung 2 – Integrale");
-        let bytes =
-            export_notebook_to_bytes(&notebook, ExportStrategy::FilledPolygon, None).unwrap();
+        let bytes = export_notebook_to_bytes(
+            &notebook,
+            ExportStrategy::FilledPolygon,
+            None,
+            PatternColor::default(),
+        )
+        .unwrap();
         let doc = printpdf::lopdf::Document::load_mem(&bytes).unwrap();
         let catalog = doc.catalog().unwrap();
         assert!(catalog.has(b"Outlines"), "Lesezeichen fehlen");

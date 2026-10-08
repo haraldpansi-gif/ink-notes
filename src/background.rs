@@ -5,10 +5,63 @@ use serde::{Deserialize, Serialize};
 use crate::canvas::InkVertex;
 use crate::document::PageBackground;
 
+/// Farbe von Karos, Linien und Punkten (wird gespeichert und gilt auch für den Export).
+/// `Light` ist die zurückhaltende Standardfarbe des jeweiligen Papiers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PatternColor {
+    #[default]
+    Light,
+    Medium,
+    Strong,
+    Blue,
+    Green,
+}
+
+impl PatternColor {
+    pub const ALL: [PatternColor; 5] = [
+        PatternColor::Light,
+        PatternColor::Medium,
+        PatternColor::Strong,
+        PatternColor::Blue,
+        PatternColor::Green,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            PatternColor::Light => "Hell",
+            PatternColor::Medium => "Mittel",
+            PatternColor::Strong => "Kräftig",
+            PatternColor::Blue => "Blau",
+            PatternColor::Green => "Grün",
+        }
+    }
+
+    /// Linearer Farbwert des Musters auf dem Papier `paper` (für den Export: weißes Papier).
+    pub fn color(self, paper: PaperTheme) -> [f32; 4] {
+        let light = paper.pattern_color();
+        let dark = paper.is_dark();
+        let scaled = |f: f32| [light[0] * f, light[1] * f, light[2] * f, 1.0];
+        match (self, dark) {
+            (PatternColor::Light, _) => light,
+            // Helles Papier: kräftiger = dunkler
+            (PatternColor::Medium, false) => scaled(0.62),
+            (PatternColor::Strong, false) => scaled(0.28),
+            // Dunkles Papier: kräftiger = heller
+            (PatternColor::Medium, true) => [0.16, 0.16, 0.17, 1.0],
+            (PatternColor::Strong, true) => [0.32, 0.32, 0.34, 1.0],
+            (PatternColor::Blue, false) => [0.35, 0.55, 0.95, 1.0],
+            (PatternColor::Blue, true) => [0.06, 0.14, 0.42, 1.0],
+            (PatternColor::Green, false) => [0.32, 0.72, 0.38, 1.0],
+            (PatternColor::Green, true) => [0.05, 0.22, 0.09, 1.0],
+        }
+    }
+}
+
 /// Linienstärke für Gitter- und Schreiblinien in Seiteneinheiten (1.5 = 0.15 mm).
 pub const LINE_THICKNESS: f32 = 1.5;
-/// Punktgröße für das Punktraster in Seiteneinheiten (2.5 = 0.25 mm).
-pub const DOT_SIZE: f32 = 2.5;
+/// Punktgröße für das Punktraster in Seiteneinheiten (4 = 0,4 mm, wie im PDF-Export).
+pub const DOT_SIZE: f32 = 4.0;
 
 /// Rasterabstand 5 mm (50 Einheiten).
 pub const GRID_5MM_SPACING: f32 = 50.0;
@@ -228,6 +281,31 @@ mod tests {
     use super::*;
 
     use crate::document::{A4_SIZE, PAGE_HEIGHT, PAGE_WIDTH};
+
+    #[test]
+    fn test_pattern_colors_get_more_visible() {
+        // Luminanz (linear) als Abstand zum Papier
+        let lum = |c: [f32; 4]| 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+        for paper in PaperTheme::ALL {
+            let p = lum(paper.paper_color());
+            let contrast = |c: PatternColor| (lum(c.color(paper)) - p).abs();
+            assert_eq!(PatternColor::Light.color(paper), paper.pattern_color());
+            assert!(
+                contrast(PatternColor::Medium) > contrast(PatternColor::Light),
+                "{paper:?}"
+            );
+            assert!(
+                contrast(PatternColor::Strong) > contrast(PatternColor::Medium),
+                "{paper:?}"
+            );
+            for c in [PatternColor::Blue, PatternColor::Green] {
+                assert!(
+                    contrast(c) > contrast(PatternColor::Light),
+                    "{c:?} auf {paper:?}"
+                );
+            }
+        }
+    }
 
     #[test]
     fn test_paper_quad_generation() {
