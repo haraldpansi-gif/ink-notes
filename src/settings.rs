@@ -73,6 +73,60 @@ impl Default for PressureCurve {
     }
 }
 
+/// Stift-Vorlage: Farbe und Stärke eines der Stifte in der Werkzeugleiste. Ändert man Farbe
+/// oder Stärke, während ein Stift gewählt ist, merkt sich die Vorlage die neuen Werte.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct PenPreset {
+    pub color: [f32; 4],
+    pub width_mm: f32,
+}
+
+impl PenPreset {
+    pub const WIDTH_RANGE: std::ops::RangeInclusive<f32> = 0.15..=5.0;
+
+    /// Begrenzt Werte aus einer (evtl. von Hand bearbeiteten) Einstellungsdatei; Stifte sind
+    /// immer deckend.
+    pub fn sanitized(&self, fallback: PenPreset) -> Self {
+        let mut color = fallback.color;
+        if self.color.iter().all(|c| c.is_finite()) {
+            for (out, c) in color.iter_mut().zip(self.color).take(3) {
+                *out = c.clamp(0.0, 1.0);
+            }
+        }
+        color[3] = 1.0;
+        let width_mm = if self.width_mm.is_finite() {
+            self.width_mm
+                .clamp(*Self::WIDTH_RANGE.start(), *Self::WIDTH_RANGE.end())
+        } else {
+            fallback.width_mm
+        };
+        Self { color, width_mm }
+    }
+}
+
+/// Anzahl der Stifte in der Werkzeugleiste.
+pub const PEN_PRESET_COUNT: usize = 4;
+
+/// Standardstifte: Schwarz, Blau und Rot fein, Grün etwas kräftiger.
+pub const DEFAULT_PEN_PRESETS: [PenPreset; PEN_PRESET_COUNT] = [
+    PenPreset {
+        color: [0.12, 0.12, 0.14, 1.0],
+        width_mm: 0.5,
+    },
+    PenPreset {
+        color: [0.15, 0.35, 0.85, 1.0],
+        width_mm: 0.5,
+    },
+    PenPreset {
+        color: [0.85, 0.20, 0.20, 1.0],
+        width_mm: 0.5,
+    },
+    PenPreset {
+        color: [0.18, 0.65, 0.35, 1.0],
+        width_mm: 0.8,
+    },
+];
+
 /// Benutzereinstellungen der Oberfläche.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -88,6 +142,9 @@ pub struct UiSettings {
     pub pressure_curve: PressureCurve,
     /// Seiten durchgehend untereinander anzeigen (sonst einzeln blättern)
     pub continuous_scroll: bool,
+    /// Stifte der Werkzeugleiste und der gewählte davon
+    pub pen_presets: [PenPreset; PEN_PRESET_COUNT],
+    pub active_pen: usize,
 }
 
 impl Default for UiSettings {
@@ -99,6 +156,8 @@ impl Default for UiSettings {
             pattern_color: PatternColor::default(),
             pressure_curve: PressureCurve::default(),
             continuous_scroll: true,
+            pen_presets: DEFAULT_PEN_PRESETS,
+            active_pen: 0,
         }
     }
 }
@@ -126,6 +185,10 @@ impl UiSettings {
             Err(_) => Self::default(),
         };
         settings.pressure_curve = settings.pressure_curve.sanitized();
+        for (preset, fallback) in settings.pen_presets.iter_mut().zip(DEFAULT_PEN_PRESETS) {
+            *preset = preset.sanitized(fallback);
+        }
+        settings.active_pen = settings.active_pen.min(PEN_PRESET_COUNT - 1);
         settings
     }
 
@@ -157,6 +220,11 @@ mod tests {
                 threshold: 0.1,
             },
             continuous_scroll: false,
+            pen_presets: [PenPreset {
+                color: [0.5, 0.2, 0.7, 1.0],
+                width_mm: 1.5,
+            }; PEN_PRESET_COUNT],
+            active_pen: 2,
         };
         settings.save_to(&path).unwrap();
         assert_eq!(UiSettings::load_from(&path), settings);
@@ -193,6 +261,25 @@ mod tests {
         let curve = UiSettings::load_from(&path).pressure_curve;
         assert_eq!(curve.exponent, 3.0);
         assert_eq!(curve.threshold, 0.0);
+
+        // Ohne Stifte: die Standardstifte; unsinnige Stifte werden begrenzt
+        assert_eq!(settings.pen_presets, DEFAULT_PEN_PRESETS);
+        assert_eq!(settings.active_pen, 0);
+        std::fs::write(
+            &path,
+            br#"{"active_pen": 9, "pen_presets": [
+                {"color": [2.0, -1.0, 0.5, 0.2], "width_mm": 99.0},
+                {"color": [0.1, 0.2, 0.3, 1.0], "width_mm": 0.0},
+                {"color": [0.1, 0.2, 0.3, 1.0], "width_mm": 1.0},
+                {"color": [0.1, 0.2, 0.3, 1.0], "width_mm": 1.0}
+            ]}"#,
+        )
+        .unwrap();
+        let settings = UiSettings::load_from(&path);
+        assert_eq!(settings.active_pen, PEN_PRESET_COUNT - 1);
+        assert_eq!(settings.pen_presets[0].color, [1.0, 0.0, 0.5, 1.0]);
+        assert_eq!(settings.pen_presets[0].width_mm, 5.0);
+        assert_eq!(settings.pen_presets[1].width_mm, 0.15);
     }
 
     #[test]

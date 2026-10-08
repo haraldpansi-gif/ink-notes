@@ -48,6 +48,19 @@ fn fs_ink(in: VertexOutput) -> @location(0) vec4<f32> {
     return vec4<f32>(in.color.rgb + vec3<f32>(lift), in.color.a);
 }
 
+// Bildschirmfüllendes Dreieck ohne Farbe (setzt den Stencil-Puffer zurück)
+@vertex
+fn vs_fullscreen(@builtin(vertex_index) index: u32) -> @builtin(position) vec4<f32> {
+    let x = f32((index << 1u) & 2u) * 2.0 - 1.0;
+    let y = f32(index & 2u) * 2.0 - 1.0;
+    return vec4<f32>(x, y, 0.0, 1.0);
+}
+
+@fragment
+fn fs_none() -> @location(0) vec4<f32> {
+    return vec4<f32>(0.0);
+}
+
 // Eingefügte Bilder: texturierte Vierecke unter der Tinte
 struct ImageVertexInput {
     @location(0) position: vec2<f32>,

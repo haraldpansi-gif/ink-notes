@@ -11,7 +11,7 @@ Getestet wird vor allem unter Zorin OS 18 / Ubuntu 24.04 (Wayland und X11).
 ## Funktionen
 
 ### Schreiben und Zeichnen
-- **Stift** mit Druckstärke, vier Strichstärken (0,3–1,2 mm) und fünf Farben; **Textmarker** (halbtransparent, 4–8 mm) in vier Farben.
+- **Vier Stifte** in der Werkzeugleiste, jeder mit eigener Farbe und Stärke (0,15–5 mm, mit Druckstärke). Ändert man Farbe oder Stärke, merkt sich der gewählte Stift das – auch über einen Neustart hinweg. **Textmarker** (halbtransparent, 4–8 mm) in vier Farben; innerhalb eines Strichs wird er nicht dunkler, erst ein neuer Strich deckt stärker.
 - **Glättung in zwei Stufen:** Während des Schreibens glättet ein 1€-Filter das Zittern, die Linie erscheint sofort. Beim Absetzen wird der Strich nachbearbeitet: Ecken (Knicke über 65°) bleiben erhalten, der Druckverlauf wird geglättet, überflüssige Punkte entfallen, die Enden werden rund.
 - **Druckkurve** im ☰-Menü an den eigenen Stift anpassen (weicher/härter, Schwelle gegen Grundrauschen).
 - **Radierer** in drei Modi: ganze Striche, nur den überstrichenen Teil (Teilstrich) oder nur Textmarker. Stiftrückseite und Seitentaste des Stifts radieren ebenfalls.
@@ -36,7 +36,8 @@ Getestet wird vor allem unter Zorin OS 18 / Ubuntu 24.04 (Wayland und X11).
 ### Seiten und Ansicht
 - **Hintergründe:** blanko, kariert (5 mm), liniert (7,5 mm), Punktraster (5 mm). Die **Farbe von Karos, Linien und Punkten** ist wählbar (hell, mittel, kräftig, blau, grün) und gilt auch im Export.
 - **Papierfarbe** der Anzeige: weiß, creme, dunkelgrau, schwarz; auf dunklem Papier werden dunkle Stiftfarben auf Wunsch aufgehellt. Gespeichert und exportiert wird immer auf weißem Papier.
-- **Durchgehendes Scrollen:** Seiten hängen untereinander; wer im unteren Fünftel der letzten Seite schreibt, bekommt automatisch eine neue Seite. Abschaltbar (dann Seite für Seite blättern).
+- **Durchgehendes Scrollen:** Seiten hängen lückenlos untereinander, eine dunkle Linie markiert die Grenze; wer im unteren Fünftel der letzten Seite schreibt, bekommt automatisch eine neue Seite. Abschaltbar (dann Seite für Seite blättern, mit Pfeilen in der Werkzeugleiste).
+- **Seiten einfügen und löschen:** ➕ in der Werkzeugleiste fügt nach der aktuellen Seite eine leere Seite ein. Löschen im ☰-Menü (mit Rückfrage); die zuletzt gelöschte Seite lässt sich dort wiederherstellen, solange die App läuft.
 - **Zoom** von 25 % bis 1000 % (`Strg + Mausrad`, zwei Finger, `Strg + +/-/0`), Verschieben mit mittlerer Maustaste, `Leertaste + Ziehen` oder einem Finger.
 - **Seiten** anhängen oder direkt nach der aktuellen Seite einfügen, **Seitentitel** vergeben; die Seitenübersicht zeigt Vorschaubilder oder ein Inhaltsverzeichnis. Seitentitel werden im PDF zu Lesezeichen.
 - **Werkzeugleiste** links oder rechts andocken (für Links- und Rechtshänder).

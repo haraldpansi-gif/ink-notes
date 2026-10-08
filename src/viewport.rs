@@ -3,20 +3,18 @@
 //! Berechnet die affine Transformation zwischen Bildschirmkoordinaten (Window-Pixel),
 //! virtuellen DIN-A4-Seitenkoordinaten ([0, 2100] x [0, 2970]) und dem GPU-NDC-Raum ([-1, 1]).
 
-use crate::document::{PageViewport, UNITS_PER_MM};
+use crate::document::PageViewport;
 use glam::{Mat4, Vec2, Vec4};
 
 /// Minimaler und maximaler Zoomfaktor.
 pub const MIN_ZOOM: f32 = 0.25;
 pub const MAX_ZOOM: f32 = 10.0;
 
-/// Abstand zwischen zwei Seiten in der durchgehenden Ansicht (8 mm).
-pub const PAGE_GAP: f32 = 8.0 * UNITS_PER_MM;
 /// Höchstens so viele Nachbarseiten werden gleichzeitig dargestellt.
 pub const MAX_NEIGHBOR_PAGES: usize = 12;
 
-/// Durchgehende Ansicht: Die Seiten hängen mit [`PAGE_GAP`] Abstand untereinander und sind
-/// waagerecht zueinander zentriert. Lage jeder Seite (Ecke oben links) in Koordinaten der
+/// Durchgehende Ansicht: Die Seiten hängen lückenlos untereinander (die Grenze markiert eine
+/// Linie der Oberfläche) und sind waagerecht zueinander zentriert. Lage jeder Seite (Ecke oben links) in Koordinaten der
 /// aktuellen Seite.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PageStack {
@@ -33,11 +31,11 @@ impl PageStack {
         let mut origins = vec![Vec2::ZERO; sizes.len()];
         let x = |i: usize| (width - sizes[i].x) / 2.0;
         for i in current + 1..sizes.len() {
-            let y = origins[i - 1].y + sizes[i - 1].y + PAGE_GAP;
+            let y = origins[i - 1].y + sizes[i - 1].y;
             origins[i] = Vec2::new(x(i), y);
         }
         for i in (0..current).rev() {
-            let y = origins[i + 1].y - PAGE_GAP - sizes[i].y;
+            let y = origins[i + 1].y - sizes[i].y;
             origins[i] = Vec2::new(x(i), y);
         }
         Self {
@@ -55,7 +53,7 @@ impl PageStack {
         self.sizes.is_empty()
     }
 
-    /// Seite, auf deren Höhe `y` liegt; `None` im Zwischenraum oder außerhalb.
+    /// Seite, auf deren Höhe `y` liegt (an der Grenze die untere); `None` außerhalb.
     pub fn page_at(&self, y: f32) -> Option<usize> {
         // Seiten liegen nach Index sortiert untereinander
         let i = self.origins.partition_point(|o| o.y <= y).checked_sub(1)?;
@@ -312,7 +310,7 @@ mod tests {
     use super::*;
 
     const A4: Vec2 = crate::document::A4_SIZE;
-    const PITCH: f32 = A4.y + PAGE_GAP;
+    const PITCH: f32 = A4.y;
 
     fn a4_stack(count: usize, current: usize) -> PageStack {
         PageStack::new(vec![A4; count], current)
@@ -322,10 +320,11 @@ mod tests {
     fn test_continuous_layout() {
         let stack = a4_stack(5, 1);
         assert_eq!(stack.page_at(100.0), Some(1));
-        assert_eq!(stack.page_at(A4.y + PAGE_GAP / 2.0), None);
+        // Lückenlos: direkt unter dem Seitenende beginnt die nächste Seite
+        assert_eq!(stack.page_at(A4.y - 1.0), Some(1));
+        assert_eq!(stack.page_at(A4.y + 1.0), Some(2));
         assert_eq!(stack.page_at(PITCH + 5.0), Some(2));
-        assert_eq!(stack.page_at(-5.0), None);
-        assert_eq!(stack.page_at(-PAGE_GAP - 5.0), Some(0));
+        assert_eq!(stack.page_at(-5.0), Some(0));
         assert_eq!(stack.page_at(-PITCH - 5.0), None, "vor der ersten Seite");
 
         // Ende von Seite 2 und Anfang von Seite 3 sichtbar (aktuell: Seite 2 von 5)
@@ -339,7 +338,7 @@ mod tests {
             .is_empty());
         // Hinter der letzten Seite: keine weiteren
         assert_eq!(
-            a4_stack(5, 3).visible_neighbors(-PITCH, PITCH * 4.0),
+            a4_stack(5, 3).visible_neighbors(-PITCH + 1.0, PITCH * 4.0),
             vec![2, 4]
         );
         // Weit herausgezoomt: auf die nächstgelegenen Seiten begrenzt
@@ -352,13 +351,13 @@ mod tests {
     fn test_stack_of_different_page_sizes() {
         let slide = Vec2::new(2970.0, 1671.0);
         let stack = PageStack::new(vec![slide, A4, slide], 1);
-        // Folien waagerecht zur A4-Seite zentriert, mit Abstand darüber und darunter
-        assert_eq!(stack.origins[0], Vec2::new(-435.0, -PAGE_GAP - slide.y));
-        assert_eq!(stack.origins[2], Vec2::new(-435.0, A4.y + PAGE_GAP));
-        assert_eq!(stack.page_at(A4.y + PAGE_GAP + 10.0), Some(2));
+        // Folien waagerecht zur A4-Seite zentriert, direkt darüber und darunter
+        assert_eq!(stack.origins[0], Vec2::new(-435.0, -slide.y));
+        assert_eq!(stack.origins[2], Vec2::new(-435.0, A4.y));
+        assert_eq!(stack.page_at(A4.y + 10.0), Some(2));
         let (min, max) = stack.bounds();
-        assert_eq!(min, Vec2::new(-435.0, -PAGE_GAP - slide.y));
-        assert_eq!(max, Vec2::new(2535.0, A4.y + PAGE_GAP + slide.y));
+        assert_eq!(min, Vec2::new(-435.0, -slide.y));
+        assert_eq!(max, Vec2::new(2535.0, A4.y + slide.y));
     }
 
     #[test]

@@ -166,6 +166,10 @@ pub struct CanvasState {
     /// Multisampling der Zeichenfläche (1 = aus) und das zugehörige Zwischenbild
     msaa_samples: u32,
     msaa_view: Option<wgpu::TextureView>,
+    /// Stencil-Puffer: Jeder Strich deckt ein Pixel nur einmal, damit sich halbtransparente
+    /// Tinte (Textmarker) dort, wo der Strich sich selbst überlappt, nicht verdunkelt
+    stencil_view: wgpu::TextureView,
+    stencil_reset_pipeline: wgpu::RenderPipeline,
     /// Meldung „keine Darstellungsmodi“ wurde bereits ausgegeben
     presentation_warned: bool,
     pub device: wgpu::Device,
@@ -343,6 +347,7 @@ impl CanvasState {
             1
         };
         let msaa_view = create_msaa_view(&device, &config, msaa_samples);
+        let stencil_view = create_stencil_view(&device, &config, msaa_samples);
 
         // 5. Shader & Bind Group Layout
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -423,13 +428,41 @@ impl CanvasState {
                 polygon_mode: wgpu::PolygonMode::Fill,
                 conservative: false,
             },
-            depth_stencil: None,
+            depth_stencil: Some(stroke_stencil()),
             multisample: wgpu::MultisampleState {
                 count: msaa_samples,
                 ..Default::default()
             },
             multiview: None,
         });
+
+        // Setzt den Stencil-Puffer zurück, wenn die Strichnummern überlaufen
+        let stencil_reset_pipeline =
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("Stencil Reset Pipeline"),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: "vs_fullscreen",
+                    buffers: &[],
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: "fs_none",
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: config.format,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::empty(),
+                    })],
+                }),
+                primitive: wgpu::PrimitiveState::default(),
+                depth_stencil: Some(stencil_reset()),
+                multisample: wgpu::MultisampleState {
+                    count: msaa_samples,
+                    ..Default::default()
+                },
+                multiview: None,
+            });
 
         // TriangleList-Pipeline (für Hintergrundpapier und Muster)
         let triangle_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -458,7 +491,7 @@ impl CanvasState {
                 polygon_mode: wgpu::PolygonMode::Fill,
                 conservative: false,
             },
-            depth_stencil: None,
+            depth_stencil: Some(passive_stencil()),
             multisample: wgpu::MultisampleState {
                 count: msaa_samples,
                 ..Default::default()
@@ -510,7 +543,7 @@ impl CanvasState {
                 })],
             }),
             primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: None,
+            depth_stencil: Some(passive_stencil()),
             multisample: wgpu::MultisampleState {
                 count: msaa_samples,
                 ..Default::default()
@@ -549,6 +582,8 @@ impl CanvasState {
             adapter,
             msaa_samples,
             msaa_view,
+            stencil_view,
+            stencil_reset_pipeline,
             presentation_warned: false,
             device,
             queue,
@@ -698,6 +733,7 @@ impl CanvasState {
             }
             self.surface.configure(&self.device, &self.config);
             self.msaa_view = create_msaa_view(&self.device, &self.config, self.msaa_samples);
+            self.stencil_view = create_stencil_view(&self.device, &self.config, self.msaa_samples);
             self.recalculate_viewport();
         }
     }
@@ -1340,10 +1376,18 @@ impl CanvasState {
                         },
                     },
                 })],
-                depth_stencil_attachment: None,
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.stencil_view,
+                    depth_ops: None,
+                    stencil_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(0),
+                        store: wgpu::StoreOp::Discard,
+                    }),
+                }),
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
+            let mut stencil_ref = 0;
 
             // 0. Nachbarseiten der durchgehenden Ansicht (je mit eigener Kamera)
             for (i, neighbor) in self.neighbors.iter().enumerate() {
@@ -1362,6 +1406,7 @@ impl CanvasState {
                     render_pass.set_vertex_buffer(0, buffer.slice(..));
                     for range in &neighbor.stroke_ranges {
                         if range.end > range.start {
+                            self.next_stroke_stencil(&mut render_pass, &mut stencil_ref);
                             render_pass.draw(range.clone(), 0..1);
                         }
                     }
@@ -1393,6 +1438,7 @@ impl CanvasState {
                 render_pass.set_vertex_buffer(0, self.committed_vertex_buffer.slice(..));
                 for range in &self.committed_strokes {
                     if range.end > range.start {
+                        self.next_stroke_stencil(&mut render_pass, &mut stencil_ref);
                         render_pass.draw(range.clone(), 0..1);
                     }
                 }
@@ -1401,6 +1447,7 @@ impl CanvasState {
             // 5. Temporäre Live-Geometrie des aktuellen Strichs rendern (Zero Latency)
             if self.live_vertex_count > 0 {
                 render_pass.set_vertex_buffer(0, self.live_vertex_buffer.slice(..));
+                self.next_stroke_stencil(&mut render_pass, &mut stencil_ref);
                 render_pass.draw(0..self.live_vertex_count, 0..1);
             }
         }
@@ -1435,6 +1482,20 @@ impl CanvasState {
         }
 
         Ok(())
+    }
+
+    /// Gibt dem nächsten Strich eine eigene Stencil-Nummer: Die Strich-Pipeline zeichnet nur
+    /// Pixel, die noch nicht diese Nummer tragen. Nach 255 Strichen wird der Stencil-Puffer
+    /// zurückgesetzt, damit kein späterer Strich die Nummer eines früheren wiederfindet.
+    fn next_stroke_stencil<'a>(&'a self, pass: &mut wgpu::RenderPass<'a>, stencil_ref: &mut u32) {
+        if *stencil_ref == u32::from(u8::MAX) {
+            pass.set_pipeline(&self.stencil_reset_pipeline);
+            pass.draw(0..3, 0..1);
+            pass.set_pipeline(&self.strip_pipeline);
+            *stencil_ref = 0;
+        }
+        *stencil_ref += 1;
+        pass.set_stencil_reference(*stencil_ref);
     }
 
     /// Rendert nur die Canvas-Fläche ohne UI (z. B. für Headless-Tests).
@@ -1475,6 +1536,76 @@ fn create_msaa_view(
             })
             .create_view(&wgpu::TextureViewDescriptor::default())
     })
+}
+
+/// Format des Stencil-Puffers der Zeichenfläche.
+const STENCIL_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth24PlusStencil8;
+
+/// Stencil-Puffer in Fenstergröße (mit derselben Abtastzahl wie die Zeichenfläche).
+fn create_stencil_view(
+    device: &wgpu::Device,
+    config: &wgpu::SurfaceConfiguration,
+    samples: u32,
+) -> wgpu::TextureView {
+    device
+        .create_texture(&wgpu::TextureDescriptor {
+            label: Some("Stroke Stencil Buffer"),
+            size: wgpu::Extent3d {
+                width: config.width.max(1),
+                height: config.height.max(1),
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: samples,
+            dimension: wgpu::TextureDimension::D2,
+            format: STENCIL_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        })
+        .create_view(&wgpu::TextureViewDescriptor::default())
+}
+
+/// Stencil-Zustand mit gleicher Prüfung und Aktion für Vorder- und Rückseiten.
+fn stencil_state(
+    compare: wgpu::CompareFunction,
+    pass_op: wgpu::StencilOperation,
+) -> wgpu::DepthStencilState {
+    let face = wgpu::StencilFaceState {
+        compare,
+        fail_op: wgpu::StencilOperation::Keep,
+        depth_fail_op: wgpu::StencilOperation::Keep,
+        pass_op,
+    };
+    wgpu::DepthStencilState {
+        format: STENCIL_FORMAT,
+        depth_write_enabled: false,
+        depth_compare: wgpu::CompareFunction::Always,
+        stencil: wgpu::StencilState {
+            front: face,
+            back: face,
+            read_mask: 0xff,
+            write_mask: 0xff,
+        },
+        bias: wgpu::DepthBiasState::default(),
+    }
+}
+
+/// Pipelines ohne Strichnummer (Papier, Muster, Bilder) lassen den Stencil-Puffer unberührt.
+pub(crate) fn passive_stencil() -> wgpu::DepthStencilState {
+    stencil_state(wgpu::CompareFunction::Always, wgpu::StencilOperation::Keep)
+}
+
+/// Striche: nur Pixel, die die eigene Nummer noch nicht tragen, und diese dann markieren.
+fn stroke_stencil() -> wgpu::DepthStencilState {
+    stencil_state(
+        wgpu::CompareFunction::NotEqual,
+        wgpu::StencilOperation::Replace,
+    )
+}
+
+/// Zurücksetzen: überall 0 eintragen.
+fn stencil_reset() -> wgpu::DepthStencilState {
+    stencil_state(wgpu::CompareFunction::Always, wgpu::StencilOperation::Zero)
 }
 
 /// Zu rasterndes Textfeld.

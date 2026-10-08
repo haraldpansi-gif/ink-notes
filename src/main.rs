@@ -1058,6 +1058,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ui_state.pattern_color = ui_settings.pattern_color;
     ui_state.pressure_curve = ui_settings.pressure_curve;
     ui_state.continuous_scroll = ui_settings.continuous_scroll;
+    ui_state.pen_presets = ui_settings.pen_presets;
+    ui_state.select_pen(ui_settings.active_pen);
     ui_state.current_notebook_id = manifest.id.clone();
     ui_state.document_title = manifest.title.clone();
     ui_state.available_notebooks = available_notebooks;
@@ -1066,6 +1068,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ui_state.set_export_message(warning);
     }
     let mut selection_state = SelectionState::new();
+    // Zuletzt gelöschte Seite (Notizbuch-Kennung, Index, Seite) zum Wiederherstellen in dieser
+    // Sitzung
+    let mut last_deleted_page: Option<(String, usize, ink_notes::document::Page)> = None;
+    // Stifte geändert, aber noch nicht gespeichert
+    let mut pen_presets_dirty = false;
     let mut clipboard = ClipboardBridge::new();
     // PDF-Seiten werden im Hintergrund gerendert und wecken danach den Event-Loop
     let mut pdf_renderer = {
@@ -2609,6 +2616,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         // 3. Toolbar & Widgets rendern
                         updater.update();
                         ui_state.page_view = Some(page_view(&canvas, window.scale_factor() as f32));
+                        ui_state.restorable_page = last_deleted_page
+                            .as_ref()
+                            .filter(|(id, _, _)| *id == manifest.id)
+                            .map(|(_, index, _)| index + 1);
                         let actions = ui::render_ui(&egui_ctx, &mut ui_state, &notebook, autosave.status(), &updater);
                         canvas.ruler = ui_state.ruler;
 
@@ -2824,6 +2835,42 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         &window,
                                     );
                                     ui_state.set_export_message(format!("Seite {} eingefügt", index + 1));
+                                }
+                                UiAction::DeleteCurrentPage => {
+                                    let index = notebook.current_page_index;
+                                    if let Some(page) = notebook.remove_current_page() {
+                                        selection_state.clear();
+                                        let curr = notebook.current_page_index;
+                                        let _ = storage::ensure_page_loaded(&storage_dir, &mut notebook, curr);
+                                        canvas.sync_page(notebook.current_page_mut());
+                                        manifest.sync_from_notebook(&notebook);
+                                        autosave.mark_manifest_dirty(&manifest);
+                                        last_deleted_page = Some((manifest.id.clone(), index, page));
+                                        ui_state.set_export_message(format!(
+                                            "Seite {} gelöscht – im Menü ☰ wiederherstellbar",
+                                            index + 1
+                                        ));
+                                        update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
+                                        window.request_redraw();
+                                    }
+                                }
+                                UiAction::RestoreDeletedPage => {
+                                    if let Some((id, index, page)) = last_deleted_page.take() {
+                                        if id == manifest.id {
+                                            selection_state.clear();
+                                            let index = notebook.restore_page(index, page);
+                                            canvas.sync_page(notebook.current_page_mut());
+                                            manifest.sync_from_notebook(&notebook);
+                                            // Die Seitendatei neu schreiben (sie kann inzwischen fehlen)
+                                            autosave.mark_page_dirty(notebook.current_page(), &manifest);
+                                            autosave.mark_manifest_dirty(&manifest);
+                                            ui_state.set_export_message(format!("Seite {} wiederhergestellt", index + 1));
+                                            update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
+                                            window.request_redraw();
+                                        } else {
+                                            last_deleted_page = Some((id, index, page));
+                                        }
+                                    }
                                 }
                                 UiAction::LoadAllPages => {
                                     // Für die Vorschaubilder der Seitenauswahl; Fehler werden wie beim
@@ -3214,6 +3261,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     target.exit();
                                 }
                             }
+                        }
+
+                        // Stifte: geänderte Farbe oder Stärke gehört zum gewählten Stift. Gespeichert
+                        // wird erst nach dem Loslassen (nicht bei jedem Schritt eines Schiebereglers).
+                        if ui_state.sync_pen_preset() || ui_settings.active_pen != ui_state.active_pen {
+                            pen_presets_dirty = true;
+                            ui_settings.active_pen = ui_state.active_pen;
+                        }
+                        if pen_presets_dirty && !egui_ctx.is_using_pointer() {
+                            pen_presets_dirty = false;
+                            ui_settings.pen_presets = ui_state.pen_presets;
+                            save_ui_settings(&ui_settings, ui_settings_path.as_deref(), &mut ui_state);
                         }
 
                         // Textbearbeitung beenden: Esc, anderes Werkzeug oder andere Seite

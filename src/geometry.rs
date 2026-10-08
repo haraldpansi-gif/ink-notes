@@ -1924,16 +1924,21 @@ pub fn shape_to_mesh(
                 (*y_axis_end, *x_axis_end)
             };
 
+            // Beide Achsen beginnen um die halbe Linienbreite hinter dem Ursprung, damit die
+            // äußere Ecke geschlossen ist (sonst bleibt dort eine quadratische Kerbe)
+            let y_start = *origin - y_dir * half_w;
+            let x_start = *origin - x_dir * half_w;
+
             // 1. Y-Achse (vom Ursprung zur Spitze)
             let y_norm = Vec2::new(-y_dir.y, y_dir.x) * half_w;
             vertices.push(InkVertex::new(
-                origin.x + y_norm.x,
-                origin.y + y_norm.y,
+                y_start.x + y_norm.x,
+                y_start.y + y_norm.y,
                 color,
             ));
             vertices.push(InkVertex::new(
-                origin.x - y_norm.x,
-                origin.y - y_norm.y,
+                y_start.x - y_norm.x,
+                y_start.y - y_norm.y,
                 color,
             ));
             vertices.push(InkVertex::new(
@@ -1950,15 +1955,15 @@ pub fn shape_to_mesh(
             // Degenerierte Dreiecke für den Übergang zur X-Achse
             let x_norm = Vec2::new(-x_dir.y, x_dir.x) * half_w;
             let last_v = *vertices.last().unwrap();
-            let next_v = InkVertex::new(origin.x + x_norm.x, origin.y + x_norm.y, color);
+            let next_v = InkVertex::new(x_start.x + x_norm.x, x_start.y + x_norm.y, color);
             vertices.push(last_v);
             vertices.push(next_v);
 
             // 2. X-Achse
             vertices.push(next_v);
             vertices.push(InkVertex::new(
-                origin.x - x_norm.x,
-                origin.y - x_norm.y,
+                x_start.x - x_norm.x,
+                x_start.y - x_norm.y,
                 color,
             ));
             vertices.push(InkVertex::new(
@@ -2193,6 +2198,30 @@ mod tests {
         } else {
             panic!("Falscher Formtyp erkannt");
         }
+    }
+
+    #[test]
+    fn test_coordinate_system_corner_is_closed() {
+        // Die Achsen treffen sich ohne Kerbe: Die äußere Ecke des Ursprungs ist ein Eckpunkt
+        // der Achsenbänder (Issue #15)
+        let origin = Vec2::new(300.0, 900.0);
+        let shape = RecognizedShape::CoordinateSystem {
+            origin,
+            x_axis_end: Vec2::new(900.0, 900.0),
+            y_axis_end: Vec2::new(300.0, 300.0),
+            with_arrows: true,
+        };
+        let width = 30.0;
+        let (_, vertices) = shape_to_mesh(&shape, width, [0.0, 0.0, 0.0, 1.0]);
+        let corner = origin + Vec2::new(-width / 2.0, width / 2.0);
+        let nearest = vertices
+            .iter()
+            .map(|v| (Vec2::from(v.position) - corner).length())
+            .fold(f32::INFINITY, f32::min);
+        assert!(
+            nearest < 1e-3,
+            "äußere Ecke fehlt, nächster Punkt {nearest}"
+        );
     }
 
     #[test]

@@ -180,7 +180,7 @@ pub fn export_notebook_to_bytes(
     pattern: PatternColor,
 ) -> Result<Vec<u8>, Box<dyn Error>> {
     let doc = generate_pdf_document(notebook, strategy, assets, pattern)?;
-    let bytes = fix_text_encoding(doc.save_to_bytes()?, notebook)?;
+    let bytes = add_alpha_states(fix_text_encoding(doc.save_to_bytes()?, notebook)?, notebook)?;
 
     // Importierte PDF-Seiten als Vektorgrafik unterlegen
     let underlays = pdf_underlays(notebook);
@@ -206,7 +206,7 @@ pub fn export_notebook_to_bytes(
         raster.insert(underlay.target_page);
     }
     let doc = generate_pdf_document_with(notebook, strategy, assets, pattern, &raster)?;
-    let bytes = fix_text_encoding(doc.save_to_bytes()?, notebook)?;
+    let bytes = add_alpha_states(fix_text_encoding(doc.save_to_bytes()?, notebook)?, notebook)?;
     let remaining: Vec<_> = underlays
         .into_iter()
         .filter(|u| !raster.contains(&u.target_page))
@@ -245,6 +245,77 @@ fn fix_text_encoding(bytes: Vec<u8>, notebook: &Notebook) -> Result<Vec<u8>, Box
     let mut out = Vec::new();
     doc.save_to(&mut out)?;
     Ok(out)
+}
+
+/// Name des Grafikzustands für halbtransparente Tinte mit Deckkraft `alpha` (auf Prozent
+/// gerundet); `None` für deckende Farben.
+fn alpha_state_name(alpha: f32) -> Option<String> {
+    let percent = (alpha.clamp(0.0, 1.0) * 100.0).round() as u32;
+    (percent < 100).then(|| format!("InkAlpha{percent}"))
+}
+
+/// printpdf kann keine Grafikzustände mit Deckkraft anlegen: Die Tintenebene verweist mit
+/// `gs` auf die Namen aus [`alpha_state_name`], die Zustände selbst (`ca`/`CA`) werden hier
+/// in die Ressourcen jeder Seite eingetragen. Ohne halbtransparente Striche bleibt das PDF
+/// unverändert.
+fn add_alpha_states(bytes: Vec<u8>, notebook: &Notebook) -> Result<Vec<u8>, Box<dyn Error>> {
+    use printpdf::lopdf::{Dictionary, Object};
+
+    let mut states: Vec<(String, f32)> = notebook
+        .pages
+        .iter()
+        .flat_map(|p| &p.strokes)
+        .filter(|s| !s.is_object())
+        .filter_map(|s| alpha_state_name(s.color[3]).map(|name| (name, s.color[3])))
+        .collect();
+    if states.is_empty() {
+        return Ok(bytes);
+    }
+    states.sort_by(|a, b| a.0.cmp(&b.0));
+    states.dedup_by(|a, b| a.0 == b.0);
+
+    let mut doc = printpdf::lopdf::Document::load_mem(&bytes)?;
+    let page_ids: Vec<_> = doc.get_pages().into_values().collect();
+    for page_id in page_ids {
+        let resources = dict_object_id(&mut doc, page_id, b"Resources")?;
+        let ext_g_state = dict_object_id(&mut doc, resources, b"ExtGState")?;
+        let dict = doc.get_object_mut(ext_g_state)?.as_dict_mut()?;
+        for (name, alpha) in &states {
+            let alpha = (alpha.clamp(0.0, 1.0) * 100.0).round() / 100.0;
+            let mut state = Dictionary::new();
+            state.set("Type", Object::Name(b"ExtGState".to_vec()));
+            state.set("ca", Object::Real(alpha));
+            state.set("CA", Object::Real(alpha));
+            dict.set(name.as_bytes().to_vec(), Object::Dictionary(state));
+        }
+    }
+    let mut out = Vec::new();
+    doc.save_to(&mut out)?;
+    Ok(out)
+}
+
+/// Kennung des Wörterbuchs unter `key` im Objekt `owner`; ein eingebettetes oder fehlendes
+/// Wörterbuch wird dafür zu einem eigenen Objekt.
+fn dict_object_id(
+    doc: &mut printpdf::lopdf::Document,
+    owner: printpdf::lopdf::ObjectId,
+    key: &[u8],
+) -> Result<printpdf::lopdf::ObjectId, Box<dyn Error>> {
+    use printpdf::lopdf::{Dictionary, Object};
+
+    let entry = doc.get_object(owner)?.as_dict()?.get(key).ok().cloned();
+    if let Some(Object::Reference(id)) = entry {
+        return Ok(id);
+    }
+    let dict = match entry {
+        Some(Object::Dictionary(dict)) => dict,
+        _ => Dictionary::new(),
+    };
+    let id = doc.add_object(dict);
+    doc.get_object_mut(owner)?
+        .as_dict_mut()?
+        .set(key.to_vec(), Object::Reference(id));
+    Ok(id)
 }
 
 /// UTF-8-Text als PDF-Textstring in UTF-16BE mit BOM; `None` bei reinem ASCII oder
@@ -468,6 +539,17 @@ fn render_ink_layer(layer: &printpdf::PdfLayerReference, page: &Page, strategy: 
         if stroke.is_object() {
             continue;
         }
+        // Halbtransparente Tinte (Textmarker): Deckkraft über einen Grafikzustand, den
+        // `add_alpha_states` anlegt. Jeder Strich ist ein einziger Pfad und deckt daher jede
+        // Stelle nur einmal, auch wo er sich selbst überlappt.
+        let alpha_state = alpha_state_name(stroke.color[3]);
+        if let Some(name) = &alpha_state {
+            layer.save_graphics_state();
+            layer.add_operation(printpdf::lopdf::content::Operation::new(
+                "gs",
+                vec![printpdf::lopdf::Object::Name(name.as_bytes().to_vec())],
+            ));
+        }
         if let Some(ref shape) = stroke.shape {
             render_recognized_shape(layer, shape, stroke.color);
         } else {
@@ -479,6 +561,9 @@ fn render_ink_layer(layer: &printpdf::PdfLayerReference, page: &Page, strategy: 
                     render_stroke_bezier(layer, stroke);
                 }
             }
+        }
+        if alpha_state.is_some() {
+            layer.restore_graphics_state();
         }
     }
 }
@@ -773,6 +858,10 @@ fn render_recognized_shape(
     let stroke_color = Color::Rgb(Rgb::new(color[0], color[1], color[2], None));
     layer.set_outline_color(stroke_color.clone());
     layer.set_outline_thickness(1.5); // ca. 0.5 mm Standard-Liniendicke
+                                      // Wie auf dem Bildschirm: spitze Ecken und stumpfe Enden (der Grafikzustand kann noch
+                                      // runde Verbindungen von einem vorherigen Freihandstrich enthalten)
+    layer.set_line_cap_style(printpdf::LineCapStyle::Butt);
+    layer.set_line_join_style(printpdf::LineJoinStyle::Miter);
 
     match shape {
         RecognizedShape::Line { start, end } => {
@@ -966,17 +1055,19 @@ fn render_recognized_shape(
                 (*y_axis_end, *x_axis_end)
             };
 
-            let (ox, oy) = page_to_pdf_mm(origin.x, origin.y);
-            for end in [y_line_end, x_line_end] {
-                let (ex, ey) = page_to_pdf_mm(end.x, end.y);
-                layer.add_line(Line {
-                    points: vec![
-                        (Point::new(Mm(ox), Mm(oy)), false),
-                        (Point::new(Mm(ex), Mm(ey)), false),
-                    ],
-                    is_closed: false,
-                });
-            }
+            // Ein einziger Linienzug, damit die Ecke am Ursprung als Linienverbindung
+            // geschlossen gezeichnet wird statt als zwei stumpfe Enden
+            let points = [y_line_end, *origin, x_line_end]
+                .iter()
+                .map(|p| {
+                    let (px, py) = page_to_pdf_mm(p.x, p.y);
+                    (Point::new(Mm(px), Mm(py)), false)
+                })
+                .collect();
+            layer.add_line(Line {
+                points,
+                is_closed: false,
+            });
 
             // Pfeilspitzen als gefüllte Dreiecke
             if *with_arrows {

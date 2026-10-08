@@ -151,7 +151,7 @@ impl ImageLayer {
                 topology: wgpu::PrimitiveTopology::TriangleList,
                 ..Default::default()
             },
-            depth_stencil: None,
+            depth_stencil: Some(crate::canvas::passive_stencil()),
             multisample: wgpu::MultisampleState {
                 count: sample_count,
                 ..Default::default()

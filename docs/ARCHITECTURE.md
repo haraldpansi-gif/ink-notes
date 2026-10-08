@@ -93,7 +93,7 @@ $$\vec{p}_{\text{neu}} = \vec{c} - (\vec{c} - \vec{p}_{\text{alt}}) \cdot \frac{
 - Im Shader wird jeder Punkt mit `transform_scale` und `transform_offset` (aus `CameraUniforms`) direkt in Gerätekoordinaten umgerechnet.
 
 ### 3.3 Durchgehende Ansicht
-Alle Koordinaten beziehen sich auf die **aktuelle Seite**. `PageStack` (`viewport.rs`) legt die übrigen Seiten mit 8 mm Abstand darunter bzw. darüber, waagerecht zur aktuellen Seite zentriert. Jede sichtbare Nachbarseite wird mit einer eigenen Kamera gezeichnet, die um die Lage der Seite verschoben ist (höchstens 12 Nachbarseiten).
+Alle Koordinaten beziehen sich auf die **aktuelle Seite**. `PageStack` (`viewport.rs`) legt die übrigen Seiten lückenlos darunter bzw. darüber (die Grenze zeichnet die Oberfläche als dunkle Linie), waagerecht zur aktuellen Seite zentriert. Jede sichtbare Nachbarseite wird mit einer eigenen Kamera gezeichnet, die um die Lage der Seite verschoben ist (höchstens 12 Nachbarseiten).
 
 Nach dem Scrollen wird die Seite in der Fenstermitte zur aktuellen Seite; die Kamera wird dabei so verschoben, dass sich das Bild nicht bewegt. Während eines Strichs, einer Auswahl, beim Ziehen des Lineals oder beim Schreiben von Text wird nicht gewechselt. Wer auf einer sichtbaren Nachbarseite zu zeichnen beginnt, wechselt zuerst auf diese Seite.
 
@@ -105,7 +105,9 @@ Ein Frame besteht aus einem Render-Durchgang auf die Fensterfläche (`canvas.rs`
 
 1. Für jede sichtbare Nachbarseite: Papier und Muster, Bilder/PDF-Seite/Text, Tinte.
 2. Für die aktuelle Seite: Papier, Muster (Karo, Linien, Punkte), Bildebene, gespeicherte Striche, Live-Strich.
-3. Die `egui`-Oberfläche: Werkzeugleiste, Menüs, Auswahlrahmen und Griffe, Lineal, Textbearbeitung.
+3. Die `egui`-Oberfläche: Werkzeugleiste, Menüs, Seitengrenzen, Auswahlrahmen und Griffe, Lineal, Textbearbeitung.
+
+Jeder Strich ist ein eigener Draw-Call mit eigener Nummer im Stencil-Puffer: Ein Pixel, das der Strich schon gefärbt hat, wird kein zweites Mal gefärbt. So bleibt halbtransparente Tinte (Textmarker) gleichmäßig, auch wo sich der Strich selbst überlappt (Anfangskappe, Kehren, langsames Hin- und Herfahren); erst ein neuer Strich deckt stärker. Nach 255 Strichen setzt ein bildschirmfüllendes Dreieck den Stencil-Puffer zurück.
 
 ### 4.1 Bildebene
 `image_layer.rs` zeichnet texturierte Vierecke unter der Tinte: importierte PDF-Seiten, eingefügte Bilder und Textfelder. Texturen werden beim ersten Bedarf geladen, bekommen Mipmaps und werden freigegeben, wenn mehr als 384 MB belegt sind.
@@ -177,7 +179,7 @@ Jede Seite hat einen eigenen Verlauf (`history.rs`): Hinzufügen, Entfernen, Ers
 2. **PDF** (nur im Notfall): importierte PDF-Seite als Bild, falls sie sich nicht als Vektor übernehmen lässt.
 3. **Images:** eingefügte Bilder (höchstens 300 dpi).
 4. **Text:** Textfelder als echter Text mit eingebetteter Schrift (durchsuchbar, kopierbar). Jedes Feld liegt in einem eigenen Koordinatensystem, das eine Transformationsmatrix auf seine Ecken abbildet.
-5. **Ink:** Striche als gefüllte Polygone, Formen als Pfade.
+5. **Ink:** Striche als gefüllte Polygone, Formen als Pfade. Halbtransparente Striche (Textmarker) bekommen einen Grafikzustand mit Deckkraft (`ca`/`CA`); printpdf kann solche Zustände nicht anlegen, deshalb trägt `add_alpha_states` sie nach dem Speichern mit `lopdf` in die Seitenressourcen ein. Jeder Strich ist ein einziger Pfad und deckt sich daher nicht selbst doppelt.
 
 Importierte PDF-Seiten werden anschließend als Form-XObject unter die Seite gelegt (`pdf_merge.rs`), bleiben also Vektorgrafik. Seitentitel werden zu Lesezeichen.
 

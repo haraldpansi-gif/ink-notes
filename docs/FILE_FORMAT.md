@@ -142,6 +142,9 @@ Ein Absturz während des Speicherns hinterlässt deshalb entweder die alte oder 
 - Lässt sich eine Seite nicht lesen, wird sie nach `page_<id>.json.corrupt-<zeitstempel>` verschoben (nicht gelöscht) und die Seite schreibgeschützt angezeigt.
 - Ist `manifest.json` beschädigt oder fehlt, wird `manifest.json.bak` verwendet.
 
+### Gelöschte Seiten
+Eine gelöschte Seite verschwindet aus `manifest.json`; ihre Datei `page_<id>.json` bleibt im Ordner liegen. Seitenkennungen werden nie wiederverwendet (`next_page_id`), die Datei kann also mit keiner neuen Seite kollidieren. Wird die Seite in derselben Sitzung wiederhergestellt, schreibt die App sie neu.
+
 ### Neuere Versionen
 Dateien mit einer höheren `format_version` als der unterstützten werden nicht geöffnet – so kann eine ältere App-Version keine Inhalte verlieren, die sie nicht kennt.
 

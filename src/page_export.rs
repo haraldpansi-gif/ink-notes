@@ -234,6 +234,58 @@ mod tests {
     }
 
     #[test]
+    fn test_highlighter_is_translucent_in_export() {
+        // Schwarze Linie, darüber ein gelber Textmarker, der hin und zurück läuft
+        let mut page = page_with_line();
+        page.strokes[0].color = [0.0, 0.0, 0.0, 1.0];
+        for v in &mut page.strokes[0].vertices {
+            v.color = [0.0, 0.0, 0.0, 1.0];
+        }
+        let color = [1.0, 0.95, 0.1, 0.35];
+        let samples: Vec<StylusSample> = (0..=40)
+            .map(|i| {
+                let x = if i <= 20 { i } else { 40 - i } as f32;
+                StylusSample {
+                    position: glam::Vec2::new(500.0 + x * 20.0, 1000.0 + (i as f32 * 0.5)),
+                    pressure: 0.6,
+                    timestamp: i as f64 * 0.01,
+                }
+            })
+            .collect();
+        let vertices = crate::storage::reconstruct_stroke_vertices(
+            &samples,
+            color,
+            60.0,
+            Default::default(),
+            true,
+        );
+        let mut stroke = Stroke::new(8, samples, vertices, color);
+        stroke.width = 60.0;
+        stroke.tool = crate::document::StrokeTool::Highlighter;
+        page.strokes.push(stroke);
+
+        let png = decode(
+            &page_png(&page, None, ImageBackground::Paper, PatternColor::default()).unwrap(),
+        );
+        let px_per_unit = png.width() as f32 / PAGE_WIDTH;
+        let at = |x: f32, y: f32| {
+            png.get_pixel((x * px_per_unit) as u32, (y * px_per_unit) as u32)
+                .0
+        };
+        // Die schwarze Linie bleibt unter dem Textmarker sichtbar
+        let line = at(700.0, 1000.0);
+        assert!(line[0] < 110 && line[1] < 110, "Linie verdeckt: {line:?}");
+        // Neben der Linie: einmal gelb getönt, auch wo der Strich sich selbst überlappt
+        let tint = at(700.0, 1020.0);
+        assert!(tint[2] < 200 && tint[0] > 200, "kein Textmarker: {tint:?}");
+        let expected_blue = 255.0 * (1.0 - 0.35) + 0.1 * 255.0 * 0.35;
+        assert!(
+            (tint[2] as f32 - expected_blue).abs() < 25.0,
+            "Textmarker mehrfach gedeckt: {tint:?}, erwartet Blau ≈ {expected_blue}"
+        );
+    }
+
+    #[test]
     fn test_export_uses_pattern_color() {
         // Kariertes Blatt: das kräftige Muster ist im Export dunkler als das helle
         let page = Page::new(1, PageBackground::Grid5mm);

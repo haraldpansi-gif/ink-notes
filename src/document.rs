@@ -1217,6 +1217,29 @@ impl Notebook {
         index
     }
 
+    /// Entfernt die aktuelle Seite und gibt sie zurück; danach ist die folgende Seite aktuell
+    /// (bzw. die vorige, wenn es die letzte war). Die einzige Seite eines Notizbuchs bleibt
+    /// stehen (`None`).
+    pub fn remove_current_page(&mut self) -> Option<Page> {
+        if self.pages.len() < 2 {
+            return None;
+        }
+        let page = self.pages.remove(self.current_page_index);
+        self.load_warnings.remove(&page.id);
+        self.current_page_index = self.current_page_index.min(self.pages.len() - 1);
+        Some(page)
+    }
+
+    /// Setzt eine mit [`Self::remove_current_page`] entfernte Seite wieder an `index` ein
+    /// (höchstens ans Ende) und macht sie zur aktuellen Seite; gibt ihren Index zurück.
+    pub fn restore_page(&mut self, index: usize, page: Page) -> usize {
+        let index = index.min(self.pages.len());
+        self.next_page_id = self.next_page_id.max(page.id + 1);
+        self.pages.insert(index, page);
+        self.current_page_index = index;
+        index
+    }
+
     /// Durchgehende Ansicht: Reicht ein neuer Strich auf der letzten Seite bis in deren
     /// unteres Fünftel ([`AUTO_APPEND_FRACTION`]), wird darunter eine leere Seite mit gleichem
     /// Hintergrund angehängt. `true`, wenn eine Seite angehängt wurde.
@@ -1980,6 +2003,39 @@ mod tests {
         assert!(!ids.contains(&new.id) && new.strokes.is_empty());
         assert_eq!(new.background, PageBackground::DotGrid);
         assert!(new.pdf_background.is_none());
+    }
+
+    #[test]
+    fn test_remove_and_restore_current_page() {
+        let mut nb = Notebook::new();
+        // Die einzige Seite bleibt
+        assert!(nb.remove_current_page().is_none());
+        nb.add_page(PageBackground::Lined);
+        nb.add_page(PageBackground::DotGrid);
+        let ids: Vec<u64> = nb.pages.iter().map(|p| p.id).collect();
+
+        // Mittlere Seite: danach ist die folgende aktuell
+        nb.current_page_index = 1;
+        let removed = nb.remove_current_page().unwrap();
+        assert_eq!(removed.id, ids[1]);
+        assert_eq!(
+            nb.pages.iter().map(|p| p.id).collect::<Vec<_>>(),
+            [ids[0], ids[2]]
+        );
+        assert_eq!(nb.current_page_index, 1);
+
+        // Wiederherstellen an der alten Stelle
+        assert_eq!(nb.restore_page(1, removed), 1);
+        assert_eq!(nb.pages.iter().map(|p| p.id).collect::<Vec<_>>(), ids);
+        assert_eq!(nb.current_page_index, 1);
+
+        // Letzte Seite: danach ist die vorige aktuell
+        nb.current_page_index = 2;
+        let last = nb.remove_current_page().unwrap();
+        assert_eq!(last.id, ids[2]);
+        assert_eq!(nb.current_page_index, 1);
+        // Neue Seiten bekommen keine schon vergebene Kennung
+        assert!(nb.next_page_id > ids[2]);
     }
 
     #[test]

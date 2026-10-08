@@ -18,7 +18,9 @@ use crate::document::{
 };
 use crate::file_picker::{FilePicker, PickerKind};
 use crate::ruler::{Ruler, RulerHit};
-use crate::settings::{PressureCurve, SidebarSide};
+use crate::settings::{
+    PenPreset, PressureCurve, SidebarSide, DEFAULT_PEN_PRESETS, PEN_PRESET_COUNT,
+};
 use crate::storage::NotebookSummary;
 use crate::text::{TextEditing, TextFont, TEXT_SIZES_PT};
 
@@ -152,6 +154,10 @@ pub enum UiAction {
     PreviousPage,
     NextPage,
     AddPage,
+    /// Aktuelle Seite löschen (nach Rückfrage in der Oberfläche)
+    DeleteCurrentPage,
+    /// Zuletzt gelöschte Seite wiederherstellen
+    RestoreDeletedPage,
     GoToPage(usize),
     /// Alle noch nicht geladenen Seiten laden (für die Vorschaubilder der Seitenauswahl)
     LoadAllPages,
@@ -256,6 +262,14 @@ pub struct UiState {
     pub touch_draw_enabled: bool,
     /// Zuletzt gelöschtes Notizbuch für Rückgängig während der Sitzung (Papierkorb-Pfad, Titel)
     pub last_deleted_notebook: Option<(std::path::PathBuf, String)>,
+    /// Stifte der Werkzeugleiste (Farbe und Stärke) und der gewählte davon; `pen_color` und
+    /// `pen_stroke_width_mm` gehören immer zum gewählten Stift
+    pub pen_presets: [PenPreset; PEN_PRESET_COUNT],
+    pub active_pen: usize,
+    /// Rückfrage „Seite löschen?“ im ☰-Menü ist offen
+    pub confirm_delete_page: bool,
+    /// Seitenzahl der zuletzt gelöschten Seite, solange sie wiederhergestellt werden kann
+    pub restorable_page: Option<usize>,
     /// Fehler beim Flushen vor dem Beenden
     pub shutdown_error: Option<crate::autosave::AutosaveError>,
     /// Fensterseite der Werkzeugleiste
@@ -333,6 +347,10 @@ impl Default for UiState {
             update_modal_rect: None,
             touch_draw_enabled: false,
             last_deleted_notebook: None,
+            pen_presets: DEFAULT_PEN_PRESETS,
+            active_pen: 0,
+            confirm_delete_page: false,
+            restorable_page: None,
             shutdown_error: None,
             sidebar_side: SidebarSide::Left,
             is_more_menu_open: false,
@@ -372,6 +390,7 @@ impl UiState {
     /// Schließt alle Popover und Dialoge. Wird vor dem Öffnen eines neuen aufgerufen, damit
     /// sich nie mehrere überlagern.
     pub fn close_overlays(&mut self) {
+        self.confirm_delete_page = false;
         self.is_pen_menu_open = false;
         self.is_highlighter_menu_open = false;
         self.is_more_menu_open = false;
@@ -439,12 +458,14 @@ impl UiState {
     }
 
     /// Größte Knopfgröße (40 px, schrittweise bis 28 px), bei der die Leiste mit allen Elementen
-    /// des aktiven Werkzeugs in `max_height` passt.
-    pub fn sidebar_button_size(tool: ActiveTool, max_height: f32) -> f32 {
+    /// des aktiven Werkzeugs in `max_height` passt. `continuous`: durchgehende Ansicht (ohne
+    /// Blätterpfeile).
+    pub fn sidebar_button_size(tool: ActiveTool, max_height: f32, continuous: bool) -> f32 {
         let select = matches!(tool, ActiveTool::Select | ActiveTool::Text);
-        // Notizbücher, 6 Werkzeuge, Undo/Redo, 3× Seiten, Menü (+ 4 Auswahl-Aktionen bzw.
-        // Schriftknöpfe)
-        let buttons = 13 + if select { 4 } else { 0 };
+        // Notizbücher, 6 Werkzeuge, Undo/Redo, Seitenzahl und neue Seite (einzeln blättern:
+        // dazu zwei Pfeile), Menü (+ 4 Auswahl-Aktionen bzw. Schriftknöpfe)
+        let page_buttons = if continuous { 2 } else { 4 };
+        let buttons = 10 + page_buttons + if select { 4 } else { 0 };
         let dividers = 5 + usize::from(select);
         let spacing = 3.0;
         let needed = |b: f32| {
@@ -469,6 +490,29 @@ impl UiState {
 
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Wählt Stift `index`: Farbe und Stärke kommen aus seiner Vorlage.
+    pub fn select_pen(&mut self, index: usize) {
+        self.active_pen = index.min(PEN_PRESET_COUNT - 1);
+        let preset = self.pen_presets[self.active_pen];
+        self.pen_color = preset.color;
+        self.pen_stroke_width_mm = preset.width_mm;
+    }
+
+    /// Übernimmt geänderte Farbe oder Stärke des Stifts in die Vorlage des gewählten Stifts;
+    /// `true`, wenn sie sich geändert hat (dann speichern).
+    pub fn sync_pen_preset(&mut self) -> bool {
+        let current = PenPreset {
+            color: self.pen_color,
+            width_mm: self.pen_stroke_width_mm,
+        };
+        let preset = &mut self.pen_presets[self.active_pen.min(PEN_PRESET_COUNT - 1)];
+        if *preset == current {
+            return false;
+        }
+        *preset = current;
+        true
     }
 
     /// Gibt die aktuelle Farbe des gewählten Werkzeugs zurück.
@@ -886,6 +930,50 @@ fn autosave_status_style(status: AutosaveStatus) -> (egui::Color32, &'static str
 }
 
 /// Zeichnet einen runden Farbauswahl-Knopf (Color Swatch) mit anpassbarem Durchmesser.
+/// Stift der Werkzeugleiste: ein Strich in Farbe und (angedeuteter) Stärke auf einem
+/// Stück Papier, damit auch schwarze Tinte auf der dunklen Leiste sichtbar ist.
+fn pen_preset_swatch(
+    ui: &mut egui::Ui,
+    preset: PenPreset,
+    is_selected: bool,
+    tooltip: &str,
+    size: f32,
+) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::click());
+    if ui.is_rect_visible(rect) {
+        let paper = rect.shrink(2.0);
+        ui.painter().rect_filled(
+            paper,
+            egui::Rounding::same(5.0),
+            egui::Color32::from_gray(245),
+        );
+        let [r, g, b, _] = preset.color.map(|c| (c.clamp(0.0, 1.0) * 255.0) as u8);
+        let width = (1.0 + preset.width_mm * 2.5).clamp(1.5, paper.height() * 0.35);
+        let inset = 3.0 + width / 2.0;
+        ui.painter().line_segment(
+            [
+                egui::pos2(paper.left() + inset, paper.bottom() - inset),
+                egui::pos2(paper.right() - inset, paper.top() + inset),
+            ],
+            egui::Stroke::new(width, egui::Color32::from_rgb(r, g, b)),
+        );
+        if is_selected {
+            ui.painter().rect_stroke(
+                rect.shrink(0.5),
+                egui::Rounding::same(7.0),
+                egui::Stroke::new(2.0_f32, egui::Color32::WHITE),
+            );
+        } else if response.hovered() {
+            ui.painter().rect_stroke(
+                rect.shrink(1.0),
+                egui::Rounding::same(7.0),
+                egui::Stroke::new(1.0_f32, egui::Color32::from_white_alpha(150)),
+            );
+        }
+    }
+    response.on_hover_text(tooltip)
+}
+
 fn color_circle_swatch(
     ui: &mut egui::Ui,
     color: [f32; 4],
@@ -1414,6 +1502,98 @@ fn pressure_curve_editor(ui: &mut egui::Ui, state: &mut UiState) -> Option<Press
     save.then_some(state.pressure_curve)
 }
 
+/// „Seite löschen“ mit Rückfrage im ☰-Menü und „Gelöschte Seite wiederherstellen“.
+fn delete_page_buttons(
+    ui: &mut egui::Ui,
+    state: &mut UiState,
+    notebook: &Notebook,
+    actions: &mut Vec<UiAction>,
+) {
+    let number = notebook.current_page_index + 1;
+    if state.confirm_delete_page {
+        ui.label(
+            egui::RichText::new(format!("Seite {number} mit allem Inhalt löschen?"))
+                .color(egui::Color32::from_rgb(255, 170, 160)),
+        );
+        ui.horizontal(|ui| {
+            let half = (ui.available_width() - ui.spacing().item_spacing.x) / 2.0;
+            if ui
+                .add_sized(
+                    [half, 30.0],
+                    egui::Button::new(egui::RichText::new("Löschen").color(egui::Color32::WHITE))
+                        .fill(egui::Color32::from_rgb(170, 50, 45)),
+                )
+                .clicked()
+            {
+                actions.push(UiAction::DeleteCurrentPage);
+                state.confirm_delete_page = false;
+            }
+            if ui
+                .add_sized([half, 30.0], egui::Button::new("Abbrechen"))
+                .clicked()
+            {
+                state.confirm_delete_page = false;
+            }
+        });
+    } else {
+        let only_page = notebook.pages.len() < 2;
+        let response = ui
+            .add_enabled_ui(!only_page, |ui| {
+                ui.add_sized(
+                    [ui.available_width(), 30.0],
+                    egui::Button::new(format!("🗑  Seite {number} löschen …")),
+                )
+            })
+            .inner
+            .on_hover_text("Löscht die aktuelle Seite; danach im Menü wiederherstellbar")
+            .on_disabled_hover_text(
+                "Die einzige Seite eines Notizbuchs kann nicht gelöscht werden",
+            );
+        if response.clicked() {
+            state.confirm_delete_page = true;
+        }
+    }
+    if let Some(number) = state.restorable_page {
+        if ui
+            .add_sized(
+                [ui.available_width(), 30.0],
+                egui::Button::new(format!("⟲  Gelöschte Seite {number} wiederherstellen")),
+            )
+            .clicked()
+        {
+            actions.push(UiAction::RestoreDeletedPage);
+        }
+    }
+}
+
+/// Durchgehende Ansicht: dunkle Linie an jeder Grenze zweier Seiten (die Seiten liegen
+/// lückenlos untereinander). Unter allen Fenstern der Oberfläche, über der Tinte.
+fn page_separators(ctx: &egui::Context, state: &UiState, notebook: &Notebook) {
+    let Some(view) = state.page_view.filter(|_| state.continuous_scroll) else {
+        return;
+    };
+    let stack = notebook.page_stack();
+    let screen = ctx.screen_rect();
+    let color = if state.paper_theme.is_dark() {
+        egui::Color32::from_white_alpha(140)
+    } else {
+        egui::Color32::from_black_alpha(200)
+    };
+    let painter = ctx.layer_painter(egui::LayerId::background());
+    for i in 1..stack.len() {
+        let y = stack.origins[i].y;
+        let left = stack.origins[i - 1].x.min(stack.origins[i].x);
+        let right = (stack.origins[i - 1].x + stack.sizes[i - 1].x)
+            .max(stack.origins[i].x + stack.sizes[i].x);
+        let a = view.to_screen(glam::Vec2::new(left, y));
+        let b = view.to_screen(glam::Vec2::new(right, y));
+        if a.y < screen.top() - 1.0 || a.y > screen.bottom() + 1.0 {
+            continue;
+        }
+        painter.line_segment([a, b], egui::Stroke::new(1.5_f32, color));
+    }
+}
+
 /// Zeichnet das Lineal über dem Blatt und bedient Verschieben und Drehen.
 fn ruler_overlay(ctx: &egui::Context, state: &mut UiState) {
     let (Some(mut ruler), Some(view)) = (state.ruler, state.page_view) else {
@@ -1815,6 +1995,7 @@ pub fn render_ui(
 ) -> Vec<UiAction> {
     let mut actions = std::mem::take(&mut state.queued_actions);
     state.screen_size = ctx.screen_rect().size();
+    page_separators(ctx, state, notebook);
     ruler_overlay(ctx, state);
     text_edit_overlay(ctx, state);
 
@@ -1840,7 +2021,7 @@ pub fn render_ui(
     let max_height = (ctx.screen_rect().height() - 2.0 * UiState::SIDEBAR_MARGIN - 12.0).max(120.0);
     // Größe nach dem höchsten Fall (Auswahl mit Aktionen), damit Knöpfe beim
     // Werkzeugwechsel weder schrumpfen noch verrutschen
-    let btn = UiState::sidebar_button_size(ActiveTool::Select, max_height);
+    let btn = UiState::sidebar_button_size(ActiveTool::Select, max_height, state.continuous_scroll);
 
     let area_response = egui::Area::new(egui::Id::new("floating_toolbar_area"))
         .anchor(anchor, offset)
@@ -2025,10 +2206,12 @@ pub fn render_ui(
                                     state.toggle_ruler();
                                 }
 
-                                // --- Farben des aktiven Werkzeugs ---
+                                // --- Stifte bzw. Farben des aktiven Werkzeugs ---
+                                let pens = matches!(state.active_tool, ActiveTool::Pen | ActiveTool::Shape);
                                 let palette: Option<(&[ColorPreset], [f32; 4])> =
                                     match state.active_tool {
-                                        ActiveTool::Pen | ActiveTool::Shape | ActiveTool::Select => {
+                                        ActiveTool::Pen | ActiveTool::Shape => None,
+                                        ActiveTool::Select => {
                                             Some((&PEN_COLOR_PRESETS[..], state.pen_color))
                                         }
                                         ActiveTool::Highlighter => Some((
@@ -2044,7 +2227,46 @@ pub fn render_ui(
                                 // beim Werkzeugwechsel nicht springen
                                 sidebar_divider(ui, btn);
                                 let swatch = UiState::sidebar_swatch_size(btn);
-                                let shown = palette.map_or(0, |(presets, _)| presets.len());
+                                let mut shown = palette.map_or(0, |(presets, _)| presets.len());
+                                if pens {
+                                    shown = PEN_PRESET_COUNT;
+                                    for i in 0..PEN_PRESET_COUNT {
+                                        let preset = state.pen_presets[i];
+                                        let selected = i == state.active_pen;
+                                        let tooltip = if selected {
+                                            format!(
+                                                "Stift {} ({:.2} mm) – erneut tippen für Farbe & Stärke; \
+                                                 Änderungen merkt sich der Stift",
+                                                i + 1,
+                                                preset.width_mm
+                                            )
+                                        } else {
+                                            format!("Stift {} ({:.2} mm)", i + 1, preset.width_mm)
+                                        };
+                                        let response =
+                                            pen_preset_swatch(ui, preset, selected, &tooltip, swatch);
+                                        if selected {
+                                            // Die Einstellungen erscheinen neben dem gewählten Stift
+                                            pen_btn_rect = Some(response.rect);
+                                        }
+                                        if response.clicked() {
+                                            state.is_highlighter_menu_open = false;
+                                            state.is_more_menu_open = false;
+                                            if selected {
+                                                let open = !state.is_pen_menu_open;
+                                                state.close_overlays();
+                                                state.is_pen_menu_open = open;
+                                            } else {
+                                                state.is_pen_menu_open = false;
+                                                state.select_pen(i);
+                                                actions.push(UiAction::SetColor(state.pen_color));
+                                                actions.push(UiAction::SetStrokeWidthMm(
+                                                    state.pen_stroke_width_mm,
+                                                ));
+                                            }
+                                        }
+                                    }
+                                }
                                 if let Some((presets, current)) = palette {
                                     for &(color, label) in presets {
                                         let is_sel = (current[0] - color[0]).abs() < 0.05
@@ -2064,7 +2286,8 @@ pub fn render_ui(
                                                         edit.focus = true;
                                                     }
                                                 }
-                                                _ => state.pen_color = color,
+                                                // Auswahl umfärben, der Stift bleibt
+                                                _ => {}
                                             }
                                             actions.push(UiAction::SetColor(color));
                                         }
@@ -2181,16 +2404,20 @@ pub fn render_ui(
                                 sidebar_divider(ui, btn);
 
                                 // --- Seitennavigation ---
-                                if sidebar_button(
-                                    ui,
-                                    btn,
-                                    SidebarIcon::Glyph("⏶"),
-                                    false,
-                                    notebook.current_page_index > 0,
-                                    None,
-                                    "Vorherige Seite (Bild auf)",
-                                )
-                                .clicked()
+                                // In der durchgehenden Ansicht wird gescrollt; Blätterpfeile gibt
+                                // es nur in der Einzelseitenansicht
+                                let paging = !state.continuous_scroll;
+                                if paging
+                                    && sidebar_button(
+                                        ui,
+                                        btn,
+                                        SidebarIcon::Glyph("⏶"),
+                                        false,
+                                        notebook.current_page_index > 0,
+                                        None,
+                                        "Vorherige Seite (Bild auf)",
+                                    )
+                                    .clicked()
                                 {
                                     actions.push(UiAction::PreviousPage);
                                 }
@@ -2214,23 +2441,33 @@ pub fn render_ui(
                                     state.close_overlays();
                                     state.show_page_jump_popup = open;
                                 }
-                                let is_last = notebook.current_page_index + 1 >= notebook.pages.len();
+                                if paging
+                                    && sidebar_button(
+                                        ui,
+                                        btn,
+                                        SidebarIcon::Glyph("⏷"),
+                                        false,
+                                        notebook.current_page_index + 1 < notebook.pages.len(),
+                                        None,
+                                        "Nächste Seite (Bild ab)",
+                                    )
+                                    .clicked()
+                                {
+                                    actions.push(UiAction::NextPage);
+                                }
                                 if sidebar_button(
                                     ui,
                                     btn,
-                                    SidebarIcon::Glyph("⏷"),
+                                    SidebarIcon::Glyph("➕"),
                                     false,
                                     true,
                                     None,
-                                    if is_last {
-                                        "Neue Seite anhängen (Bild ab / N)"
-                                    } else {
-                                        "Nächste Seite (Bild ab / N)"
-                                    },
+                                    "Neue Seite nach dieser einfügen",
                                 )
                                 .clicked()
                                 {
-                                    actions.push(UiAction::NextPage);
+                                    state.close_overlays();
+                                    actions.push(UiAction::AddPage);
                                 }
 
                                 sidebar_divider(ui, btn);
@@ -2303,7 +2540,7 @@ pub fn render_ui(
                         // Titelzeile mit Schließen-Button
                         ui.horizontal(|ui| {
                             ui.label(
-                                egui::RichText::new("Stift-Konfiguration")
+                                egui::RichText::new(format!("Stift {}", state.active_pen + 1))
                                     .strong()
                                     .color(egui::Color32::WHITE)
                                     .size(12.5),
@@ -2625,6 +2862,7 @@ pub fn render_ui(
                             {
                                 actions.push(UiAction::AddPage);
                             }
+                            delete_page_buttons(ui, state, notebook, &mut actions);
                             if ui
                                 .add_sized([ui.available_width(), 30.0], egui::Button::new("🖼  Bild einfügen … (Strg+I)"))
                                 .on_hover_text("Auch per Strg+V aus der Zwischenablage oder durch Ziehen einer Bilddatei ins Fenster")
@@ -2978,6 +3216,9 @@ pub fn render_ui(
     }
 
     state.popover_rect = popover_rect;
+    if !state.is_more_menu_open {
+        state.confirm_delete_page = false;
+    }
 
     // Automatisches Schließen der Popover bei Klick außerhalb von Leiste und Popover
     if (state.is_pen_menu_open
@@ -4151,7 +4392,7 @@ mod tests {
         }
         // Große Fenster behalten die volle Knopfgröße
         assert_eq!(
-            UiState::sidebar_button_size(ActiveTool::Select, 1000.0),
+            UiState::sidebar_button_size(ActiveTool::Select, 1000.0, true),
             40.0
         );
     }
