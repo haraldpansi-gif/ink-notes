@@ -1339,6 +1339,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     if let Ok(tablet_events) = mgr.pump() {
                         let scale = window.scale_factor() as f32;
                         let now = start_time.elapsed().as_secs_f64();
+                        // Aufsetzen erst mit der Position desselben Frames verarbeiten
+                        let tablet_events = ink_notes::platform::down_after_pose(
+                            tablet_events,
+                            |e| matches!(e, octotablet::events::Event::Tool { event: octotablet::events::ToolEvent::Down, .. }),
+                            |e| matches!(e, octotablet::events::Event::Tool { event: octotablet::events::ToolEvent::Pose(_), .. }),
+                        );
 
                         for t_event in tablet_events {
                             if let octotablet::events::Event::Tool { tool, event } = t_event {

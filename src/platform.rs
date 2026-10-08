@@ -58,9 +58,61 @@ pub fn display_backend_from_env() -> DisplayBackend {
     )
 }
 
+/// Bringt die Ereignisse eines Tablet-Frames in eine brauchbare Reihenfolge: octotablet meldet
+/// das Aufsetzen des Stifts (`Down`) vor der Position desselben Frames (`Pose`). Bis dahin
+/// gälte noch die alte Position – kam der Stift schnell heran (Annähern und Aufsetzen im selben
+/// Frame), läge sie ganz woanders: Ein Tippen auf einen Knopf ginge daneben, ein Strich begänne
+/// mit einer Linie von der alten Stelle. Hier folgt jedes `Down` auf die nächste `Pose`, spätestens
+/// vor dem nächsten anderen Ereignis.
+pub fn down_after_pose<T>(
+    events: impl IntoIterator<Item = T>,
+    is_down: impl Fn(&T) -> bool,
+    is_pose: impl Fn(&T) -> bool,
+) -> Vec<T> {
+    let mut ordered = Vec::new();
+    let mut deferred = None;
+    for event in events {
+        if is_down(&event) {
+            if let Some(down) = deferred.replace(event) {
+                ordered.push(down);
+            }
+            continue;
+        }
+        let pose = is_pose(&event);
+        if !pose {
+            ordered.extend(deferred.take());
+        }
+        ordered.push(event);
+        if pose {
+            ordered.extend(deferred.take());
+        }
+    }
+    ordered.extend(deferred);
+    ordered
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_down_follows_pose_of_its_frame() {
+        let order = |events: &str| {
+            down_after_pose(events.chars(), |c| *c == 'D', |c| *c == 'P')
+                .into_iter()
+                .collect::<String>()
+        };
+        // In, Down, Pose, Button, Frame  ->  Down erst mit der neuen Position
+        assert_eq!(order("IDPBF"), "IPDBF");
+        // Down ohne Pose im Frame: vor dem Frame-Ende
+        assert_eq!(order("DF"), "DF");
+        assert_eq!(order("DBF"), "DBF");
+        // Am Ende ohne weiteres Ereignis
+        assert_eq!(order("PD"), "PD");
+        // Andere Ereignisse bleiben unverändert
+        assert_eq!(order("PFPFUF"), "PFPFUF");
+        assert_eq!(order("IDPFPFUF"), "IPDFPFUF");
+    }
 
     #[test]
     fn test_choose_display_backend() {
