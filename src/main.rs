@@ -30,10 +30,38 @@ use ink_notes::platform::{self, DisplayBackend};
 use ink_notes::selection::{
     render_selection_overlay, DragMode, SelectionHandleHit, SelectionState,
 };
-use ink_notes::settings::{SidebarSide, UiSettings};
+use ink_notes::settings::{
+    SidebarSide, StylusAction, StylusButton, UiSettings, MAX_STYLUS_BUTTONS,
+};
 use ink_notes::storage::{self, NotebookManifest};
 use ink_notes::ui::{self, ActiveTool, UiAction, UiState};
 use ink_notes::updater::UpdaterController;
+
+/// Wählt `tool` und stellt Farbe und Stärke des Live-Strichs passend ein.
+fn activate_tool(tool: ActiveTool, ui_state: &mut UiState, canvas: &mut CanvasState) {
+    ui_state.active_tool = tool;
+    match tool {
+        ActiveTool::Pen | ActiveTool::Shape => {
+            canvas.set_stroke_color(ui_state.pen_color);
+            canvas.set_stroke_width_mm(ui_state.pen_stroke_width_mm);
+        }
+        ActiveTool::Highlighter => {
+            canvas.set_stroke_color(ui_state.highlighter_color);
+            canvas.set_stroke_width_mm(ui_state.highlighter_stroke_width_mm);
+        }
+        ActiveTool::Eraser | ActiveTool::Select | ActiveTool::Text => {}
+    }
+}
+
+/// Kennung einer Stifttaste, die über Programmstarts hinweg gleich bleibt (die Tablet-
+/// Schnittstelle liefert nur eine undurchsichtige, aber vergleichbare Kennung).
+fn stylus_button_key(id: &octotablet::tool::ButtonID) -> u64 {
+    use std::hash::{Hash, Hasher};
+    // DefaultHasher::new() verwendet feste Schlüssel: gleiche Taste, gleicher Wert
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    id.hash(&mut hasher);
+    hasher.finish()
+}
 
 /// Liest Notizbücher und Ordner für den Dokumenten-Manager neu ein.
 fn refresh_notebooks(base_dir: &Path, ui_state: &mut UiState) {
@@ -1107,6 +1135,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ui_state.pressure_curve = ui_settings.pressure_curve;
     ui_state.continuous_scroll = ui_settings.continuous_scroll;
     ui_state.pen_presets = ui_settings.pen_presets;
+    ui_state.stylus_buttons = ui_settings.stylus_buttons.clone();
     ui_state.select_pen(ui_settings.active_pen);
     ui_state.highlighter_colors = ui_settings.highlighter_colors;
     ui_state.select_highlighter_color(ui_settings.active_highlighter);
@@ -1186,7 +1215,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut is_stylus_selecting = false;
     let mut is_stylus_in_proximity = false;
     let mut stylus_tool_id: Option<octotablet::tool::ID> = None;
-    let mut stylus_barrel_pressed = false;
+    // Gedrückte Stifttaste (Kennung, Belegung) und das Werkzeug, das während eines Strichs mit
+    // einer Werkzeug-Taste (Auswählen, Textmarker, Stift) vertreten wird
+    let mut stylus_held: Option<(u64, StylusAction)> = None;
+    let mut tool_before_button: Option<ActiveTool> = None;
     let mut stylus_screen_pos = (0.0_f32, 0.0_f32);
     // Stift hat auf der UI aufgesetzt: alle Ereignisse bis zum Abheben gehen an egui
     let mut stylus_ui_capture = false;
@@ -1357,23 +1389,45 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 selection_release(false, &mut notebook, &mut manifest, &mut autosave, &mut selection_state);
                                                 window.request_redraw();
                                             }
+                                            if let Some(tool) = tool_before_button.take() {
+                                                activate_tool(tool, &mut ui_state, &mut canvas);
+                                            }
+                                            stylus_held = None;
+                                            ui_state.pressed_stylus_button = None;
                                         }
                                     }
-                                    octotablet::events::ToolEvent::Button { pressed, .. } => {
-                                        stylus_barrel_pressed = pressed;
-                                        if pressed && is_stylus_drawing {
-                                            is_stylus_drawing = false;
-                                            is_drawing = false;
-                                            canvas.cancel_stroke();
-                                            is_erasing = true;
-                                            window.request_redraw();
-                                        } else if !pressed
-                                            && is_erasing
-                                            && !tool_is_hardware_eraser
-                                            && ui_state.active_tool != ActiveTool::Eraser
-                                        {
-                                            is_erasing = false;
+                                    octotablet::events::ToolEvent::Button { button_id, pressed } => {
+                                        // Tasten werden beim ersten Drücken gelernt (Standard: Radieren)
+                                        let key = stylus_button_key(&button_id);
+                                        let mut index = ui_state.stylus_buttons.iter().position(|b| b.id == key);
+                                        if index.is_none() && pressed && ui_state.stylus_buttons.len() < MAX_STYLUS_BUTTONS {
+                                            ui_state.stylus_buttons.push(StylusButton { id: key, action: StylusAction::Erase });
+                                            index = Some(ui_state.stylus_buttons.len() - 1);
+                                            ui_settings.stylus_buttons = ui_state.stylus_buttons.clone();
+                                            save_ui_settings(&ui_settings, ui_settings_path.as_deref(), &mut ui_state);
                                         }
+                                        let action = index.map_or(StylusAction::Erase, |i| ui_state.stylus_buttons[i].action);
+                                        if pressed {
+                                            stylus_held = Some((key, action));
+                                            ui_state.pressed_stylus_button = index;
+                                            if action == StylusAction::Erase && is_stylus_drawing {
+                                                is_stylus_drawing = false;
+                                                is_drawing = false;
+                                                canvas.cancel_stroke();
+                                                is_erasing = true;
+                                            }
+                                        } else if stylus_held.is_some_and(|(held, _)| held == key) {
+                                            stylus_held = None;
+                                            ui_state.pressed_stylus_button = None;
+                                            if action == StylusAction::Erase
+                                                && is_erasing
+                                                && !tool_is_hardware_eraser
+                                                && ui_state.active_tool != ActiveTool::Eraser
+                                            {
+                                                is_erasing = false;
+                                            }
+                                        }
+                                        window.request_redraw();
                                     }
                                     octotablet::events::ToolEvent::Pose(pose) => {
                                         is_stylus_in_proximity = true;
@@ -1471,8 +1525,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         }
 
                                         focus_page_at!((sx, sy));
+                                        // Werkzeug-Taste gedrückt: für diesen Strich dieses Werkzeug
+                                        let button_action = stylus_held.map(|(_, action)| action);
+                                        let button_tool = match button_action {
+                                            Some(StylusAction::Select) => Some(ActiveTool::Select),
+                                            Some(StylusAction::Highlighter) => Some(ActiveTool::Highlighter),
+                                            Some(StylusAction::Pen) => Some(ActiveTool::Pen),
+                                            _ => None,
+                                        };
+                                        if let Some(tool) = button_tool
+                                            .filter(|&t| !tool_is_hardware_eraser && t != ui_state.active_tool)
+                                        {
+                                            tool_before_button = Some(ui_state.active_tool);
+                                            activate_tool(tool, &mut ui_state, &mut canvas);
+                                        }
                                         let should_erase = tool_is_hardware_eraser
-                                            || stylus_barrel_pressed
+                                            || button_action == Some(StylusAction::Erase)
                                             || ui_state.active_tool == ActiveTool::Eraser;
 
                                         if !should_erase && ui_state.active_tool == ActiveTool::Text {
@@ -1550,6 +1618,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 window.request_redraw();
                                             }
                                         }
+                                        let restore_tool = tool_before_button.take();
 
                                         if is_stylus_drawing {
                                             is_stylus_drawing = false;
@@ -1583,6 +1652,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 &window,
                                                 snapped_shape,
                                             );
+                                        }
+                                        // Nach einem Strich mit Werkzeug-Taste wieder das gewählte Werkzeug
+                                        if let Some(tool) = restore_tool {
+                                            activate_tool(tool, &mut ui_state, &mut canvas);
+                                            window.request_redraw();
                                         }
                                     }
                                     _ => {}
@@ -2731,22 +2805,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         for action in actions {
                             match action {
                                 UiAction::SetTool(tool) => {
-                                    ui_state.active_tool = tool;
-                                    match tool {
-                                        ActiveTool::Pen => {
-                                            canvas.set_stroke_color(ui_state.pen_color);
-                                            canvas.set_stroke_width_mm(ui_state.pen_stroke_width_mm);
-                                        }
-                                        ActiveTool::Highlighter => {
-                                            canvas.set_stroke_color(ui_state.highlighter_color);
-                                            canvas.set_stroke_width_mm(ui_state.highlighter_stroke_width_mm);
-                                        }
-                                        ActiveTool::Shape => {
-                                            canvas.set_stroke_color(ui_state.pen_color);
-                                            canvas.set_stroke_width_mm(ui_state.pen_stroke_width_mm);
-                                        }
-                                        ActiveTool::Eraser | ActiveTool::Select | ActiveTool::Text => {}
-                                    }
+                                    activate_tool(tool, &mut ui_state, &mut canvas);
                                     update_window_title(&window, &notebook, &manifest, tool, autosave.status());
                                     window.request_redraw();
                                 }
@@ -3432,6 +3491,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     ui_settings.continuous_scroll = on;
                                     save_ui_settings(&ui_settings, ui_settings_path.as_deref(), &mut ui_state);
                                     window.request_redraw();
+                                }
+                                UiAction::SaveStylusButtons => {
+                                    ui_settings.stylus_buttons = ui_state.stylus_buttons.clone();
+                                    save_ui_settings(&ui_settings, ui_settings_path.as_deref(), &mut ui_state);
                                 }
                                 UiAction::SavePressureCurve(curve) => {
                                     ui_settings.pressure_curve = curve;

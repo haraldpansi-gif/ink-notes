@@ -288,6 +288,8 @@ pub enum UiAction {
         theme: PaperTheme,
         adapt_ink: bool,
     },
+    /// Belegung der Stifttasten speichern (gilt sofort über `UiState::stylus_buttons`)
+    SaveStylusButtons,
     /// Druckkurve speichern (gilt während des Ziehens bereits über `UiState::pressure_curve`)
     SavePressureCurve(PressureCurve),
     /// Seiten durchgehend untereinander statt einzeln anzeigen (wird gespeichert)
@@ -376,6 +378,9 @@ pub struct UiState {
     pub show_color_picker: bool,
     /// Kontextmenü nach langem Drücken (Einfügen an dieser Stelle)
     pub context_menu: Option<ContextMenu>,
+    /// Tasten am Stift und ihre Belegung; die gerade gedrückte (Index) wird hervorgehoben
+    pub stylus_buttons: Vec<crate::settings::StylusButton>,
+    pub pressed_stylus_button: Option<usize>,
     /// Rückfrage „Seite löschen?“ im ☰-Menü ist offen
     pub confirm_delete_page: bool,
     /// Seitenzahl der zuletzt gelöschten Seite, solange sie wiederhergestellt werden kann
@@ -471,6 +476,8 @@ impl Default for UiState {
             is_text_color_menu_open: false,
             show_color_picker: false,
             context_menu: None,
+            stylus_buttons: Vec::new(),
+            pressed_stylus_button: None,
             confirm_delete_page: false,
             restorable_page: None,
             shutdown_error: None,
@@ -1635,6 +1642,70 @@ fn pattern_color_button(
 /// Schieberegler für die Druckkurve mit Vorschau der Kennlinie. Änderungen gelten sofort
 /// (`state.pressure_curve`); zurückgegeben wird die Kurve, sobald sie gespeichert werden soll
 /// (Regler losgelassen oder per Tastatur geändert).
+/// Belegung der Tasten am Stift. Tasten erscheinen, sobald sie einmal gedrückt wurden; die
+/// gerade gedrückte ist markiert. `true`, wenn sich etwas geändert hat.
+fn stylus_buttons_editor(ui: &mut egui::Ui, state: &mut UiState) -> bool {
+    use crate::settings::StylusAction;
+    let mut changed = false;
+    ui.add_space(4.0);
+    ui.label(egui::RichText::new("Tasten am Stift").color(egui::Color32::from_gray(200)));
+    if state.stylus_buttons.is_empty() {
+        ui.label(
+            egui::RichText::new(
+                "Drücke eine Taste am Stift (über dem Bildschirm) – sie erscheint dann hier. \
+                 Bis dahin radieren alle Tasten.",
+            )
+            .size(11.0)
+            .color(egui::Color32::from_gray(150)),
+        );
+        return false;
+    }
+    let mut remove = None;
+    for i in 0..state.stylus_buttons.len() {
+        ui.horizontal(|ui| {
+            let pressed = state.pressed_stylus_button == Some(i);
+            let label = egui::RichText::new(format!("Taste {}", i + 1));
+            ui.label(if pressed {
+                label.strong().color(egui::Color32::from_rgb(46, 204, 113))
+            } else {
+                label
+            })
+            .on_hover_text("Leuchtet grün, solange die Taste gedrückt ist");
+            let current = state.stylus_buttons[i].action;
+            egui::ComboBox::from_id_source(("stylus_button", i))
+                .selected_text(current.label())
+                .width(130.0)
+                .show_ui(ui, |ui| {
+                    for action in StylusAction::ALL {
+                        if ui
+                            .selectable_label(action == current, action.label())
+                            .clicked()
+                            && action != current
+                        {
+                            state.stylus_buttons[i].action = action;
+                            changed = true;
+                        }
+                    }
+                });
+            if ui
+                .small_button("🗙")
+                .on_hover_text(
+                    "Vergessen (erscheint beim nächsten Drücken wieder, dann mit Radieren)",
+                )
+                .clicked()
+            {
+                remove = Some(i);
+            }
+        });
+    }
+    if let Some(i) = remove {
+        state.stylus_buttons.remove(i);
+        state.pressed_stylus_button = None;
+        changed = true;
+    }
+    changed
+}
+
 fn pressure_curve_editor(ui: &mut egui::Ui, state: &mut UiState) -> Option<PressureCurve> {
     let mut save = false;
     let mut track = |response: egui::Response| {
@@ -3560,6 +3631,9 @@ pub fn render_ui(
                             if let Some(curve) = pressure_curve_editor(ui, state) {
                                 actions.push(UiAction::SavePressureCurve(curve));
                             }
+                            if stylus_buttons_editor(ui, state) {
+                                actions.push(UiAction::SaveStylusButtons);
+                            }
 
                             section(ui, "WERKZEUGLEISTE");
                             ui.horizontal(|ui| {
@@ -5293,6 +5367,43 @@ mod tests {
             let _ = ctx.end_frame();
         }
         actions
+    }
+
+    #[test]
+    fn test_stylus_buttons_in_menu() {
+        use crate::settings::{StylusAction, StylusButton};
+        let notebook = Notebook::new();
+        let mut state = UiState::new();
+        state.is_more_menu_open = true;
+        // Ohne gelernte Tasten: nur der Hinweis, keine Aktion
+        let ctx = egui::Context::default();
+        let updater = crate::updater::UpdaterController::new();
+        let shapes = ctx
+            .run(egui::RawInput::default(), |ctx| {
+                let _ = render_ui(ctx, &mut state, &notebook, AutosaveStatus::Saved, &updater);
+            })
+            .shapes
+            .len();
+        assert!(shapes > 0);
+
+        // Mit zwei Tasten: beide Zeilen, die gedrückte hervorgehoben, ohne Fehler
+        state.stylus_buttons = vec![
+            StylusButton {
+                id: 1,
+                action: StylusAction::Erase,
+            },
+            StylusButton {
+                id: 2,
+                action: StylusAction::Select,
+            },
+        ];
+        state.pressed_stylus_button = Some(1);
+        let output = ctx.run(egui::RawInput::default(), |ctx| {
+            let actions = render_ui(ctx, &mut state, &notebook, AutosaveStatus::Saved, &updater);
+            assert!(!actions.contains(&UiAction::SaveStylusButtons));
+        });
+        assert!(!output.shapes.is_empty());
+        assert_eq!(state.stylus_buttons.len(), 2);
     }
 
     #[test]

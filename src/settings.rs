@@ -150,6 +150,53 @@ fn sanitized_color(color: [f32; 4], fallback: [f32; 4]) -> [f32; 4] {
     out
 }
 
+/// Was eine Taste am Stift bewirkt, solange sie gedrückt ist.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum StylusAction {
+    /// Radieren (Standard, wie bisher)
+    #[default]
+    Erase,
+    /// Auswählen und verschieben
+    Select,
+    /// Mit dem Textmarker schreiben
+    Highlighter,
+    /// Mit dem gewählten Stift schreiben (z. B. während der Textmarker aktiv ist)
+    Pen,
+    /// Taste nicht verwenden
+    Nothing,
+}
+
+impl StylusAction {
+    pub const ALL: [StylusAction; 5] = [
+        StylusAction::Erase,
+        StylusAction::Select,
+        StylusAction::Highlighter,
+        StylusAction::Pen,
+        StylusAction::Nothing,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            StylusAction::Erase => "Radieren",
+            StylusAction::Select => "Auswählen",
+            StylusAction::Highlighter => "Textmarker",
+            StylusAction::Pen => "Stift",
+            StylusAction::Nothing => "Nichts",
+        }
+    }
+}
+
+/// Eine Taste am Stift: Kennung (aus der Tablet-Schnittstelle, beim ersten Drücken gelernt)
+/// und ihre Belegung.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StylusButton {
+    pub id: u64,
+    pub action: StylusAction,
+}
+
+/// Höchstens so viele Stifttasten werden gemerkt.
+pub const MAX_STYLUS_BUTTONS: usize = 4;
+
 /// Benutzereinstellungen der Oberfläche.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -173,6 +220,8 @@ pub struct UiSettings {
     pub active_highlighter: usize,
     pub text_colors: [[f32; 4]; 5],
     pub active_text_color: usize,
+    /// Tasten am Stift in der Reihenfolge, in der sie zuerst gedrückt wurden
+    pub stylus_buttons: Vec<StylusButton>,
 }
 
 impl Default for UiSettings {
@@ -190,6 +239,7 @@ impl Default for UiSettings {
             active_highlighter: 0,
             text_colors: DEFAULT_TEXT_COLORS,
             active_text_color: 0,
+            stylus_buttons: Vec::new(),
         }
     }
 }
@@ -237,6 +287,7 @@ impl UiSettings {
         settings.active_text_color = settings
             .active_text_color
             .min(settings.text_colors.len() - 1);
+        settings.stylus_buttons.truncate(MAX_STYLUS_BUTTONS);
         settings
     }
 
@@ -277,6 +328,16 @@ mod tests {
             active_highlighter: 3,
             text_colors: [[0.3, 0.1, 0.6, 1.0]; 5],
             active_text_color: 4,
+            stylus_buttons: vec![
+                StylusButton {
+                    id: 17,
+                    action: StylusAction::Select,
+                },
+                StylusButton {
+                    id: 42,
+                    action: StylusAction::Nothing,
+                },
+            ],
         };
         settings.save_to(&path).unwrap();
         assert_eq!(UiSettings::load_from(&path), settings);

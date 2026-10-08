@@ -22,7 +22,8 @@ Getestet wird vor allem unter Zorin OS 18 / Ubuntu 24.04 (Wayland und X11).
 - **Eigene Farben:** Jede Farbe in der Werkzeugleiste (Stifte, Textmarker, Text) lässt sich anpassen – gewählte Farbe erneut antippen, eine Vorgabe oder mit 🎨 einen freien Farbton wählen. Die Leiste merkt sich die Farben. Am Bildschirm erscheinen sie genauso wie im PDF- und Bildexport.
 - **Glättung in zwei Stufen:** Während des Schreibens glättet ein 1€-Filter das Zittern, die Linie erscheint sofort. Beim Absetzen wird der Strich nachbearbeitet: Ecken (Knicke über 65°) bleiben erhalten, der Druckverlauf wird geglättet, überflüssige Punkte entfallen, die Enden werden rund.
 - **Druckkurve** im ☰-Menü an den eigenen Stift anpassen (weicher/härter, Schwelle gegen Grundrauschen).
-- **Radierer** in drei Modi: ganze Striche, nur den überstrichenen Teil (Teilstrich) oder nur Textmarker. Stiftrückseite und Seitentaste des Stifts radieren ebenfalls.
+- **Tasten am Stift** im ☰-Menü belegen: Radieren (Standard), Auswählen, Textmarker, Stift oder nichts – gilt, solange die Taste gedrückt ist. Jede Taste erscheint dort nach dem ersten Drücken.
+- **Radierer** in drei Modi: ganze Striche, nur den überstrichenen Teil (Teilstrich) oder nur Textmarker. Die Stiftrückseite radiert ebenfalls.
 - **Virtuelles Lineal** (`L`): verschieben, am Griff drehen (rastet bei 15° ein); Striche entlang einer Kante werden gerade.
 
 ### Formerkennung
