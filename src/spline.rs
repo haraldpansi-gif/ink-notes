@@ -274,7 +274,7 @@ pub fn generate_triangle_strip(
             // Einzelner Punkt (Stift-Tippen / Dot): Erzeuge kreisförmiges Pad
             let pt = control_points[0];
             let radius = calculate_radius(pt.pressure, config.min_radius, config.max_radius);
-            let segments = 8;
+            let segments = 20;
             let mut vertices = Vec::with_capacity((segments + 1) * 2);
 
             for i in 0..=segments {
@@ -599,7 +599,8 @@ pub fn generate_finalized_triangle_strip(
         return Vec::new();
     }
 
-    const CAP_STEPS: usize = 4;
+    // Runde Kappen fein genug unterteilt, dass sie auch stark vergrößert rund wirken
+    const CAP_STEPS: usize = 10;
     let mut vertices = Vec::new();
 
     // 3. Runde Start-Kappe vor dem ersten Run

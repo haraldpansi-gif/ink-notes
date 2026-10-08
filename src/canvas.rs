@@ -160,6 +160,9 @@ pub struct CanvasState {
     pub surface: wgpu::Surface<'static>,
     /// Verwendeter Grafikadapter (für erneute Abfrage der Surface-Fähigkeiten bei Größenänderung)
     adapter: wgpu::Adapter,
+    /// Multisampling der Zeichenfläche (1 = aus) und das zugehörige Zwischenbild
+    msaa_samples: u32,
+    msaa_view: Option<wgpu::TextureView>,
     /// Meldung „keine Darstellungsmodi“ wurde bereits ausgegeben
     presentation_warned: bool,
     pub device: wgpu::Device,
@@ -326,6 +329,18 @@ impl CanvasState {
         };
         surface.configure(&device, &config);
 
+        // Kantenglättung der Zeichenfläche (4× Multisampling), falls das Format es erlaubt
+        let msaa_samples = if adapter
+            .get_texture_format_features(config.format)
+            .flags
+            .sample_count_supported(MSAA_SAMPLES)
+        {
+            MSAA_SAMPLES
+        } else {
+            1
+        };
+        let msaa_view = create_msaa_view(&device, &config, msaa_samples);
+
         // 5. Shader & Bind Group Layout
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Ink WGSL Shader"),
@@ -406,7 +421,10 @@ impl CanvasState {
                 conservative: false,
             },
             depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
+            multisample: wgpu::MultisampleState {
+                count: msaa_samples,
+                ..Default::default()
+            },
             multiview: None,
         });
 
@@ -438,7 +456,10 @@ impl CanvasState {
                 conservative: false,
             },
             depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
+            multisample: wgpu::MultisampleState {
+                count: msaa_samples,
+                ..Default::default()
+            },
             multiview: None,
         });
 
@@ -487,6 +508,7 @@ impl CanvasState {
             &shader,
             &bind_group_layout,
             config.format,
+            msaa_samples,
         );
 
         // 8. egui Renderer für das schwebende UI initialisieren
@@ -495,6 +517,8 @@ impl CanvasState {
         Ok(Self {
             surface,
             adapter,
+            msaa_samples,
+            msaa_view,
             presentation_warned: false,
             device,
             queue,
@@ -643,6 +667,7 @@ impl CanvasState {
                 }
             }
             self.surface.configure(&self.device, &self.config);
+            self.msaa_view = create_msaa_view(&self.device, &self.config, self.msaa_samples);
             self.recalculate_viewport();
         }
     }
@@ -1264,12 +1289,17 @@ impl CanvasState {
         {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Ink Canvas Render Pass"),
+                // Mit Multisampling ins Zwischenbild zeichnen und in die Fensterfläche auflösen
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
-                    resolve_target: None,
+                    view: self.msaa_view.as_ref().unwrap_or(&view),
+                    resolve_target: self.msaa_view.as_ref().map(|_| &view),
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(self.paper_theme.desk_color()), // Tischhintergrund
-                        store: wgpu::StoreOp::Store,
+                        store: if self.msaa_view.is_some() {
+                            wgpu::StoreOp::Discard
+                        } else {
+                            wgpu::StoreOp::Store
+                        },
                     },
                 })],
                 depth_stencil_attachment: None,
@@ -1374,6 +1404,35 @@ impl CanvasState {
         };
         self.render(&[], &dummy_screen, &dummy_delta)
     }
+}
+
+/// Multisampling der Zeichenfläche gegen gezackte Strichkanten.
+const MSAA_SAMPLES: u32 = 4;
+
+/// Zwischenbild für das Multisampling in Fenstergröße; `None` ohne Multisampling.
+fn create_msaa_view(
+    device: &wgpu::Device,
+    config: &wgpu::SurfaceConfiguration,
+    samples: u32,
+) -> Option<wgpu::TextureView> {
+    (samples > 1).then(|| {
+        device
+            .create_texture(&wgpu::TextureDescriptor {
+                label: Some("MSAA Color Target"),
+                size: wgpu::Extent3d {
+                    width: config.width.max(1),
+                    height: config.height.max(1),
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: samples,
+                dimension: wgpu::TextureDimension::D2,
+                format: config.format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[],
+            })
+            .create_view(&wgpu::TextureViewDescriptor::default())
+    })
 }
 
 /// Zu rasterndes Textfeld.

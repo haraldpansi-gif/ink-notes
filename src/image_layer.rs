@@ -102,6 +102,7 @@ impl ImageLayer {
         shader: &wgpu::ShaderModule,
         camera_layout: &wgpu::BindGroupLayout,
         format: wgpu::TextureFormat,
+        sample_count: u32,
     ) -> Self {
         let texture_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Image Texture Bind Group Layout"),
@@ -151,7 +152,10 @@ impl ImageLayer {
                 ..Default::default()
             },
             depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
+            multisample: wgpu::MultisampleState {
+                count: sample_count,
+                ..Default::default()
+            },
             multiview: None,
         });
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
