@@ -382,6 +382,195 @@ fn insert_image_on_page(
     ));
 }
 
+/// Auswahlwerkzeug: Druck auf `screen` (physische Pixel) greift einen Griff, die Auswahl
+/// oder das Objekt darunter oder beginnt einen Auswahlrahmen. Mit `shift` wird die Auswahl
+/// erweitert. `true`, wenn etwas begonnen wurde.
+fn selection_press(
+    screen: (f32, f32),
+    shift: bool,
+    canvas: &CanvasState,
+    page: &ink_notes::document::Page,
+    pixels_per_point: f32,
+    selection_state: &mut SelectionState,
+) -> bool {
+    let (sx, sy) = screen;
+    let hit = selection_state.hit_test_handles(page, canvas, Vec2::new(sx, sy), pixels_per_point);
+    let page_pt = canvas.screen_to_page(sx, sy);
+    let mode = match (hit, page_pt) {
+        (SelectionHandleHit::RotateHandle { center_page }, Some(p)) => DragMode::Rotate {
+            center_page,
+            start_angle: (p.y - center_page.y).atan2(p.x - center_page.x),
+            initial_strokes: page.get_strokes(&selection_state.selected_ids),
+        },
+        (
+            SelectionHandleHit::CornerHandle {
+                fixed_corner_page,
+                start_pos_page,
+                initial_box_size,
+                ..
+            },
+            _,
+        ) => DragMode::Scale {
+            fixed_corner_page,
+            start_pos_page,
+            initial_box_size,
+            initial_strokes: page.get_strokes(&selection_state.selected_ids),
+        },
+        (SelectionHandleHit::Body, Some(p)) => DragMode::Move {
+            start_page: p,
+            initial_strokes: page.get_strokes(&selection_state.selected_ids),
+        },
+        (SelectionHandleHit::None, Some(p)) => match page.find_stroke_at(p, 25.0) {
+            Some(stroke) => {
+                if shift {
+                    selection_state.toggle_select(stroke.id);
+                } else if !selection_state.selected_ids.contains(&stroke.id) {
+                    selection_state.select_single(stroke.id);
+                }
+                DragMode::Move {
+                    start_page: p,
+                    initial_strokes: page.get_strokes(&selection_state.selected_ids),
+                }
+            }
+            None => {
+                if !shift {
+                    selection_state.clear();
+                }
+                DragMode::BoxSelect {
+                    start_page: p,
+                    current_page: p,
+                }
+            }
+        },
+        _ => return false,
+    };
+    selection_state.drag_mode = mode;
+    true
+}
+
+/// Auswahlwerkzeug: Ziehen nach `page_pt` – Rahmen aufziehen oder die Auswahl verschieben,
+/// drehen bzw. skalieren (vorläufig, ohne Undo-Schritt).
+fn selection_drag(
+    page_pt: Vec2,
+    page: &mut ink_notes::document::Page,
+    canvas: &mut CanvasState,
+    selection_state: &mut SelectionState,
+) {
+    let mut updated = match &mut selection_state.drag_mode {
+        DragMode::BoxSelect { current_page, .. } => {
+            *current_page = page_pt;
+            return;
+        }
+        DragMode::None => return,
+        DragMode::Move {
+            initial_strokes, ..
+        }
+        | DragMode::Rotate {
+            initial_strokes, ..
+        }
+        | DragMode::Scale {
+            initial_strokes, ..
+        } => initial_strokes.clone(),
+    };
+    match &selection_state.drag_mode {
+        DragMode::Move { start_page, .. } => {
+            let delta = page_pt - *start_page;
+            updated.iter_mut().for_each(|s| s.translate(delta));
+        }
+        DragMode::Rotate {
+            center_page,
+            start_angle,
+            ..
+        } => {
+            let angle = (page_pt.y - center_page.y).atan2(page_pt.x - center_page.x) - start_angle;
+            updated
+                .iter_mut()
+                .for_each(|s| s.rotate(*center_page, angle));
+        }
+        DragMode::Scale {
+            fixed_corner_page,
+            start_pos_page,
+            ..
+        } => {
+            let orig = *start_pos_page - *fixed_corner_page;
+            let new = page_pt - *fixed_corner_page;
+            let factor = |n: f32, o: f32| {
+                if o.abs() > 1.0 {
+                    (n / o).clamp(0.05, 20.0)
+                } else {
+                    1.0
+                }
+            };
+            let factors = Vec2::new(factor(new.x, orig.x), factor(new.y, orig.y));
+            updated
+                .iter_mut()
+                .for_each(|s| s.scale(*fixed_corner_page, factors));
+        }
+        DragMode::BoxSelect { .. } | DragMode::None => return,
+    }
+    page.update_strokes_ephemeral(&updated);
+    canvas.sync_page(page);
+}
+
+/// Auswahlwerkzeug: Loslassen – Rahmenauswahl übernehmen (mit `shift` hinzufügen) bzw.
+/// Verschieben, Drehen oder Skalieren als einen Undo-Schritt abschließen. `true`, wenn ein
+/// Ziehen lief.
+fn selection_release(
+    shift: bool,
+    notebook: &mut Notebook,
+    manifest: &mut NotebookManifest,
+    autosave: &mut AutosaveController,
+    selection_state: &mut SelectionState,
+) -> bool {
+    match std::mem::take(&mut selection_state.drag_mode) {
+        DragMode::BoxSelect {
+            start_page,
+            current_page,
+        } => {
+            let box_min = start_page.min(current_page);
+            let box_max = start_page.max(current_page);
+            if (box_max - box_min).max_element() > 3.0 {
+                let found_ids = notebook
+                    .current_page()
+                    .find_strokes_in_box(box_min, box_max);
+                if shift {
+                    for id in found_ids {
+                        if !selection_state.selected_ids.contains(&id) {
+                            selection_state.selected_ids.push(id);
+                        }
+                    }
+                } else {
+                    selection_state.select_multiple(found_ids);
+                }
+            }
+        }
+        DragMode::Move {
+            initial_strokes, ..
+        }
+        | DragMode::Rotate {
+            initial_strokes, ..
+        }
+        | DragMode::Scale {
+            initial_strokes, ..
+        } => {
+            let final_strokes = notebook
+                .current_page()
+                .get_strokes(&selection_state.selected_ids);
+            if !initial_strokes.is_empty()
+                && !final_strokes.is_empty()
+                && initial_strokes != final_strokes
+            {
+                notebook
+                    .current_page_mut()
+                    .commit_modified_strokes(initial_strokes, final_strokes);
+                autosave.mark_dirty(notebook, manifest);
+            }
+        }
+        DragMode::None => return false,
+    }
+    true
+}
+
 /// Fügt `content` als Textfeld (Schrift des Text-Werkzeugs) in der Mitte des sichtbaren
 /// Bereichs ein, wählt es aus und schaltet auf das Auswahlwerkzeug zum Verschieben.
 #[allow(clippy::too_many_arguments)]
@@ -918,6 +1107,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Stylus / Digitizer Zustand (Octotablet / Wayland Tablet Protocol)
     let mut is_stylus_drawing = false;
+    // Stift zieht mit dem Auswahlwerkzeug (Rahmen, Verschieben, Drehen, Skalieren)
+    let mut is_stylus_selecting = false;
     let mut is_stylus_in_proximity = false;
     let mut stylus_tool_id: Option<octotablet::tool::ID> = None;
     let mut stylus_barrel_pressed = false;
@@ -1086,6 +1277,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             if is_erasing {
                                                 is_erasing = false;
                                             }
+                                            if is_stylus_selecting {
+                                                is_stylus_selecting = false;
+                                                selection_release(false, &mut notebook, &mut manifest, &mut autosave, &mut selection_state);
+                                                window.request_redraw();
+                                            }
                                         }
                                     }
                                     octotablet::events::ToolEvent::Button { pressed, .. } => {
@@ -1118,7 +1314,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                                         // Stiftbewegung an egui weitergeben (Hover, Schieberegler ziehen),
                                         // solange nicht auf dem Blatt gezeichnet oder radiert wird
-                                        if stylus_ui_capture || (!is_stylus_drawing && !is_erasing) {
+                                        if stylus_ui_capture || (!is_stylus_drawing && !is_erasing && !is_stylus_selecting) {
                                             let ui_pos = egui::pos2(sx / scale, sy / scale);
                                             egui_winit_state
                                                 .egui_input_mut()
@@ -1151,6 +1347,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                     );
                                                     window.request_redraw();
                                                 }
+                                            }
+                                        } else if is_stylus_selecting {
+                                            if let Some(page_pt) = canvas.screen_to_page(sx, sy) {
+                                                selection_drag(page_pt, notebook.current_page_mut(), &mut canvas, &mut selection_state);
+                                                window.request_redraw();
                                             }
                                         } else if is_stylus_drawing && is_drawing {
                                             let dx = sx - stroke_hold_anchor_pos.0;
@@ -1203,6 +1404,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             if let Some(page_pt) = canvas.screen_to_page(sx, sy) {
                                                 text_tool_click(page_pt, &mut canvas, &mut notebook, &mut manifest, &mut autosave, &mut ui_state);
                                                 update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
+                                                window.request_redraw();
+                                            }
+                                        } else if !should_erase && ui_state.active_tool == ActiveTool::Select {
+                                            if selection_press((sx, sy), false, &canvas, notebook.current_page(), egui_ctx.pixels_per_point(), &mut selection_state) {
+                                                is_stylus_selecting = true;
                                                 window.request_redraw();
                                             }
                                         } else if should_erase {
@@ -1261,6 +1467,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                                         if is_erasing {
                                             is_erasing = false;
+                                        }
+
+                                        if is_stylus_selecting {
+                                            is_stylus_selecting = false;
+                                            if selection_release(false, &mut notebook, &mut manifest, &mut autosave, &mut selection_state) {
+                                                window.request_redraw();
+                                            }
                                         }
 
                                         if is_stylus_drawing {
@@ -1417,6 +1630,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         is_touch_drawing = false;
                         is_touch_panning = false;
                         is_stylus_drawing = false;
+                        is_stylus_selecting = false;
                         is_stylus_in_proximity = false;
                     }
 
@@ -1860,8 +2074,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                         match state {
                             ElementState::Pressed => {
-                                // Palm-Rejection: Keine Mausevents verarbeiten, wenn Stylus aktiv zeichnet
-                                if is_stylus_drawing {
+                                // Palm-Rejection: Keine Mausevents verarbeiten, wenn der Stift aktiv
+                                // zeichnet oder auswählt (manche Systeme melden ihn zusätzlich als Maus)
+                                if is_stylus_drawing || is_stylus_selecting {
                                     return;
                                 }
 
@@ -1904,80 +2119,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                                     // 2. Objektauswahl & Transformation im Select-Modus
                                     if ui_state.active_tool == ActiveTool::Select {
-                                        let screen_vec = Vec2::new(sx, sy);
-                                        let hit = selection_state.hit_test_handles(notebook.current_page(), &canvas, screen_vec, egui_ctx.pixels_per_point());
-                                        match hit {
-                                            SelectionHandleHit::RotateHandle { center_page } => {
-                                                if let Some(page_pt) = canvas.screen_to_page(sx, sy) {
-                                                    let start_angle = (page_pt.y - center_page.y).atan2(page_pt.x - center_page.x);
-                                                    let initial_strokes = notebook.current_page().get_strokes(&selection_state.selected_ids);
-                                                    selection_state.drag_mode = DragMode::Rotate {
-                                                        center_page,
-                                                        start_angle,
-                                                        initial_strokes,
-                                                    };
-                                                    window.request_redraw();
-                                                    return;
-                                                }
-                                            }
-                                            SelectionHandleHit::CornerHandle {
-                                                corner_idx: _,
-                                                fixed_corner_page,
-                                                start_pos_page,
-                                                initial_box_size,
-                                            } => {
-                                                let initial_strokes = notebook.current_page().get_strokes(&selection_state.selected_ids);
-                                                selection_state.drag_mode = DragMode::Scale {
-                                                    fixed_corner_page,
-                                                    start_pos_page,
-                                                    initial_box_size,
-                                                    initial_strokes,
-                                                };
-                                                window.request_redraw();
-                                                return;
-                                            }
-                                            SelectionHandleHit::Body => {
-                                                if let Some(page_pt) = canvas.screen_to_page(sx, sy) {
-                                                    let initial_strokes = notebook.current_page().get_strokes(&selection_state.selected_ids);
-                                                    selection_state.drag_mode = DragMode::Move {
-                                                        start_page: page_pt,
-                                                        initial_strokes,
-                                                    };
-                                                    window.request_redraw();
-                                                    return;
-                                                }
-                                            }
-                                            SelectionHandleHit::None => {
-                                                if let Some(page_pt) = canvas.screen_to_page(sx, sy) {
-                                                    let shift = modifiers.shift_key();
-                                                    if let Some(stroke) = notebook.current_page().find_stroke_at(page_pt, 25.0) {
-                                                        let stroke_id = stroke.id;
-                                                        if shift {
-                                                            selection_state.toggle_select(stroke_id);
-                                                        } else if !selection_state.selected_ids.contains(&stroke_id) {
-                                                            selection_state.select_single(stroke_id);
-                                                        }
-                                                        let initial_strokes = notebook.current_page().get_strokes(&selection_state.selected_ids);
-                                                        selection_state.drag_mode = DragMode::Move {
-                                                            start_page: page_pt,
-                                                            initial_strokes,
-                                                        };
-                                                        window.request_redraw();
-                                                        return;
-                                                    } else {
-                                                        if !shift {
-                                                            selection_state.clear();
-                                                        }
-                                                        selection_state.drag_mode = DragMode::BoxSelect {
-                                                            start_page: page_pt,
-                                                            current_page: page_pt,
-                                                        };
-                                                        window.request_redraw();
-                                                        return;
-                                                    }
-                                                }
-                                            }
+                                        if selection_press((sx, sy), modifiers.shift_key(), &canvas, notebook.current_page(), egui_ctx.pixels_per_point(), &mut selection_state) {
+                                            window.request_redraw();
                                         }
+                                        return;
                                     }
 
                                     // 3. Tap-to-Convert im Shape-Modus
@@ -2023,38 +2168,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 if is_erasing {
                                     is_erasing = false;
                                 }
-                                if ui_state.active_tool == ActiveTool::Select {
-                                    let shift = modifiers.shift_key();
-                                    match std::mem::take(&mut selection_state.drag_mode) {
-                                        DragMode::BoxSelect { start_page, current_page } => {
-                                            let box_min = Vec2::new(start_page.x.min(current_page.x), start_page.y.min(current_page.y));
-                                            let box_max = Vec2::new(start_page.x.max(current_page.x), start_page.y.max(current_page.y));
-                                            if (box_max.x - box_min.x).max(box_max.y - box_min.y) > 3.0 {
-                                                let found_ids = notebook.current_page().find_strokes_in_box(box_min, box_max);
-                                                if shift {
-                                                    for id in found_ids {
-                                                        if !selection_state.selected_ids.contains(&id) {
-                                                            selection_state.selected_ids.push(id);
-                                                        }
-                                                    }
-                                                } else {
-                                                    selection_state.select_multiple(found_ids);
-                                                }
-                                            }
-                                            window.request_redraw();
-                                        }
-                                        DragMode::Move { initial_strokes, .. }
-                                        | DragMode::Rotate { initial_strokes, .. }
-                                        | DragMode::Scale { initial_strokes, .. } => {
-                                            let final_strokes = notebook.current_page().get_strokes(&selection_state.selected_ids);
-                                            if !initial_strokes.is_empty() && !final_strokes.is_empty() && initial_strokes != final_strokes {
-                                                notebook.current_page_mut().commit_modified_strokes(initial_strokes, final_strokes);
-                                                autosave.mark_dirty(&notebook, &mut manifest);
-                                            }
-                                            window.request_redraw();
-                                        }
-                                        DragMode::None => {}
-                                    }
+                                if ui_state.active_tool == ActiveTool::Select
+                                    && !is_stylus_selecting
+                                    && selection_release(modifiers.shift_key(), &mut notebook, &mut manifest, &mut autosave, &mut selection_state)
+                                {
+                                    window.request_redraw();
                                 }
                                 if is_drawing && is_mouse_drawing {
                                     is_drawing = false;
@@ -2102,59 +2220,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
 
                         // Wenn der Stylus aktiv zeichnet, keine Mauscursor-Bewegungen verarbeiten
-                        if !is_stylus_drawing {
+                        if !is_stylus_drawing && !is_stylus_selecting {
                             if ui_state.active_tool == ActiveTool::Select && selection_state.drag_mode != DragMode::None {
                                 if let Some(page_pt) = canvas.screen_to_page(sx, sy) {
-                                    match &mut selection_state.drag_mode {
-                                        DragMode::BoxSelect { current_page, .. } => {
-                                            *current_page = page_pt;
-                                            window.request_redraw();
-                                        }
-                                        DragMode::Move { start_page, initial_strokes } => {
-                                            let delta = page_pt - *start_page;
-                                            let mut updated = initial_strokes.clone();
-                                            for s in &mut updated {
-                                                s.translate(delta);
-                                            }
-                                            notebook.current_page_mut().update_strokes_ephemeral(&updated);
-                                            canvas.sync_page(notebook.current_page_mut());
-                                            window.request_redraw();
-                                        }
-                                        DragMode::Rotate { center_page, start_angle, initial_strokes } => {
-                                            let current_angle = (page_pt.y - center_page.y).atan2(page_pt.x - center_page.x);
-                                            let delta_angle = current_angle - *start_angle;
-                                            let mut updated = initial_strokes.clone();
-                                            for s in &mut updated {
-                                                s.rotate(*center_page, delta_angle);
-                                            }
-                                            notebook.current_page_mut().update_strokes_ephemeral(&updated);
-                                            canvas.sync_page(notebook.current_page_mut());
-                                            window.request_redraw();
-                                        }
-                                        DragMode::Scale { fixed_corner_page, start_pos_page, initial_box_size: _, initial_strokes } => {
-                                            let orig_delta = *start_pos_page - *fixed_corner_page;
-                                            let new_delta = page_pt - *fixed_corner_page;
-                                            let scale_x = if orig_delta.x.abs() > 1.0 {
-                                                (new_delta.x / orig_delta.x).clamp(0.05, 20.0)
-                                            } else {
-                                                1.0
-                                            };
-                                            let scale_y = if orig_delta.y.abs() > 1.0 {
-                                                (new_delta.y / orig_delta.y).clamp(0.05, 20.0)
-                                            } else {
-                                                1.0
-                                            };
-                                            let factors = Vec2::new(scale_x, scale_y);
-                                            let mut updated = initial_strokes.clone();
-                                            for s in &mut updated {
-                                                s.scale(*fixed_corner_page, factors);
-                                            }
-                                            notebook.current_page_mut().update_strokes_ephemeral(&updated);
-                                            canvas.sync_page(notebook.current_page_mut());
-                                            window.request_redraw();
-                                        }
-                                        DragMode::None => {}
-                                    }
+                                    selection_drag(page_pt, notebook.current_page_mut(), &mut canvas, &mut selection_state);
+                                    window.request_redraw();
                                 }
                             } else if is_erasing {
                                 focus_page_at!((sx, sy));
@@ -2328,69 +2398,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 window.request_redraw();
                                             }
                                         } else if ui_state.active_tool == ActiveTool::Select {
-                                            let screen_vec = Vec2::new(tx, ty);
-                                            let hit = selection_state.hit_test_handles(notebook.current_page(), &canvas, screen_vec, egui_ctx.pixels_per_point());
-                                            match hit {
-                                                SelectionHandleHit::RotateHandle { center_page } => {
-                                                    if let Some(page_pt) = canvas.screen_to_page(tx, ty) {
-                                                        let start_angle = (page_pt.y - center_page.y).atan2(page_pt.x - center_page.x);
-                                                        let initial_strokes = notebook.current_page().get_strokes(&selection_state.selected_ids);
-                                                        selection_state.drag_mode = DragMode::Rotate {
-                                                            center_page,
-                                                            start_angle,
-                                                            initial_strokes,
-                                                        };
-                                                        window.request_redraw();
-                                                    }
-                                                }
-                                                SelectionHandleHit::CornerHandle {
-                                                    corner_idx: _,
-                                                    fixed_corner_page,
-                                                    start_pos_page,
-                                                    initial_box_size,
-                                                } => {
-                                                    let initial_strokes = notebook.current_page().get_strokes(&selection_state.selected_ids);
-                                                    selection_state.drag_mode = DragMode::Scale {
-                                                        fixed_corner_page,
-                                                        start_pos_page,
-                                                        initial_box_size,
-                                                        initial_strokes,
-                                                    };
-                                                    window.request_redraw();
-                                                }
-                                                SelectionHandleHit::Body => {
-                                                    if let Some(page_pt) = canvas.screen_to_page(tx, ty) {
-                                                        let initial_strokes = notebook.current_page().get_strokes(&selection_state.selected_ids);
-                                                        selection_state.drag_mode = DragMode::Move {
-                                                            start_page: page_pt,
-                                                            initial_strokes,
-                                                        };
-                                                        window.request_redraw();
-                                                    }
-                                                }
-                                                SelectionHandleHit::None => {
-                                                    if let Some(page_pt) = canvas.screen_to_page(tx, ty) {
-                                                        if let Some(stroke) = notebook.current_page().find_stroke_at(page_pt, 25.0) {
-                                                            let stroke_id = stroke.id;
-                                                            if !selection_state.selected_ids.contains(&stroke_id) {
-                                                                selection_state.select_single(stroke_id);
-                                                            }
-                                                            let initial_strokes = notebook.current_page().get_strokes(&selection_state.selected_ids);
-                                                            selection_state.drag_mode = DragMode::Move {
-                                                                start_page: page_pt,
-                                                                initial_strokes,
-                                                            };
-                                                            window.request_redraw();
-                                                        } else {
-                                                            selection_state.clear();
-                                                            selection_state.drag_mode = DragMode::BoxSelect {
-                                                                start_page: page_pt,
-                                                                current_page: page_pt,
-                                                            };
-                                                            window.request_redraw();
-                                                        }
-                                                    }
-                                                }
+                                            if selection_press((tx, ty), false, &canvas, notebook.current_page(), egui_ctx.pixels_per_point(), &mut selection_state) {
+                                                window.request_redraw();
                                             }
                                         } else if ui_state.active_tool.is_drawing() || ui_state.active_tool == ActiveTool::Shape {
                                             if let Some(page_pt) = canvas.screen_to_page(tx, ty) {
@@ -2469,56 +2478,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         }
                                     } else if ui_state.active_tool == ActiveTool::Select && selection_state.drag_mode != DragMode::None {
                                         if let Some(page_pt) = canvas.screen_to_page(tx, ty) {
-                                            match &mut selection_state.drag_mode {
-                                                DragMode::BoxSelect { current_page, .. } => {
-                                                    *current_page = page_pt;
-                                                    window.request_redraw();
-                                                }
-                                                DragMode::Move { start_page, initial_strokes } => {
-                                                    let delta = page_pt - *start_page;
-                                                    let mut updated = initial_strokes.clone();
-                                                    for s in &mut updated {
-                                                        s.translate(delta);
-                                                    }
-                                                    notebook.current_page_mut().update_strokes_ephemeral(&updated);
-                                                    canvas.sync_page(notebook.current_page_mut());
-                                                    window.request_redraw();
-                                                }
-                                                DragMode::Rotate { center_page, start_angle, initial_strokes } => {
-                                                    let current_angle = (page_pt.y - center_page.y).atan2(page_pt.x - center_page.x);
-                                                    let delta_angle = current_angle - *start_angle;
-                                                    let mut updated = initial_strokes.clone();
-                                                    for s in &mut updated {
-                                                        s.rotate(*center_page, delta_angle);
-                                                    }
-                                                    notebook.current_page_mut().update_strokes_ephemeral(&updated);
-                                                    canvas.sync_page(notebook.current_page_mut());
-                                                    window.request_redraw();
-                                                }
-                                                DragMode::Scale { fixed_corner_page, start_pos_page, initial_box_size: _, initial_strokes } => {
-                                                    let orig_delta = *start_pos_page - *fixed_corner_page;
-                                                    let new_delta = page_pt - *fixed_corner_page;
-                                                    let scale_x = if orig_delta.x.abs() > 1.0 {
-                                                        (new_delta.x / orig_delta.x).clamp(0.05, 20.0)
-                                                    } else {
-                                                        1.0
-                                                    };
-                                                    let scale_y = if orig_delta.y.abs() > 1.0 {
-                                                        (new_delta.y / orig_delta.y).clamp(0.05, 20.0)
-                                                    } else {
-                                                        1.0
-                                                    };
-                                                    let factors = Vec2::new(scale_x, scale_y);
-                                                    let mut updated = initial_strokes.clone();
-                                                    for s in &mut updated {
-                                                        s.scale(*fixed_corner_page, factors);
-                                                    }
-                                                    notebook.current_page_mut().update_strokes_ephemeral(&updated);
-                                                    canvas.sync_page(notebook.current_page_mut());
-                                                    window.request_redraw();
-                                                }
-                                                DragMode::None => {}
-                                            }
+                                            selection_drag(page_pt, notebook.current_page_mut(), &mut canvas, &mut selection_state);
+                                            window.request_redraw();
                                         }
                                     }
                                 }
@@ -2536,29 +2497,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         is_erasing = false;
                                     }
 
-                                    if ui_state.active_tool == ActiveTool::Select {
-                                        match std::mem::take(&mut selection_state.drag_mode) {
-                                            DragMode::BoxSelect { start_page, current_page } => {
-                                                let box_min = Vec2::new(start_page.x.min(current_page.x), start_page.y.min(current_page.y));
-                                                let box_max = Vec2::new(start_page.x.max(current_page.x), start_page.y.max(current_page.y));
-                                                if (box_max.x - box_min.x).max(box_max.y - box_min.y) > 3.0 {
-                                                    let found_ids = notebook.current_page().find_strokes_in_box(box_min, box_max);
-                                                    selection_state.select_multiple(found_ids);
-                                                }
-                                                window.request_redraw();
-                                            }
-                                            DragMode::Move { initial_strokes, .. }
-                                            | DragMode::Rotate { initial_strokes, .. }
-                                            | DragMode::Scale { initial_strokes, .. } => {
-                                                let final_strokes = notebook.current_page().get_strokes(&selection_state.selected_ids);
-                                                if !initial_strokes.is_empty() && !final_strokes.is_empty() && initial_strokes != final_strokes {
-                                                    notebook.current_page_mut().commit_modified_strokes(initial_strokes, final_strokes);
-                                                    autosave.mark_dirty(&notebook, &mut manifest);
-                                                }
-                                                window.request_redraw();
-                                            }
-                                            DragMode::None => {}
-                                        }
+                                    if ui_state.active_tool == ActiveTool::Select
+                                        && selection_release(false, &mut notebook, &mut manifest, &mut autosave, &mut selection_state)
+                                    {
+                                        window.request_redraw();
                                     }
 
                                     if is_touch_drawing {
