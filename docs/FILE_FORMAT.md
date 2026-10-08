@@ -125,7 +125,7 @@ Jedes Objekt hat eine `id`, eine `color` (RGBA, linear, Werte 0–1) und `sample
 "shape": { "Rectangle": { "corners": [[500, 600], [800, 600], [800, 800], [500, 800]] } }
 ```
 
-Mögliche Formen: `Line { start, end }`, `Arrow { start, end, double }`, `Circle { center, radius }`, `Ellipse { center, radius_x, radius_y, rotation }`, `Rectangle { corners }`, `Triangle { corners }`, `Rhombus { corners }`, `Polygon { vertices }`, `CoordinateSystem { origin, x_axis_end, y_axis_end, with_arrows }`, `Octahedron { … }`. Punkte sind `[x, y]`.
+Mögliche Formen: `Line { start, end }`, `Arrow { start, end, double }`, `Circle { center, radius }`, `Ellipse { center, radius_x, radius_y, rotation }`, `Rectangle { corners }`, `Triangle { corners }`, `Rhombus { corners }`, `Polygon { vertices }`, `CoordinateSystem { origin, x_axis_end, y_axis_end, with_arrows, negative_ends? }`, `Octahedron { … }`. Punkte sind `[x, y]`. Beim Achsenkreuz enthält `negative_ends` die Enden der x- und der y-Achse auf der anderen Seite des Ursprungs; ältere Versionen ignorieren das Feld und zeigen ein L-förmiges Koordinatensystem.
 
 **Bilder** haben `image` (Dateiname in `assets/`); die vier `samples` sind die Ecken oben links, oben rechts, unten rechts, unten links:
 

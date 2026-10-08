@@ -59,6 +59,11 @@ pub enum RecognizedShape {
         x_axis_end: Vec2,
         y_axis_end: Vec2,
         with_arrows: bool,
+        /// Achsenkreuz: Enden der x- und der y-Achse auf der anderen Seite des Ursprungs
+        /// (Pfeilspitzen an allen vier Enden). Fehlt es, ist es das L-förmige
+        /// Koordinatensystem; ältere Versionen ignorieren das Feld und zeigen das L.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        negative_ends: Option<[Vec2; 2]>,
     },
     Triangle {
         /// 3 Eckpunkte in umlaufender Reihenfolge.
@@ -105,6 +110,10 @@ impl RecognizedShape {
             Self::Arrow { double: false, .. } => "Pfeil",
             Self::Arrow { double: true, .. } => "Doppelpfeil",
             Self::Rectangle { .. } => "Rechteck",
+            Self::CoordinateSystem {
+                negative_ends: Some(_),
+                ..
+            } => "Achsenkreuz",
             Self::CoordinateSystem { .. } => "Koordinatensystem",
             Self::Triangle { .. } => "Dreieck",
             Self::Rhombus { .. } => "Raute (Rhombus)",
@@ -146,11 +155,15 @@ impl RecognizedShape {
                 origin,
                 x_axis_end,
                 y_axis_end,
+                negative_ends,
                 ..
             } => {
                 *origin += delta;
                 *x_axis_end += delta;
                 *y_axis_end += delta;
+                for end in negative_ends.iter_mut().flatten() {
+                    *end += delta;
+                }
             }
             Self::Polygon { vertices } => {
                 for v in vertices {
@@ -203,11 +216,15 @@ impl RecognizedShape {
                 origin: o,
                 x_axis_end,
                 y_axis_end,
+                negative_ends,
                 ..
             } => {
                 *o = rot(*o);
                 *x_axis_end = rot(*x_axis_end);
                 *y_axis_end = rot(*y_axis_end);
+                for end in negative_ends.iter_mut().flatten() {
+                    *end = rot(*end);
+                }
             }
             Self::Polygon { vertices } => {
                 for v in vertices {
@@ -267,11 +284,15 @@ impl RecognizedShape {
                 origin: o,
                 x_axis_end,
                 y_axis_end,
+                negative_ends,
                 ..
             } => {
                 *o = sc(*o);
                 *x_axis_end = sc(*x_axis_end);
                 *y_axis_end = sc(*y_axis_end);
+                for end in negative_ends.iter_mut().flatten() {
+                    *end = sc(*end);
+                }
             }
             Self::Polygon { vertices } => {
                 for v in vertices {
@@ -1394,6 +1415,87 @@ pub fn detect_coordinate_system(points: &[Vec2]) -> Option<RecognizedShape> {
         x_axis_end: x_end,
         y_axis_end: y_end,
         with_arrows: true,
+        negative_ends: None,
+    })
+}
+
+/// Achsenkreuz in einem Strich („+“, z. B. waagerecht hin und zurück, dann senkrecht): Alle
+/// Teilstücke liegen auf einer waagerechten und einer senkrechten Linie, und beide reichen
+/// auf beiden Seiten deutlich über den Schnittpunkt hinaus. Ergebnis wie beim
+/// Koordinatensystem achsenparallel, mit Pfeilspitzen an allen vier Enden.
+pub fn detect_axis_cross(points: &[Vec2]) -> Option<RecognizedShape> {
+    if points.len() < 8 {
+        return None;
+    }
+    let aabb = Aabb::from_points(points);
+    let diagonal = (aabb.max - aabb.min).length();
+    if diagonal < 60.0 {
+        return None;
+    }
+    let simplified = ramer_douglas_peucker(points, (diagonal * 0.05).clamp(8.0, 40.0));
+
+    // Teilstücke nach Richtung: waagerecht oder senkrecht (höchstens 25° schief); kurze
+    // Stücke (Umkehrpunkte) zählen nicht, schräge lange Stücke schließen ein Kreuz aus
+    let max_slope = 25.0_f32.to_radians().tan();
+    let (mut horizontal, mut vertical) = ((0.0, 0.0), (0.0, 0.0));
+    for w in simplified.windows(2) {
+        let d = w[1] - w[0];
+        let len = d.length();
+        if len < diagonal * 0.08 {
+            continue;
+        }
+        let mid = (w[0] + w[1]) * 0.5;
+        if d.y.abs() <= d.x.abs() * max_slope {
+            horizontal = (horizontal.0 + mid.y * len, horizontal.1 + len);
+        } else if d.x.abs() <= d.y.abs() * max_slope {
+            vertical = (vertical.0 + mid.x * len, vertical.1 + len);
+        } else {
+            return None;
+        }
+    }
+    if horizontal.1 == 0.0 || vertical.1 == 0.0 {
+        return None;
+    }
+    let origin = Vec2::new(vertical.0 / vertical.1, horizontal.0 / horizontal.1);
+
+    // Jeder Punkt liegt auf einer der beiden Linien
+    let tolerance = (diagonal * 0.08).max(10.0);
+    let (mut x_min, mut x_max) = (f32::INFINITY, f32::NEG_INFINITY);
+    let (mut y_min, mut y_max) = (f32::INFINITY, f32::NEG_INFINITY);
+    for p in points {
+        let on_horizontal = (p.y - origin.y).abs() <= tolerance;
+        let on_vertical = (p.x - origin.x).abs() <= tolerance;
+        if !on_horizontal && !on_vertical {
+            return None;
+        }
+        if on_horizontal {
+            x_min = x_min.min(p.x);
+            x_max = x_max.max(p.x);
+        }
+        if on_vertical {
+            y_min = y_min.min(p.y);
+            y_max = y_max.max(p.y);
+        }
+    }
+
+    // Vier Arme: jeder mindestens ein Fünftel seiner Achse und deutlich länger als die Toleranz
+    let arm_ok = |arm: f32, axis: f32| arm >= axis * 0.2 && arm >= tolerance * 1.5;
+    let (width, height) = (x_max - x_min, y_max - y_min);
+    if !(arm_ok(origin.x - x_min, width)
+        && arm_ok(x_max - origin.x, width)
+        && arm_ok(origin.y - y_min, height)
+        && arm_ok(y_max - origin.y, height))
+    {
+        return None;
+    }
+
+    // x nach rechts, y nach oben (auf dem Blatt: kleineres y)
+    Some(RecognizedShape::CoordinateSystem {
+        origin,
+        x_axis_end: Vec2::new(x_max, origin.y),
+        y_axis_end: Vec2::new(origin.x, y_min),
+        with_arrows: true,
+        negative_ends: Some([Vec2::new(x_min, origin.y), Vec2::new(origin.x, y_max)]),
     })
 }
 
@@ -1423,7 +1525,10 @@ pub fn detect_shape(points: &[StylusSample]) -> Option<RecognizedShape> {
     // Kandidaten in Prioritätsreihenfolge; 3. offene Formen (Koordinatensystem, Gerade) zuletzt.
     // Übernommen wird der erste, der den Strich wirklich beschreibt. Passt keiner, bleibt der
     // Strich unverändert (vorher wurde fast jede geschlossene Kritzelei zu einer Form).
-    let candidates: [&dyn Fn() -> Option<RecognizedShape>; 6] = [
+    let candidates: [&dyn Fn() -> Option<RecognizedShape>; 7] = [
+        // Das Achsenkreuz zuerst: Seine Prüfung ist streng, und ein hin und her gezeichnetes
+        // „+“ könnte sonst als Vieleck durchgehen
+        &|| detect_axis_cross(&pts),
         &|| {
             if closed_fits_well {
                 None
@@ -1908,6 +2013,51 @@ pub fn shape_to_mesh(
             x_axis_end,
             y_axis_end,
             with_arrows,
+            negative_ends: Some([x_axis_start, y_axis_start]),
+        } => {
+            // Achsenkreuz: zwei durchgehende Achsen, Pfeilspitzen an allen vier Enden
+            let mut vertices = Vec::new();
+            for (neg, pos) in [(*x_axis_start, *x_axis_end), (*y_axis_start, *y_axis_end)] {
+                let dir = (pos - neg).normalize_or_zero();
+                let pos_head = arrow_head(pos, dir, half_w, (pos - *origin).length());
+                let neg_head = arrow_head(neg, -dir, half_w, (neg - *origin).length());
+                let (from, to) = if *with_arrows {
+                    (neg_head.0, pos_head.0)
+                } else {
+                    (neg, pos)
+                };
+                push_band(&mut vertices, from, to, half_w, color);
+                if *with_arrows {
+                    for (tip, (_, left, right)) in [(pos, pos_head), (neg, neg_head)] {
+                        push_triangle(&mut vertices, tip, left, right, color);
+                    }
+                }
+            }
+            // Abtastpunkte als Linienzug ohne Diagonalen (jeder Arm vom Ursprung aus)
+            let samples = [
+                *x_axis_start,
+                *origin,
+                *x_axis_end,
+                *origin,
+                *y_axis_end,
+                *origin,
+                *y_axis_start,
+            ]
+            .map(|position| StylusSample {
+                position,
+                pressure: 0.5,
+                timestamp: 0.0,
+            })
+            .to_vec();
+            (samples, vertices)
+        }
+
+        RecognizedShape::CoordinateSystem {
+            origin,
+            x_axis_end,
+            y_axis_end,
+            with_arrows,
+            negative_ends: None,
         } => {
             let mut vertices = Vec::new();
             let mut samples = Vec::new();
@@ -2010,6 +2160,40 @@ pub fn shape_to_mesh(
             (samples, vertices)
         }
     }
+}
+
+/// Hängt ein gerades Band der halben Breite `half_w` von `a` nach `b` an einen Triangle-Strip
+/// an (über degenerierte Dreiecke, falls er schon Vertizes hat).
+fn push_band(vertices: &mut Vec<InkVertex>, a: Vec2, b: Vec2, half_w: f32, color: [f32; 4]) {
+    let dir = (b - a).normalize_or_zero();
+    let norm = Vec2::new(-dir.y, dir.x) * half_w;
+    let first = InkVertex::new(a.x + norm.x, a.y + norm.y, color);
+    if let Some(&last) = vertices.last() {
+        vertices.push(last);
+        vertices.push(first);
+    }
+    vertices.push(first);
+    vertices.push(InkVertex::new(a.x - norm.x, a.y - norm.y, color));
+    vertices.push(InkVertex::new(b.x + norm.x, b.y + norm.y, color));
+    vertices.push(InkVertex::new(b.x - norm.x, b.y - norm.y, color));
+}
+
+/// Hängt ein Dreieck (Pfeilspitze) an einen Triangle-Strip an.
+fn push_triangle(
+    vertices: &mut Vec<InkVertex>,
+    tip: Vec2,
+    left: Vec2,
+    right: Vec2,
+    color: [f32; 4],
+) {
+    let tip_v = InkVertex::new(tip.x, tip.y, color);
+    if let Some(&last) = vertices.last() {
+        vertices.push(last);
+        vertices.push(tip_v);
+    }
+    vertices.push(tip_v);
+    vertices.push(InkVertex::new(left.x, left.y, color));
+    vertices.push(InkVertex::new(right.x, right.y, color));
 }
 
 /// Erzeugt einen neuen `Stroke` aus einer erkannten Form.
@@ -2210,6 +2394,7 @@ mod tests {
             x_axis_end: Vec2::new(900.0, 900.0),
             y_axis_end: Vec2::new(300.0, 300.0),
             with_arrows: true,
+            negative_ends: None,
         };
         let width = 30.0;
         let (_, vertices) = shape_to_mesh(&shape, width, [0.0, 0.0, 0.0, 1.0]);
@@ -2479,10 +2664,165 @@ mod tests {
             Some(RecognizedShape::Triangle { .. }) => "Dreieck",
             Some(RecognizedShape::Rhombus { .. }) => "Raute",
             Some(RecognizedShape::Polygon { .. }) => "Polygon",
+            Some(RecognizedShape::CoordinateSystem {
+                negative_ends: Some(_),
+                ..
+            }) => "Achsenkreuz",
             Some(RecognizedShape::CoordinateSystem { .. }) => "Koordinatensystem",
             Some(RecognizedShape::Octahedron { .. }) => "Oktaeder",
             None => "nichts",
         }
+    }
+
+    #[test]
+    fn test_detect_axis_cross_in_one_stroke() {
+        let c = Vec2::new(800.0, 900.0);
+        let v = |x: f32, y: f32| c + Vec2::new(x, y);
+        // Verschiedene Zeichenreihenfolgen eines „+“ in einem Zug
+        let crosses: [(&str, Vec<Vec2>); 4] = [
+            (
+                "waagerecht hin, zurück zur Mitte, senkrecht",
+                vec![
+                    v(-200.0, 0.0),
+                    v(200.0, 0.0),
+                    v(0.0, 0.0),
+                    v(0.0, -150.0),
+                    v(0.0, 150.0),
+                ],
+            ),
+            (
+                "senkrecht zuerst",
+                vec![
+                    v(0.0, -180.0),
+                    v(0.0, 180.0),
+                    v(0.0, 0.0),
+                    v(-220.0, 0.0),
+                    v(220.0, 0.0),
+                ],
+            ),
+            (
+                "Arme ungleich lang",
+                vec![
+                    v(-100.0, 0.0),
+                    v(320.0, 0.0),
+                    v(0.0, 0.0),
+                    v(0.0, 250.0),
+                    v(0.0, -120.0),
+                ],
+            ),
+            (
+                "Mitte zuerst, alle Arme hin und zurück",
+                vec![
+                    v(0.0, 0.0),
+                    v(200.0, 0.0),
+                    v(0.0, 0.0),
+                    v(0.0, -200.0),
+                    v(0.0, 0.0),
+                    v(-200.0, 0.0),
+                    v(0.0, 0.0),
+                    v(0.0, 200.0),
+                ],
+            ),
+        ];
+        for (seed, (name, outline)) in crosses.iter().enumerate() {
+            let samples = freehand(outline, false, seed as f32);
+            let shape = detect_shape(&samples);
+            assert_eq!(kind(&shape), "Achsenkreuz", "{name}");
+            let Some(RecognizedShape::CoordinateSystem {
+                origin,
+                x_axis_end,
+                y_axis_end,
+                negative_ends: Some([x_start, y_start]),
+                with_arrows: true,
+            }) = shape
+            else {
+                unreachable!()
+            };
+            assert!((origin - c).length() < 8.0, "{name}: Ursprung {origin}");
+            // Achsenparallel, x nach rechts, y nach oben
+            assert_eq!(x_axis_end.y, origin.y);
+            assert_eq!(x_start.y, origin.y);
+            assert_eq!(y_axis_end.x, origin.x);
+            assert!(x_axis_end.x > origin.x && x_start.x < origin.x, "{name}");
+            assert!(y_axis_end.y < origin.y && y_start.y > origin.y, "{name}");
+        }
+
+        // Keine Kreuze: L-Form, T-Form, einzelne Linie, Rechteck
+        let not_crosses: [(&str, Vec<Vec2>, bool); 4] = [
+            ("L", vec![v(0.0, -200.0), v(0.0, 0.0), v(250.0, 0.0)], false),
+            (
+                "T",
+                vec![v(-200.0, 0.0), v(200.0, 0.0), v(0.0, 0.0), v(0.0, 200.0)],
+                false,
+            ),
+            ("Linie", vec![v(-200.0, 0.0), v(200.0, 0.0)], false),
+            (
+                "Rechteck",
+                vec![
+                    v(-200.0, -100.0),
+                    v(200.0, -100.0),
+                    v(200.0, 100.0),
+                    v(-200.0, 100.0),
+                ],
+                true,
+            ),
+        ];
+        for (seed, (name, outline, closed)) in not_crosses.iter().enumerate() {
+            let samples = freehand(outline, *closed, seed as f32 + 10.0);
+            let points: Vec<Vec2> = samples.iter().map(|s| s.position).collect();
+            assert!(
+                detect_axis_cross(&points).is_none(),
+                "{name} ist kein Kreuz"
+            );
+            assert_ne!(kind(&detect_shape(&samples)), "Achsenkreuz", "{name}");
+        }
+    }
+
+    #[test]
+    fn test_axis_cross_mesh_and_transforms() {
+        let mut shape = RecognizedShape::CoordinateSystem {
+            origin: Vec2::new(500.0, 500.0),
+            x_axis_end: Vec2::new(800.0, 500.0),
+            y_axis_end: Vec2::new(500.0, 300.0),
+            with_arrows: true,
+            negative_ends: Some([Vec2::new(300.0, 500.0), Vec2::new(500.0, 700.0)]),
+        };
+        assert_eq!(shape.name(), "Achsenkreuz");
+        let (samples, vertices) = shape_to_mesh(&shape, 10.0, [0.0, 0.0, 0.0, 1.0]);
+        // Alle vier Pfeilspitzen sind Eckpunkte des Netzes
+        for tip in [
+            (800.0, 500.0),
+            (500.0, 300.0),
+            (300.0, 500.0),
+            (500.0, 700.0),
+        ] {
+            assert!(
+                vertices
+                    .iter()
+                    .any(|v| (Vec2::from(v.position) - Vec2::from(tip)).length() < 1e-3),
+                "Spitze {tip:?} fehlt"
+            );
+        }
+        // Die Form passt zu sich selbst gezeichnet (Abtastpunkte ohne Diagonalen)
+        let points: Vec<Vec2> = samples.iter().map(|s| s.position).collect();
+        assert!(shape_fit_error(&points, &shape).unwrap() < 1e-3);
+        // Verschieben bewegt auch die negativen Enden
+        shape.translate(Vec2::new(10.0, 20.0));
+        let RecognizedShape::CoordinateSystem {
+            negative_ends: Some([x_start, y_start]),
+            ..
+        } = shape
+        else {
+            unreachable!()
+        };
+        assert_eq!(x_start, Vec2::new(310.0, 520.0));
+        assert_eq!(y_start, Vec2::new(510.0, 720.0));
+        // Ältere Dateien ohne das Feld bleiben L-Koordinatensysteme; neue Dateien enthalten es
+        let json = serde_json::to_string(&shape).unwrap();
+        assert!(json.contains("negative_ends"));
+        let old = r#"{"CoordinateSystem":{"origin":[0.0,0.0],"x_axis_end":[1.0,0.0],"y_axis_end":[0.0,-1.0],"with_arrows":true}}"#;
+        let parsed: RecognizedShape = serde_json::from_str(old).unwrap();
+        assert_eq!(parsed.name(), "Koordinatensystem");
     }
 
     #[test]
@@ -2884,6 +3224,7 @@ mod tests {
             x_axis_end: x_end,
             y_axis_end: y_end,
             with_arrows: true,
+            negative_ends: None,
         };
         let (_, vertices) = shape_to_mesh(&shape, 5.0, [0.0, 0.0, 0.0, 1.0]);
         let (y_base, ..) = arrow_head(y_end, Vec2::new(0.0, -1.0), 2.5, 200.0);

@@ -3,6 +3,9 @@
 use crate::document::Stroke;
 
 /// Eine rückgängig machbare Benutzeraktion auf einer Seite.
+// Der Verlauf hält nur wenige hundert Einträge; die Größe des Ersetzen-Eintrags (zwei Striche)
+// fällt nicht ins Gewicht, eine Box würde nur die Aufrufe umständlicher machen
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 pub enum HistoryAction {
     /// Ein Strich wurde neu gezeichnet.

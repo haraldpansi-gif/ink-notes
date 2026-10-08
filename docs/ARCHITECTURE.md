@@ -136,12 +136,13 @@ Jede Seite hat einen eigenen Verlauf (`history.rs`): Hinzufügen, Entfernen, Ers
 
 ## 6. Formerkennung
 
-`geometry.rs` erkennt Formen rein geometrisch, ohne Machine Learning. Geschlossene Formen (Kreis, Ellipse, Dreieck, Rechteck, Raute) treten gegeneinander an; gewählt wird die, deren Umriss am besten zu den Punkten passt. Danach folgen Vielecke, Pfeile, Koordinatensysteme und Linien. Übernommen wird eine Form nur, wenn der Strich im Mittel höchstens 4 % seiner Diagonale von ihr abweicht – sonst bleibt er Handschrift.
+`geometry.rs` erkennt Formen rein geometrisch, ohne Machine Learning. Zuerst wird auf ein Achsenkreuz geprüft (alle Teilstücke liegen auf einer waagerechten und einer senkrechten Linie, beide reichen auf beiden Seiten über den Schnittpunkt hinaus). Geschlossene Formen (Kreis, Ellipse, Dreieck, Rechteck, Raute) treten gegeneinander an; gewählt wird die, deren Umriss am besten zu den Punkten passt. Danach folgen Vielecke, Pfeile, Koordinatensysteme und Linien. Übernommen wird eine Form nur, wenn der Strich im Mittel höchstens 4 % seiner Diagonale von ihr abweicht – sonst bleibt er Handschrift.
 
 - **Linie:** Verhältnis von Abstand Anfang–Ende zur Strichlänge über 0,92.
 - **Kreis, Ellipse:** Kreis- bzw. Ellipsen-Fit über die Punkte.
 - **Rechteck, Dreieck, Raute, Vieleck, Pfeil:** Analyse der mit Douglas-Peucker vereinfachten Kontur (Eckenzahl, Winkel, Seitenverhältnisse).
 - **Koordinatensystem:** zwei etwa rechtwinklige Achsen; der Winkel wird auf 90° gesetzt.
+- **Achsenkreuz:** ein „+“ in einem Zug; die Achsen werden waagerecht und senkrecht ausgerichtet und bekommen an allen vier Enden Pfeilspitzen.
 - **Oktaeder:** Skizze einer Doppelpyramide als 3D-Kantenmodell; nur, wenn kein einfacher Umriss passt.
 
 **Halten am Strichende:** Bleibt der Stift über 400 ms innerhalb von 3 Pixeln ruhig, wird die erkannte Form schon vor dem Absetzen angezeigt und beim Absetzen übernommen. Mit dem Formen-Werkzeug wird jeder Strich beim Absetzen geprüft.

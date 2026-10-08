@@ -28,7 +28,7 @@ Getestet wird vor allem unter Zorin OS 18 / Ubuntu 24.04 (Wayland und X11).
 
 ### Formerkennung
 - **Formen-Werkzeug** (`S`/`F`) oder **Halten** am Strichende (über 400 ms stillhalten): Die Skizze wird durch eine saubere Form ersetzt.
-- Erkannt werden Linien, Pfeile, Kreise, Ellipsen, Rechtecke, Dreiecke, Rauten, Vielecke, Koordinatensysteme und Oktaeder (Skizze als 3D-Körper).
+- Erkannt werden Linien, Pfeile, Kreise, Ellipsen, Rechtecke, Dreiecke, Rauten, Vielecke, Koordinatensysteme (L-Form), Achsenkreuze (ein „+“ in einem Zug, Pfeilspitzen an allen vier Enden) und Oktaeder (Skizze als 3D-Körper).
 - Die Erkennung arbeitet rein geometrisch (Bogenlänge, Douglas-Peucker, Kreis-Fit), ohne Machine Learning. Nicht alles wird erkannt – was nicht passt, bleibt Handschrift.
 
 ### Auswählen und Bearbeiten

@@ -1033,6 +1033,59 @@ fn render_recognized_shape(
             x_axis_end,
             y_axis_end,
             with_arrows,
+            negative_ends: Some([x_axis_start, y_axis_start]),
+        } => {
+            // Achsenkreuz: zwei durchgehende Achsen, Pfeilspitzen an allen vier Enden
+            const PDF_SHAPE_HALF_WIDTH: f32 = 2.65;
+            let to_pdf = |p: &glam::Vec2| {
+                let (px, py) = page_to_pdf_mm(p.x, p.y);
+                (Point::new(Mm(px), Mm(py)), false)
+            };
+            let mut heads = Vec::new();
+            for (neg, pos) in [(*x_axis_start, *x_axis_end), (*y_axis_start, *y_axis_end)] {
+                let dir = (pos - neg).normalize_or_zero();
+                let pos_head = crate::geometry::arrow_head(
+                    pos,
+                    dir,
+                    PDF_SHAPE_HALF_WIDTH,
+                    (pos - *origin).length(),
+                );
+                let neg_head = crate::geometry::arrow_head(
+                    neg,
+                    -dir,
+                    PDF_SHAPE_HALF_WIDTH,
+                    (neg - *origin).length(),
+                );
+                let (from, to) = if *with_arrows {
+                    (neg_head.0, pos_head.0)
+                } else {
+                    (neg, pos)
+                };
+                layer.add_line(Line {
+                    points: [from, to].iter().map(to_pdf).collect(),
+                    is_closed: false,
+                });
+                heads.push((pos, pos_head));
+                heads.push((neg, neg_head));
+            }
+            if *with_arrows {
+                layer.set_fill_color(stroke_color);
+                for (tip, (_, left, right)) in heads {
+                    layer.add_polygon(Polygon {
+                        rings: vec![[tip, left, right].iter().map(to_pdf).collect()],
+                        mode: PaintMode::Fill,
+                        winding_order: WindingOrder::NonZero,
+                    });
+                }
+            }
+        }
+
+        RecognizedShape::CoordinateSystem {
+            origin,
+            x_axis_end,
+            y_axis_end,
+            with_arrows,
+            negative_ends: None,
         } => {
             // Gleiche Pfeilspitzen wie auf dem Bildschirm; Achsen enden an der Basis der Spitze
             // (Linienstärke 1,5 pt ≈ 5,3 Seiteneinheiten, halbe Breite ≈ 2,65)
@@ -1450,6 +1503,7 @@ mod tests {
                 x_axis_end: glam::Vec2::new(800.0, 1500.0),
                 y_axis_end: glam::Vec2::new(300.0, 1000.0),
                 with_arrows: true,
+                negative_ends: None,
             },
         );
         page.add_stroke(coords_stroke);
