@@ -3089,14 +3089,18 @@ pub fn render_ui(
                                     )
                                 };
 
-                                let frame_resp = egui::Frame::none()
+                                // Nur der Titelbereich öffnet das Notizbuch: Eine Klickfläche über der
+                                // ganzen Zeile würde (als zuletzt angelegtes Element) die Klicks auf
+                                // Umbenennen und Löschen abfangen
+                                let mut open_clicked = false;
+                                egui::Frame::none()
                                     .fill(bg)
                                     .stroke(border)
                                     .rounding(egui::Rounding::same(8.0))
                                     .inner_margin(egui::Margin::symmetric(10.0, 8.0))
                                     .show(ui, |ui| {
                                         ui.horizontal(|ui| {
-                                            ui.vertical(|ui| {
+                                            let title_area = ui.vertical(|ui| {
                                                 ui.horizontal(|ui| {
                                                     ui.label(
                                                         egui::RichText::new(&summary.title)
@@ -3121,6 +3125,11 @@ pub fn render_ui(
                                                         .color(egui::Color32::from_gray(160)),
                                                 );
                                             });
+                                            open_clicked = title_area
+                                                .response
+                                                .interact(egui::Sense::click())
+                                                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                                                .clicked();
 
                                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                                 if summary.status == crate::storage::NotebookStatus::Damaged {
@@ -3161,7 +3170,7 @@ pub fn render_ui(
                                     });
 
                                 if summary.status != crate::storage::NotebookStatus::Damaged
-                                    && frame_resp.response.interact(egui::Sense::click()).clicked()
+                                    && open_clicked
                                     && !is_current
                                 {
                                     actions.push(UiAction::OpenNotebook(summary.id.clone()));
@@ -3967,6 +3976,81 @@ mod tests {
                 assert!(state.is_point_in_ui(pop.center().x, pop.center().y));
             }
         }
+    }
+
+    #[test]
+    fn test_notebook_rename_delete_and_open_are_clickable() {
+        let notebook = Notebook::new();
+        let fresh = || {
+            let mut state = UiState::new();
+            state.is_document_menu_open = true;
+            state.available_notebooks = ["default", "zweites"]
+                .iter()
+                .map(|id| NotebookSummary {
+                    id: id.to_string(),
+                    title: format!("Notizbuch {id}"),
+                    page_count: 1,
+                    modified_at: 0,
+                    status: Default::default(),
+                    error: None,
+                })
+                .collect();
+            state
+        };
+        let mut probe = fresh();
+        render_frames(&mut probe, &notebook, 10);
+        let modal = probe.document_modal_rect.expect("Notizbuch-Dialog offen");
+
+        let updater = crate::updater::UpdaterController::new();
+        let (mut deleted, mut renamed, mut opened) = (false, false, false);
+        let mut y = modal.min.y + 4.0;
+        while y < modal.max.y && !(deleted && renamed && opened) {
+            let mut x = modal.min.x + 4.0;
+            while x < modal.max.x {
+                let mut state = fresh();
+                let ctx = render_frames(&mut state, &notebook, 3);
+                let pos = egui::pos2(x, y);
+                let mut actions = Vec::new();
+                for pressed in [true, false] {
+                    ctx.begin_frame(egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            egui::vec2(1280.0, 850.0),
+                        )),
+                        events: vec![
+                            egui::Event::PointerMoved(pos),
+                            egui::Event::PointerButton {
+                                pos,
+                                button: egui::PointerButton::Primary,
+                                pressed,
+                                modifiers: egui::Modifiers::default(),
+                            },
+                        ],
+                        ..Default::default()
+                    });
+                    actions.extend(render_ui(
+                        &ctx,
+                        &mut state,
+                        &notebook,
+                        AutosaveStatus::Saved,
+                        &updater,
+                    ));
+                    let _ = ctx.end_frame();
+                }
+                deleted |= actions
+                    .iter()
+                    .any(|a| matches!(a, UiAction::DeleteNotebook(_)));
+                opened |= actions
+                    .iter()
+                    .any(|a| matches!(a, UiAction::OpenNotebook(_)));
+                renamed |= state.renaming_notebook_id.is_some();
+                x += 8.0;
+            }
+            y += 6.0;
+        }
+        assert!(deleted, "Löschen-Knopf reagiert nicht");
+        assert!(renamed, "Umbenennen-Knopf reagiert nicht");
+        assert!(opened, "Titel öffnet das Notizbuch nicht");
     }
 
     #[test]
