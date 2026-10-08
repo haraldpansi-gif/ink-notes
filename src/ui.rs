@@ -126,6 +126,59 @@ impl PageView {
     }
 }
 
+/// Erkennt langes Drücken mit einem Finger: still liegen (höchstens [`Self::SLOP`] logische
+/// Punkte Bewegung) für [`Self::DURATION`]. Positionen in physischen Pixeln.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct LongPress {
+    pending: Option<(u64, Instant, (f32, f32))>,
+}
+
+impl LongPress {
+    pub const DURATION: std::time::Duration = std::time::Duration::from_millis(500);
+    pub const SLOP: f32 = 10.0;
+
+    /// Finger `id` hat bei `pos` aufgesetzt.
+    pub fn start(&mut self, id: u64, pos: (f32, f32), now: Instant) {
+        self.pending = Some((id, now, pos));
+    }
+
+    /// Bewegung: zu weit (oder ein anderer Finger) bricht ab.
+    pub fn moved(&mut self, id: u64, pos: (f32, f32), scale: f32) {
+        if let Some((pending, _, start)) = self.pending {
+            if pending != id || (pos.0 - start.0).hypot(pos.1 - start.1) > Self::SLOP * scale {
+                self.pending = None;
+            }
+        }
+    }
+
+    /// Finger abgehoben, zweiter Finger oder sonstiger Abbruch.
+    pub fn cancel(&mut self) {
+        self.pending = None;
+    }
+
+    /// Wann ausgelöst wird (zum Aufwecken der Ereignisschleife).
+    pub fn deadline(&self) -> Option<Instant> {
+        self.pending.map(|(_, started, _)| started + Self::DURATION)
+    }
+
+    /// Ist die Zeit um, wird einmal die Stelle des Drückens geliefert.
+    pub fn fire(&mut self, now: Instant) -> Option<(f32, f32)> {
+        let (_, started, pos) = self.pending?;
+        (now >= started + Self::DURATION).then(|| {
+            self.pending = None;
+            pos
+        })
+    }
+}
+
+/// Kontextmenü nach langem Drücken auf das Blatt.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ContextMenu {
+    /// Bildschirmposition (logische Punkte) und Stelle auf der aktuellen Seite
+    pub screen: egui::Pos2,
+    pub page: glam::Vec2,
+}
+
 /// Laufende Bedienung des Lineals.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum RulerDrag {
@@ -170,6 +223,8 @@ pub enum UiAction {
     DeleteSelected,
     CopySelected,
     PasteSelected,
+    /// Zwischenablage an dieser Stelle der aktuellen Seite einfügen (Kontextmenü)
+    PasteAt(glam::Vec2),
     RotateSelected,
     // Dokumenten- & Notizbuch-Verwaltung
     OpenNotebook(String),
@@ -279,6 +334,8 @@ pub struct UiState {
     pub is_text_color_menu_open: bool,
     /// Farbwähler in den Farb-Popovern aufgeklappt
     pub show_color_picker: bool,
+    /// Kontextmenü nach langem Drücken (Einfügen an dieser Stelle)
+    pub context_menu: Option<ContextMenu>,
     /// Rückfrage „Seite löschen?“ im ☰-Menü ist offen
     pub confirm_delete_page: bool,
     /// Seitenzahl der zuletzt gelöschten Seite, solange sie wiederhergestellt werden kann
@@ -368,6 +425,7 @@ impl Default for UiState {
             active_text_color: 0,
             is_text_color_menu_open: false,
             show_color_picker: false,
+            context_menu: None,
             confirm_delete_page: false,
             restorable_page: None,
             shutdown_error: None,
@@ -410,6 +468,7 @@ impl UiState {
     /// sich nie mehrere überlagern.
     pub fn close_overlays(&mut self) {
         self.confirm_delete_page = false;
+        self.context_menu = None;
         self.is_text_color_menu_open = false;
         self.is_pen_menu_open = false;
         self.is_highlighter_menu_open = false;
@@ -634,7 +693,8 @@ impl UiState {
     /// - ODER innerhalb des geöffneten Einstellungs-Popovers
     /// - ODER innerhalb geöffneter Modalfenster (Dokumenten-Manager, Update-Center)
     pub fn is_point_in_ui(&self, px: f32, py: f32) -> bool {
-        if self.is_point_inside_toolbar(px, py) {
+        // Offenes Kontextmenü: ein Tippen daneben schließt es nur
+        if self.context_menu.is_some() || self.is_point_inside_toolbar(px, py) {
             return true;
         }
         // Lineal: Fläche und Dreh-Griff bedient die Oberfläche, die Kanten bleiben zum Zeichnen
@@ -1674,6 +1734,47 @@ fn delete_page_buttons(
     }
 }
 
+/// Kontextmenü nach langem Drücken auf das Blatt: Einfügen an dieser Stelle. Ein Tippen
+/// daneben oder Esc schließt es.
+fn context_menu(ctx: &egui::Context, state: &mut UiState, actions: &mut Vec<UiAction>) {
+    let Some(menu) = state.context_menu else {
+        return;
+    };
+    let response = egui::Area::new(egui::Id::new("canvas_context_menu"))
+        .fixed_pos(menu.screen)
+        .constrain(true)
+        .order(egui::Order::Foreground)
+        .show(ctx, |ui| {
+            popover_frame().show(ui, |ui| {
+                touch_friendly_spacing(ui);
+                ui.set_width(220.0);
+                if ui
+                    .add_sized([220.0, 36.0], egui::Button::new("📋  Einfügen"))
+                    .on_hover_text(
+                        "Bild, Text oder kopierte Objekte aus der Zwischenablage hier einfügen",
+                    )
+                    .clicked()
+                {
+                    actions.push(UiAction::PasteAt(menu.page));
+                    state.context_menu = None;
+                }
+                if ui
+                    .add_sized([220.0, 36.0], egui::Button::new("🖼  Bild aus Datei …"))
+                    .clicked()
+                {
+                    state.open_image_picker();
+                }
+            })
+        });
+    let rect = response.response.rect;
+    let pressed_outside = ctx.input(|i| {
+        i.pointer.any_pressed() && i.pointer.press_origin().is_some_and(|p| !rect.contains(p))
+    });
+    if pressed_outside || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+        state.context_menu = None;
+    }
+}
+
 /// Durchgehende Ansicht: dunkle Linie an jeder Grenze zweier Seiten (die Seiten liegen
 /// lückenlos untereinander). Unter allen Fenstern der Oberfläche, über der Tinte.
 fn page_separators(ctx: &egui::Context, state: &UiState, notebook: &Notebook) {
@@ -2106,6 +2207,7 @@ pub fn render_ui(
     page_separators(ctx, state, notebook);
     ruler_overlay(ctx, state);
     text_edit_overlay(ctx, state);
+    context_menu(ctx, state, &mut actions);
 
     let mut pen_btn_rect = None;
     let mut high_btn_rect = None;
@@ -4853,6 +4955,67 @@ mod tests {
             let _ = ctx.end_frame();
         }
         actions
+    }
+
+    #[test]
+    fn test_long_press_detection() {
+        let t0 = Instant::now();
+        let ms = |n| t0 + std::time::Duration::from_millis(n);
+        let mut press = LongPress::default();
+        assert_eq!(press.fire(ms(1000)), None);
+
+        // Stillhalten (kleines Zittern erlaubt): nach 500 ms genau einmal
+        press.start(1, (100.0, 100.0), t0);
+        press.moved(1, (106.0, 103.0), 1.0);
+        assert_eq!(press.deadline(), Some(ms(500)));
+        assert_eq!(press.fire(ms(499)), None);
+        assert_eq!(press.fire(ms(500)), Some((100.0, 100.0)));
+        assert_eq!(press.fire(ms(900)), None);
+
+        // Verschieben bricht ab; bei 2× Skalierung zählt der Abstand in logischen Punkten
+        press.start(1, (100.0, 100.0), t0);
+        press.moved(1, (115.0, 100.0), 2.0);
+        assert!(press.deadline().is_some());
+        press.moved(1, (125.0, 100.0), 2.0);
+        assert_eq!(press.fire(ms(600)), None);
+
+        // Abheben oder ein anderer Finger brechen ab
+        press.start(1, (100.0, 100.0), t0);
+        press.cancel();
+        assert_eq!(press.fire(ms(600)), None);
+        press.start(1, (100.0, 100.0), t0);
+        press.moved(2, (100.0, 100.0), 1.0);
+        assert_eq!(press.fire(ms(600)), None);
+    }
+
+    #[test]
+    fn test_context_menu_pastes_at_pressed_point() {
+        let notebook = Notebook::new();
+        let mut state = UiState::new();
+        let at = glam::Vec2::new(800.0, 1200.0);
+        state.context_menu = Some(ContextMenu {
+            screen: egui::pos2(600.0, 400.0),
+            page: at,
+        });
+        let ctx = render_frames(&mut state, &notebook, 3);
+        // Solange es offen ist, gehört jeder Punkt der Oberfläche (Tippen daneben schließt)
+        assert!(state.is_point_in_ui(1000.0, 700.0));
+
+        // „Einfügen“ ist der erste Eintrag
+        let actions = click_at(&ctx, &mut state, &notebook, egui::pos2(700.0, 425.0));
+        assert!(actions.contains(&UiAction::PasteAt(at)), "{actions:?}");
+        assert!(state.context_menu.is_none());
+
+        // Tippen daneben schließt das Menü ohne Aktion
+        state.context_menu = Some(ContextMenu {
+            screen: egui::pos2(600.0, 400.0),
+            page: at,
+        });
+        let ctx = render_frames(&mut state, &notebook, 3);
+        let actions = click_at(&ctx, &mut state, &notebook, egui::pos2(1000.0, 700.0));
+        assert!(state.context_menu.is_none());
+        assert!(!actions.iter().any(|a| matches!(a, UiAction::PasteAt(_))));
+        assert!(!state.is_point_in_ui(1000.0, 700.0));
     }
 
     #[test]

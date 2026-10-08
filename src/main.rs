@@ -581,6 +581,7 @@ fn selection_release(
 #[allow(clippy::too_many_arguments)]
 fn insert_text_on_page(
     content: &str,
+    at: Option<Vec2>,
     canvas: &mut CanvasState,
     notebook: &mut Notebook,
     manifest: &mut NotebookManifest,
@@ -588,10 +589,13 @@ fn insert_text_on_page(
     selection_state: &mut SelectionState,
     ui_state: &mut UiState,
 ) {
-    let center = visible_page_center(canvas);
+    let position = at.unwrap_or_else(|| {
+        let center = visible_page_center(canvas);
+        Vec2::new((center.x - 600.0).max(150.0), center.y)
+    });
     let mut edit = ink_notes::text::TextEditing::new_at(
         notebook.current_page().id,
-        Vec2::new((center.x - 600.0).max(150.0), center.y),
+        position,
         notebook.current_page().size.x,
         ui_state.text_size_pt * ink_notes::text::UNITS_PER_PT,
         ui_state.text_font,
@@ -794,9 +798,11 @@ fn visible_page_center(canvas: &CanvasState) -> Vec2 {
 }
 
 /// Strg+V bzw. „Einfügen“: ein neu kopiertes Systembild hat Vorrang, sonst werden die intern
-/// kopierten Objekte eingefügt. Gibt die Meldung für die Statuszeile zurück.
+/// kopierten Objekte eingefügt. `at`: Stelle auf der Seite (lange gedrückt → Einfügen), sonst
+/// die Mitte des sichtbaren Bereichs.
 #[allow(clippy::too_many_arguments)]
 fn paste(
+    at: Option<Vec2>,
     clipboard: &mut ClipboardBridge,
     storage_dir: &Path,
     canvas: &mut CanvasState,
@@ -820,7 +826,7 @@ fn paste(
                 image.bytes.into_owned(),
             ) {
                 Ok(imported) => {
-                    let center = visible_page_center(canvas);
+                    let center = at.unwrap_or_else(|| visible_page_center(canvas));
                     insert_image_on_page(
                         imported,
                         center,
@@ -844,6 +850,7 @@ fn paste(
         {
             insert_text_on_page(
                 &text,
+                at,
                 canvas,
                 notebook,
                 manifest,
@@ -874,17 +881,20 @@ fn paste(
         }
     }
     let mut next_id = notebook.next_stroke_id;
-    let new_ids = selection_state.paste_from_clipboard(notebook.current_page_mut(), &mut || {
-        let id = next_id;
-        next_id += 1;
-        id
-    });
+    let new_ids =
+        selection_state.paste_from_clipboard(notebook.current_page_mut(), at, &mut || {
+            let id = next_id;
+            next_id += 1;
+            id
+        });
     notebook.next_stroke_id = next_id;
     if !new_ids.is_empty() {
         canvas.sync_page(notebook.current_page_mut());
         manifest.next_stroke_id = notebook.next_stroke_id;
         autosave.mark_dirty(notebook, manifest);
         ui_state.set_export_message(format!("{} Objekt(e) eingefügt", new_ids.len()));
+    } else {
+        ui_state.set_export_message("Die Zwischenablage ist leer".to_string());
     }
 }
 
@@ -1127,6 +1137,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut is_pinch_gesturing = false;
     let mut is_touch_drawing = false;
     let mut is_touch_panning = false;
+    // Langes Drücken mit einem Finger öffnet das Kontextmenü
+    let mut long_press = ui::LongPress::default();
     let mut touch_pan_last_pos = (0.0_f32, 0.0_f32);
 
     // Stylus / Digitizer Zustand (Octotablet / Wayland Tablet Protocol)
@@ -1561,6 +1573,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
 
+                // Langes Drücken mit dem Finger: Kontextmenü zum Einfügen an dieser Stelle
+                if let Some(pos) = long_press.fire(Instant::now()) {
+                    if is_touch_drawing {
+                        is_touch_drawing = false;
+                        is_drawing = false;
+                        canvas.cancel_stroke();
+                    }
+                    is_touch_panning = false;
+                    focus_page_at!(pos);
+                    if let Some(page_pt) = canvas.screen_to_page(pos.0, pos.1) {
+                        let scale = window.scale_factor() as f32;
+                        ui_state.close_overlays();
+                        // Leicht versetzt, damit der Finger das Menü nicht verdeckt
+                        ui_state.context_menu = Some(ui::ContextMenu {
+                            screen: egui::pos2(pos.0 / scale + 12.0, pos.1 / scale + 12.0),
+                            page: page_pt,
+                        });
+                    }
+                    window.request_redraw();
+                }
+
                 // Von egui angefordertes, verzögertes Neuzeichnen (Tooltips, Animationen)
                 if let Some(at) = egui_repaint_at {
                     if Instant::now() >= at {
@@ -1578,7 +1611,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     || is_stylus_in_proximity
                 {
                     target.set_control_flow(ControlFlow::wait_duration(Duration::from_millis(8)));
-                } else if let Some(at) = egui_repaint_at {
+                } else if let Some(at) = [egui_repaint_at, long_press.deadline()]
+                    .into_iter()
+                    .flatten()
+                    .min()
+                {
                     target.set_control_flow(ControlFlow::WaitUntil(at));
                 } else {
                     target.set_control_flow(ControlFlow::Wait);
@@ -1787,7 +1824,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             // Einfügen: Strg + V
                             Key::Character(c) if c.eq_ignore_ascii_case("v") && ctrl => {
                                 paste(
-                                    &mut clipboard, &storage_dir, &mut canvas, &mut notebook, &mut manifest,
+                                    None, &mut clipboard, &storage_dir, &mut canvas, &mut notebook, &mut manifest,
                                     &mut autosave, &mut selection_state, &mut ui_state,
                                 );
                                 update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
@@ -2376,6 +2413,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                                 active_touches.insert(touch.id, (tx, ty));
 
+                                // Langes Drücken: nur beim Verschieben oder Zeichnen mit dem Finger, nicht
+                                // beim Radieren, Auswählen oder Text (dort hält man auch mal still)
+                                if active_touches.len() == 1
+                                    && !is_pinch_gesturing
+                                    && (!ui_state.touch_draw_enabled
+                                        || ui_state.active_tool.is_drawing()
+                                        || ui_state.active_tool == ActiveTool::Shape)
+                                {
+                                    long_press.start(touch.id, (tx, ty), Instant::now());
+                                } else {
+                                    long_press.cancel();
+                                }
+
                                 if active_touches.len() >= 2 {
                                     // Multi-Touch Geste: Sobald 2+ Finger aufliegen, Inking sofort abbrechen und zoomen/pannen
                                     if is_touch_drawing {
@@ -2442,6 +2492,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                             TouchPhase::Moved => {
                                 active_touches.insert(touch.id, (tx, ty));
+                                long_press.moved(touch.id, (tx, ty), window.scale_factor() as f32);
 
                                 if active_touches.len() >= 2 {
                                     let pts: Vec<(f32, f32)> = active_touches.values().copied().take(2).collect();
@@ -2510,6 +2561,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                             TouchPhase::Ended | TouchPhase::Cancelled => {
                                 active_touches.remove(&touch.id);
+                                long_press.cancel();
 
                                 if active_touches.is_empty() {
                                     is_pinch_gesturing = false;
@@ -2713,9 +2765,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         window.request_redraw();
                                     }
                                 }
-                                UiAction::PasteSelected => {
+                                UiAction::PasteSelected | UiAction::PasteAt(_) => {
+                                    let at = match action {
+                                        UiAction::PasteAt(at) => Some(at),
+                                        _ => None,
+                                    };
                                     paste(
-                                        &mut clipboard, &storage_dir, &mut canvas, &mut notebook, &mut manifest,
+                                        at, &mut clipboard, &storage_dir, &mut canvas, &mut notebook, &mut manifest,
                                         &mut autosave, &mut selection_state, &mut ui_state,
                                     );
                                     update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());

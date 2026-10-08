@@ -39,6 +39,7 @@ Getestet wird vor allem unter Zorin OS 18 / Ubuntu 24.04 (Wayland und X11).
 ### Text, Bilder und PDFs
 - **Text-Werkzeug** (`T`): ins Blatt tippen und schreiben – normale oder Code-Schrift (feste Zeichenbreite, Tab rückt ein), 8–36 pt, Zeilenumbruch am Feldrand. Vorhandenen Text antippen zum Ändern, `Esc` beendet. Textfelder lassen sich wie Bilder verschieben, drehen und skalieren. In anderen Programmen kopierter Text wird mit `Strg + V` zum Textfeld.
 - **Bilder** (PNG, JPEG, GIF, WebP, BMP) über `Strg + I`, aus der Zwischenablage oder per Ziehen ins Fenster einfügen.
+- **Einfügen per Finger:** Lange (½ s) mit dem Finger aufs Blatt drücken öffnet ein Menü „Einfügen“ – Screenshot, kopierter Text oder kopierte Objekte landen genau an dieser Stelle.
 - **PDF importieren** (☰-Menü): Jede PDF-Seite wird eine Notizbuchseite mit der PDF-Seite als Hintergrund. Hochformat-Seiten werden DIN A4, Querformat-Seiten (z. B. Folien) bekommen eine Querformat-Seite ohne leeren Streifen darunter. Beim Hineinzoomen werden PDF-Seiten schärfer nachgerendert.
 
 ### Seiten und Ansicht

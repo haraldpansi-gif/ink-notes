@@ -203,13 +203,19 @@ impl SelectionState {
     pub fn paste_from_clipboard(
         &mut self,
         page: &mut Page,
+        at: Option<Vec2>,
         next_id_gen: &mut impl FnMut() -> u64,
     ) -> Vec<u64> {
         if self.clipboard.is_empty() {
             return Vec::new();
         }
 
-        let offset = Vec2::new(30.0, 30.0); // ca. 3 mm Versatz nach rechts-unten
+        // Mit `at` (lange gedrückt → Einfügen) landet die Mitte der Objekte dort, sonst
+        // ca. 3 mm nach rechts unten versetzt
+        let offset = match (at, Page::selection_aabb(&self.clipboard)) {
+            (Some(at), Some(aabb)) => at - (aabb.min + aabb.max) / 2.0,
+            _ => Vec2::new(30.0, 30.0),
+        };
         let mut new_strokes = Vec::with_capacity(self.clipboard.len());
         let mut new_ids = Vec::with_capacity(self.clipboard.len());
 
@@ -457,13 +463,25 @@ mod tests {
 
         // Paste
         let mut next_id = 100;
-        let new_ids = sel.paste_from_clipboard(&mut page, &mut || {
+        let new_ids = sel.paste_from_clipboard(&mut page, None, &mut || {
             next_id += 1;
             next_id
         });
         assert_eq!(new_ids.len(), 1);
         assert_eq!(page.strokes.len(), 3);
         assert_eq!(sel.selected_ids, new_ids);
+
+        // An einer Stelle einfügen: die Mitte der Kopie liegt dort
+        let target = Vec2::new(1000.0, 1500.0);
+        let placed = sel.paste_from_clipboard(&mut page, Some(target), &mut || {
+            next_id += 1;
+            next_id
+        });
+        let aabb = sel.get_selection_aabb(&page).unwrap();
+        assert_eq!(sel.selected_ids, placed);
+        assert!(((aabb.min + aabb.max) / 2.0 - target).length() < 0.01);
+        sel.delete_selected(&mut page);
+        sel.selected_ids = new_ids.clone();
 
         // Delete
         let deleted = sel.delete_selected(&mut page);
