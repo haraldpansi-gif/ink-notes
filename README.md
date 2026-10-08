@@ -1,6 +1,13 @@
-# ink-notes
+<p align="center">
+  <img src="assets/ink-notes-banner.svg" alt="ink-notes Banner" width="100%">
+</p>
 
-Eine Notizbuch-App für Linux zum Schreiben mit Stift, Finger oder Maus – geschrieben in **Rust** mit **wgpu**, **winit** und **egui**.
+<p align="center">
+  <strong>Eine moderne Notizbuch-App für Linux zum Schreiben mit Stift, Touch und Maus</strong><br>
+  Geschrieben in <strong>Rust</strong> mit <strong>wgpu</strong>, <strong>winit</strong> und <strong>egui</strong>.
+</p>
+
+---
 
 ink-notes speichert Handschrift als Vektoren, erkennt auf Wunsch Formen, kann PDFs zum Beschriften importieren, Bilder und Textfelder einfügen und alles wieder als PDF, PNG oder SVG exportieren. Gespeichert wird automatisch im Hintergrund.
 
