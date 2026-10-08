@@ -53,7 +53,7 @@ Getestet wird vor allem unter Zorin OS 18 / Ubuntu 24.04 (Wayland und X11).
 
 ### Notizbücher und Speichern
 - Mehrere **Notizbücher** anlegen, umbenennen, wechseln und löschen (gelöschte landen zunächst im Papierkorb und lassen sich wiederherstellen).
-- **Ordner** für Notizbücher, beliebig verschachtelt (z. B. 3. Semester › Mathe): anlegen, umbenennen, löschen (der Inhalt rückt eine Ebene nach oben) und Notizbücher mit 📂 verschieben. Neue Notizbücher landen im gerade geöffneten Ordner.
+- **Ordner** für Notizbücher, beliebig verschachtelt (z. B. 3. Semester › Mathe): anlegen, umbenennen, löschen (der Inhalt rückt eine Ebene nach oben) und Notizbücher wie Ordner (samt Inhalt) mit 📂 verschieben. Neue Notizbücher landen im gerade geöffneten Ordner.
 - **Automatisches Speichern** im Hintergrund: 1,5 Sekunden nach der letzten Änderung, bei ununterbrochenem Schreiben spätestens alle 10 Sekunden. Zeichnen wird dabei nicht unterbrochen.
 - Jede Datei wird erst vollständig in eine temporäre Datei geschrieben und dann ersetzt – ein Absturz beim Speichern hinterlässt keine halbe Datei.
 - **Beim Schließen** (Fenster oder `Strg + Q`) und beim Wechsel des Notizbuchs wird alles Ausstehende geschrieben, bevor es weitergeht. Schlägt das fehl, bleibt die App offen und bietet Wiederholen oder eine Notfall-Sicherung an.

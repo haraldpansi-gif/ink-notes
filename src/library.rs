@@ -236,6 +236,39 @@ impl Library {
         }
     }
 
+    /// Verschiebt einen Ordner samt Inhalt nach `new_parent` (oberste Ebene: [`ROOT`]) und
+    /// gibt seinen neuen Pfad zurück. Nicht in sich selbst oder einen eigenen Unterordner.
+    pub fn move_folder(&mut self, path: &str, new_parent: &str) -> Result<String, String> {
+        if !self.folders.contains(path) {
+            return Err("Den Ordner gibt es nicht mehr".to_string());
+        }
+        if !new_parent.is_empty() && !self.folders.contains(new_parent) {
+            return Err("Den Zielordner gibt es nicht mehr".to_string());
+        }
+        if is_within(new_parent, path) {
+            return Err("Ein Ordner kann nicht in sich selbst verschoben werden".to_string());
+        }
+        let name = folder_name(path);
+        let new_path = join(new_parent, name);
+        if new_path == path {
+            return Ok(new_path);
+        }
+        if self.folders.contains(&new_path) {
+            return Err(format!("Im Zielordner gibt es schon einen Ordner „{name}“"));
+        }
+        self.move_contents(path, &new_path);
+        Ok(new_path)
+    }
+
+    /// Mögliche Ziele für das Verschieben des Ordners `path`: alle Ordner außer ihm selbst und
+    /// seinen Unterordnern (die oberste Ebene ist immer ein Ziel).
+    pub fn folder_move_targets(&self, path: &str) -> Vec<&str> {
+        self.all_folders()
+            .into_iter()
+            .filter(|f| !is_within(f, path))
+            .collect()
+    }
+
     /// Legt das Notizbuch in `folder` (oberste Ebene: [`ROOT`]).
     pub fn move_notebook(&mut self, notebook_id: &str, folder: &str) -> Result<(), String> {
         if folder.is_empty() {
@@ -336,6 +369,38 @@ mod tests {
         assert_eq!(lib.folder_of("uebung"), ROOT);
         assert!(!lib.notebooks.contains_key("uebung"));
         assert_eq!(lib.subfolders(ROOT), ["Mathe", "Physik"]);
+    }
+
+    #[test]
+    fn test_move_folder() {
+        let mut lib = library();
+        lib.create_folder(ROOT, "Mathe-Sammlung").unwrap();
+        // Ordner samt Inhalt in einen anderen Ordner schieben
+        let new = lib
+            .move_folder("3. Semester/Mathe", "Mathe-Sammlung")
+            .unwrap();
+        assert_eq!(new, "Mathe-Sammlung/Mathe");
+        assert_eq!(lib.folder_of("analysis"), "Mathe-Sammlung/Mathe");
+        assert!(!lib.folders.contains("3. Semester/Mathe"));
+        // Auf die oberste Ebene und zurück
+        assert_eq!(
+            lib.move_folder("Mathe-Sammlung/Mathe", ROOT).unwrap(),
+            "Mathe"
+        );
+        assert_eq!(
+            lib.move_folder("Mathe", "3. Semester").unwrap(),
+            "3. Semester/Mathe"
+        );
+        // Nicht in sich selbst oder in einen eigenen Unterordner
+        assert!(lib.move_folder("3. Semester", "3. Semester").is_err());
+        assert!(lib.move_folder("3. Semester", "3. Semester/Mathe").is_err());
+        assert_eq!(lib.folder_move_targets("3. Semester"), ["Mathe-Sammlung"]);
+        // Namenskollision am Ziel
+        lib.create_folder("Mathe-Sammlung", "Physik").unwrap();
+        assert!(lib
+            .move_folder("3. Semester/Physik", "Mathe-Sammlung")
+            .is_err());
+        assert_eq!(lib.folder_of("uebung"), "3. Semester");
     }
 
     #[test]

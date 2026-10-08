@@ -31,7 +31,7 @@ Dieses Dokument beschreibt, wo und wie ink-notes Notizbücher speichert, und die
 - Alle Dateien werden mit Rechten `0600`, Ordner mit `0700` angelegt.
 
 ### Ordner (`library.json`)
-Ordner wie „3. Semester › Mathe“ sind rein logisch: Die Notizbücher bleiben in ihren Verzeichnissen, `library.json` hält nur fest, welcher Ordner welches Notizbuch enthält. Umbenennen, Verschieben und Löschen von Ordnern ändern deshalb nie eine Notizbuch-Datei.
+Ordner wie „3. Semester › Mathe“ sind rein logisch: Die Notizbücher bleiben in ihren Verzeichnissen, `library.json` hält nur fest, welcher Ordner welches Notizbuch enthält. Umbenennen, Verschieben (samt Inhalt) und Löschen von Ordnern ändern deshalb nie eine Notizbuch-Datei.
 
 ```json
 {

@@ -3045,6 +3045,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     }
                                     window.request_redraw();
                                 }
+                                UiAction::MoveFolder { path, new_parent } => {
+                                    if let Some(new_path) = change_library(&storage_base_dir, &mut ui_state, |library| {
+                                        library.move_folder(&path, &new_parent)
+                                    }) {
+                                        // Der gezeigte Ordner kann darin liegen
+                                        let shown = &ui_state.notebook_folder;
+                                        if shown == &path || shown.starts_with(&format!("{path}/")) {
+                                            ui_state.notebook_folder = format!("{new_path}{}", &shown[path.len()..]);
+                                        }
+                                        let target = if new_parent.is_empty() {
+                                            "die oberste Ebene".to_string()
+                                        } else {
+                                            format!("„{}“", ink_notes::library::folder_name(&new_parent))
+                                        };
+                                        ui_state.set_export_message(format!(
+                                            "Ordner „{}“ verschoben in {target}",
+                                            ink_notes::library::folder_name(&path)
+                                        ));
+                                    }
+                                    window.request_redraw();
+                                }
                                 UiAction::MoveNotebook { id, folder } => {
                                     if change_library(&storage_base_dir, &mut ui_state, |library| {
                                         library.move_notebook(&id, &folder)

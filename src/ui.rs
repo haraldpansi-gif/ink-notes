@@ -171,6 +171,14 @@ impl LongPress {
     }
 }
 
+/// Was im Dokumenten-Manager gerade verschoben wird.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MoveSubject {
+    Notebook(String),
+    /// Pfad des Ordners
+    Folder(String),
+}
+
 /// Kontextmenü nach langem Drücken auf das Blatt.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ContextMenu {
@@ -247,6 +255,11 @@ pub enum UiAction {
     MoveNotebook {
         id: String,
         folder: String,
+    },
+    /// Ordner samt Inhalt nach `new_parent` verschieben
+    MoveFolder {
+        path: String,
+        new_parent: String,
     },
     RenameNotebook {
         id: String,
@@ -331,8 +344,8 @@ pub struct UiState {
     /// Ordner, der gerade umbenannt wird, bzw. dessen Löschen bestätigt werden soll
     pub renaming_folder: Option<String>,
     pub confirm_delete_folder: Option<String>,
-    /// Notizbuch, für das gerade ein Zielordner gewählt wird
-    pub moving_notebook_id: Option<String>,
+    /// Notizbuch oder Ordner, für das gerade ein Zielordner gewählt wird
+    pub moving: Option<MoveSubject>,
     pub renaming_title_input: String,
     pub document_modal_rect: Option<egui::Rect>,
     /// Gitea Release- & Update-Manager
@@ -439,7 +452,7 @@ impl Default for UiState {
             notebook_folder: String::new(),
             renaming_folder: None,
             confirm_delete_folder: None,
-            moving_notebook_id: None,
+            moving: None,
             renaming_title_input: String::new(),
             document_modal_rect: None,
             is_update_dialog_open: false,
@@ -1820,6 +1833,13 @@ fn folder_row(ui: &mut egui::Ui, state: &mut UiState, path: &str, actions: &mut 
                     state.confirm_delete_folder = Some(path.to_string());
                 }
                 if ui
+                    .button(egui::RichText::new("📂").size(16.0))
+                    .on_hover_text("Ordner samt Inhalt in einen anderen Ordner verschieben")
+                    .clicked()
+                {
+                    state.moving = Some(MoveSubject::Folder(path.to_string()));
+                }
+                if ui
                     .button(egui::RichText::new("✏").size(16.0))
                     .on_hover_text("Ordner umbenennen")
                     .clicked()
@@ -1860,24 +1880,35 @@ fn folder_row(ui: &mut egui::Ui, state: &mut UiState, path: &str, actions: &mut 
     }
 }
 
-/// Zielordner für das Verschieben eines Notizbuchs: oberste Ebene und alle Ordner als Baum.
+/// Zielordner für das Verschieben eines Notizbuchs oder Ordners: oberste Ebene und alle
+/// Ordner als Baum (ein Ordner nicht in sich selbst oder seine Unterordner).
 fn move_target_list(
     ui: &mut egui::Ui,
     state: &mut UiState,
-    notebook_id: &str,
+    subject: &MoveSubject,
     actions: &mut Vec<UiAction>,
 ) {
-    let title = state
-        .available_notebooks
-        .iter()
-        .find(|s| s.id == notebook_id)
-        .map_or(notebook_id, |s| s.title.as_str())
-        .to_string();
-    let current = state.library.folder_of(notebook_id).to_string();
+    let (title, current, folders) = match subject {
+        MoveSubject::Notebook(id) => (
+            state
+                .available_notebooks
+                .iter()
+                .find(|s| &s.id == id)
+                .map_or(id.as_str(), |s| s.title.as_str())
+                .to_string(),
+            state.library.folder_of(id).to_string(),
+            state.library.all_folders(),
+        ),
+        MoveSubject::Folder(path) => (
+            format!("📁 {}", crate::library::folder_name(path)),
+            crate::library::parent_folder(path).to_string(),
+            state.library.folder_move_targets(path),
+        ),
+    };
     ui.label(egui::RichText::new(format!("„{title}“ verschieben nach:")).strong());
     ui.add_space(4.0);
     let mut targets = vec![(String::new(), "📚 Oberste Ebene".to_string(), 0)];
-    for path in state.library.all_folders() {
+    for path in folders {
         let depth = path.matches('/').count() + 1;
         targets.push((
             path.to_string(),
@@ -1897,18 +1928,24 @@ fn move_target_list(
                         .on_disabled_hover_text("Liegt bereits hier")
                         .clicked()
                     {
-                        actions.push(UiAction::MoveNotebook {
-                            id: notebook_id.to_string(),
-                            folder: path.clone(),
+                        actions.push(match subject {
+                            MoveSubject::Notebook(id) => UiAction::MoveNotebook {
+                                id: id.clone(),
+                                folder: path.clone(),
+                            },
+                            MoveSubject::Folder(folder) => UiAction::MoveFolder {
+                                path: folder.clone(),
+                                new_parent: path.clone(),
+                            },
                         });
-                        state.moving_notebook_id = None;
+                        state.moving = None;
                     }
                 });
             }
         });
     ui.add_space(6.0);
     if ui.button("Abbrechen").clicked() {
-        state.moving_notebook_id = None;
+        state.moving = None;
     }
 }
 
@@ -2537,7 +2574,7 @@ pub fn render_ui(
                                             .to_string();
                                         state.renaming_folder = None;
                                         state.confirm_delete_folder = None;
-                                        state.moving_notebook_id = None;
+                                        state.moving = None;
                                         actions.push(UiAction::RefreshNotebooks);
                                     }
                                 }
@@ -3804,7 +3841,7 @@ pub fn render_ui(
                 ui.add_space(6.0);
 
                 // Zielordner für „Verschieben“ wählen
-                if let Some(moving) = state.moving_notebook_id.clone() {
+                if let Some(moving) = state.moving.clone() {
                     move_target_list(ui, state, &moving, &mut actions);
                     return;
                 }
@@ -3917,7 +3954,7 @@ pub fn render_ui(
                                                         .on_hover_text("In einen anderen Ordner verschieben")
                                                         .clicked()
                                                     {
-                                                        state.moving_notebook_id = Some(summary.id.clone());
+                                                        state.moving = Some(MoveSubject::Notebook(summary.id.clone()));
                                                     }
 
                                                     if ui.button(egui::RichText::new("✏").size(16.0))
