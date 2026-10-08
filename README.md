@@ -1,286 +1,217 @@
-# 🖋️ ink-notes
+# ink-notes
 
-Eine latenzoptimierte, hardwarebeschleunigte Inking- und Notizbuch-Anwendung für Linux, entwickelt in **Rust** mit **wgpu** und **winit**.
+Eine Notizbuch-App für Linux zum Schreiben mit Stift, Finger oder Maus – geschrieben in **Rust** mit **wgpu**, **winit** und **egui**.
 
-`ink-notes` kombiniert minimale Eingabelatenz beim Zeichnen mit Stift, Touchpad oder Maus mit einem flüssigen stufenlosen Viewport, automatischer Geometrie- und Formerkennung, Objekttransformationen, Multi-Dokumenten-Verwaltung und Vektor-PDF-Export.
+ink-notes speichert Handschrift als Vektoren, erkennt auf Wunsch Formen, kann PDFs zum Beschriften importieren, Bilder und Textfelder einfügen und alles wieder als PDF, PNG oder SVG exportieren. Gespeichert wird automatisch im Hintergrund.
 
----
-
-## ✨ Features im Überblick
-
-### ⚡ Latenzoptimierte Inking-Pipeline
-- **Hardware-Rendering:** Direct-to-Screen-Rendering mit `wgpu` (Vulkan / X11 / Wayland) unter Nutzung von `PresentMode::Mailbox` für minimale Eingabeverzögerung.
-- **Zwei-Stufen-Modell:**
-  1. *Live-Phase:* Eingehende Stylus-Samples werden in Echtzeit durch einen 1€-Filter (One-Euro-Filter) entprellt und inkrementell als GPU-Meshes dargestellt.
-  2. *Commit-Phase (Post-Stroke Finalisierung):* Akausale Ecken-Erkennung (Corner Preservation bei Knicken > 65°), gewichtetes 3-Punkt-Druckfenster, Ramer-Douglas-Peucker (RDP) Dezimierung und saubere runde Endkappen.
-- **Centripetal Catmull-Rom Splines:** Weiche C1-stetige Kurveninterpolation ohne Überschwinger oder Schleifen.
-- **Werkzeuge:**
-  - **Stift (Pen):** Feine, variable Strichstärken (0.3 mm bis 1.2 mm) mit Notiz-Farben (Schwarz, Blau, Rot, Grün, Grau).
-  - **Textmarker (Highlighter):** Breite, halbtransparente Striche (4.0 mm bis 8.0 mm) mit Multiplikations-Blending.
-  - **Radierer (Eraser):** Segment- und abstandsbasierte Löschung einzelner Striche auf dem DIN-A4-Canvas.
-  - **Text (`T`):** Ins Blatt tippen und mit der Tastatur schreiben – für Überschriften, Code-Schnipsel oder kopierten Text. Normale Schrift oder Code-Schrift (feste Zeichenbreite, Tab rückt ein), 8 bis 36 pt, Farben der Stiftpalette; Zeilen werden am rechten Rand des Textfelds umbrochen. Vorhandenen Text antippen zum Ändern, `Esc` beendet. Textfelder lassen sich wie Bilder verschieben, drehen und skalieren; im PDF-Export ist der Text echt (durchsuchbar und kopierbar). Aus anderen Programmen kopierter Text wird mit `Strg + V` zum Textfeld.
-
-### 🔍 Stufenloser Zoom & Pan (Kamera)
-- **Viewport-Transformation:** 2D-Projektionsmatrix im WGSL-Vertex-Shader.
-- **Durchgehendes Scrollen:** Seiten hängen untereinander und werden mit Mausrad, Finger oder Touchpad fließend gescrollt; wer im unteren Fünftel der letzten Seite schreibt, bekommt automatisch eine neue Seite angehängt. Abschaltbar im ☰-Menü unter „Ansicht“ (dann Seite für Seite blättern).
-- **Cursor-zentrierter Zoom:** Stufenloses Zoomen von **25 % bis 1000 %** (importierte PDF-Seiten werden beim Hineinzoomen schärfer nachgerendert) zentriert auf die Cursor-Position via `Strg + Mausrad` (ohne durchgehende Ansicht: Mausrad), Trackpad-Pinch oder Tastenkürzel (`Strg +` / `Strg -` / `Strg 0`).
-- **Pan:** Verschieben des Canvas per mittlerer Maustaste, `Leertaste + Drag` oder Trackpad-Pan.
-- **Inverse Koordinatentransformation:** Präzise Umrechnung von Bildschirm- in DIN-A4-Dokumentkoordinaten (`screen_to_page`).
-
-### 📐 Geometrie- & Objekterkennung (Shape Recognition)
-- **Erkannte Primitiven:**
-  - **Geraden (Line):** Sehnen- zu Pfadlängenverhältnis > 0.92.
-  - **Rechtecke (Rectangle):** 4 orthogonale Ecken via Douglas-Peucker-Polygonzug (RDP).
-  - **Kreise & Ellipsen (Circle/Ellipse):** Geschlossene Pfade mit minimaler Varianz via Least-Squares Circle Fit.
-  - **Koordinatensysteme (Axes):** Zwei orthogonale Achsen (80°–100° gesnappt auf exakt 90°) mit Richtungspfeilen.
-  - **Dreiecke, Rhomben / Rauten & Oktaeder:** Regelmäßige Polygone mit Eckpunkt-Analyse.
-- **Interaktionsmodelle:**
-  - **Draw-and-Hold:** Verweilt der Stift am Ende eines Strichs für > 400 ms regungslos (< 3 px), snappt die Skizze sofort automatisch in eine perfekte Vektorform ein.
-  - **Formen-Werkzeug (Shape Mode):** Direkte Erkennung und Ersetzung beim Loslassen.
-
-### 🖐️ Objektauswahl & Transformation (Lasso / Select)
-- **Lasso & Klick-Auswahl:** Schnelles Markieren einzelner Striche oder Gruppen per Rahmen (`V`).
-- **Echtzeit-Verschieben:** Freies Verschieben ausgewählter Objekte über die Seite.
-- **Stufenlose Skalierung:** Größenänderung über interaktive Eck-Griffe.
-- **Drehung:** Stufenlose Rotation um das Objektzentrum über den oberen Dreh-Griff oder exakte 90°-Schritte mit Taste `R`.
-- **Multicolor-Umfärbung:** Ausgewählte Objekte direkt über die Farbpalette umfärben.
-- **Clipboard & Editieren:** Kopieren (`Strg + C`), Einfügen (`Strg + V`) und Löschen (`Entf` / `Backspace`).
-- **Undo / Redo:** Vollständige Transaktionshistorie (`Strg + Z` / `Strg + Y`) für alle Aktionen inklusive Transformationen.
-
-### 📚 Multi-Dokumenten- & Notizbuch-Verwaltung
-- **Dateisystem-Architektur:** Jedes Dokument wird in einem separaten Verzeichnis unter `~/.local/share/ink-notes/notebooks/<id>/` mit `manifest.json` und Einzelseiten (`page_<id>.json`) gespeichert.
-- **Dokumenten-Manager:** Toolbar-Modal zum Anlegen, Wechseln, Umbenennen und Löschen von Notizbüchern.
-- **Verlustfreier Wechsel:** Beim Dokumentenwechsel sichert ein synchroner Disk-Flush alle anstehenden Änderungen garantiert ab.
-
-### 📄 Seiten & Hintergründe
-- **Virtuelles DIN-A4-Raster:** 2100 × 2970 Koordinateneinheiten (10 Einheiten = 1 mm).
-- **Seitenformat aus dem PDF:** Beim PDF-Import bleiben Hochformat-Seiten DIN A4; Querformat-Seiten wie PowerPoint-Folien bekommen eine Querformat-Seite (297 mm breit, Höhe nach Seitenverhältnis) ohne leeren Streifen darunter. Eingefügte Seiten übernehmen das Format der aktuellen Seite.
-- **Hintergrundmuster:** Blanko, Kariert (5 mm), Liniert (7.5 mm), Punktraster (5 mm).
-- **Seitenverwaltung:** Vor- und Zurückblättern, neue Seiten anhängen oder direkt nach der aktuellen Seite einfügen (☰-Menü oder Seitenauswahl, z. B. zwischen zwei PDF-Folien), Seitensprung-Menü.
-
-### 💾 Autosave & Persistenz
-- **Asynchroner Autosave-Controller:** Sichert Änderungen im Hintergrund nach 1.5 s Ruhezeit (Debounce), ohne das Zeichnen zu blockieren.
-- **Atomares Schreiben:** Temp-Dateien mit atomarem Rename (`manifest.json.tmp` -> `manifest.json`) schützen vor Datenkorruption bei Abstürzen.
-- **Dediziertes Speichern (`Strg + S`):** Sofortiger, synchroner Disk-Flush mit visueller Toast-Rückmeldung.
-- **Sicherer Shutdown:** `Strg + Q` oder Schließen des Fensters führt vor Programmende einen vollständigen synchronen Flush aus.
-
-### 🖨️ Vektor-PDF-Export
-- Exportiert das Dokument via `printpdf` nach `~/Documents/<Titel>.pdf` (mit automatischer Kollisionsvermeidung `_1`, `_2`).
-- Striche und geometrische Formen werden als skalierbare Vektoren ausgegeben. Kürzel: `Strg + E`.
+Getestet wird vor allem unter Zorin OS 18 / Ubuntu 24.04 (Wayland und X11).
 
 ---
 
-## 📦 Release, Packaging & Updater
+## Funktionen
 
-- **Natives .deb-Paket**: Optimiert für Zorin OS 18 (Ubuntu 24.04 LTS Basis) mit vollständiger XDG Desktop-Integration (`.desktop`, Hicolor-Icons SVG & PNG, AppStream Metainfo, Debian Copyright & Changelog).
-- **Portables .AppImage**: Eigenständiges x86_64 Bundle.
-- **In-App Updater (`src/updater.rs`)**: Automatischer Prüflauf gegen Gitea Releases, SemVer-Filterung, Minisign-Signaturprüfung, SHA-256-Prüfung und atomarer In-Place Austausch.
+### Schreiben und Zeichnen
+- **Stift** mit Druckstärke, vier Strichstärken (0,3–1,2 mm) und fünf Farben; **Textmarker** (halbtransparent, 4–8 mm) in vier Farben.
+- **Glättung in zwei Stufen:** Während des Schreibens glättet ein 1€-Filter das Zittern, die Linie erscheint sofort. Beim Absetzen wird der Strich nachbearbeitet: Ecken (Knicke über 65°) bleiben erhalten, der Druckverlauf wird geglättet, überflüssige Punkte entfallen, die Enden werden rund.
+- **Druckkurve** im ☰-Menü an den eigenen Stift anpassen (weicher/härter, Schwelle gegen Grundrauschen).
+- **Radierer** in drei Modi: ganze Striche, nur den überstrichenen Teil (Teilstrich) oder nur Textmarker. Stiftrückseite und Seitentaste des Stifts radieren ebenfalls.
+- **Virtuelles Lineal** (`L`): verschieben, am Griff drehen (rastet bei 15° ein); Striche entlang einer Kante werden gerade.
 
-### 1. Release-Pakete bauen
+### Formerkennung
+- **Formen-Werkzeug** (`S`/`F`) oder **Halten** am Strichende (über 400 ms stillhalten): Die Skizze wird durch eine saubere Form ersetzt.
+- Erkannt werden Linien, Pfeile, Kreise, Ellipsen, Rechtecke, Dreiecke, Rauten, Vielecke, Koordinatensysteme und Oktaeder (Skizze als 3D-Körper).
+- Die Erkennung arbeitet rein geometrisch (Bogenlänge, Douglas-Peucker, Kreis-Fit), ohne Machine Learning. Nicht alles wird erkannt – was nicht passt, bleibt Handschrift.
+
+### Auswählen und Bearbeiten
+- **Auswahlwerkzeug** (`V`): antippen oder Rahmen aufziehen, dann verschieben, an den Ecken skalieren, am Griff drehen oder mit `R` um 90° drehen. Funktioniert mit Maus, Finger und Stift.
+- Auswahl über die Palette **umfärben**, **kopieren/einfügen** (`Strg + C/V`), **löschen** (`Entf`).
+- `Strg + C` legt die Auswahl zusätzlich als Bild in die Zwischenablage, z. B. für Chat oder Mail.
+- **Rückgängig/Wiederholen** (`Strg + Z/Y`) für alle Änderungen, je Seite.
+
+### Text, Bilder und PDFs
+- **Text-Werkzeug** (`T`): ins Blatt tippen und schreiben – normale oder Code-Schrift (feste Zeichenbreite, Tab rückt ein), 8–36 pt, Zeilenumbruch am Feldrand. Vorhandenen Text antippen zum Ändern, `Esc` beendet. Textfelder lassen sich wie Bilder verschieben, drehen und skalieren. In anderen Programmen kopierter Text wird mit `Strg + V` zum Textfeld.
+- **Bilder** (PNG, JPEG, GIF, WebP, BMP) über `Strg + I`, aus der Zwischenablage oder per Ziehen ins Fenster einfügen.
+- **PDF importieren** (☰-Menü): Jede PDF-Seite wird eine Notizbuchseite mit der PDF-Seite als Hintergrund. Hochformat-Seiten werden DIN A4, Querformat-Seiten (z. B. Folien) bekommen eine Querformat-Seite ohne leeren Streifen darunter. Beim Hineinzoomen werden PDF-Seiten schärfer nachgerendert.
+
+### Seiten und Ansicht
+- **Hintergründe:** blanko, kariert (5 mm), liniert (7,5 mm), Punktraster (5 mm). Die **Farbe von Karos, Linien und Punkten** ist wählbar (hell, mittel, kräftig, blau, grün) und gilt auch im Export.
+- **Papierfarbe** der Anzeige: weiß, creme, dunkelgrau, schwarz; auf dunklem Papier werden dunkle Stiftfarben auf Wunsch aufgehellt. Gespeichert und exportiert wird immer auf weißem Papier.
+- **Durchgehendes Scrollen:** Seiten hängen untereinander; wer im unteren Fünftel der letzten Seite schreibt, bekommt automatisch eine neue Seite. Abschaltbar (dann Seite für Seite blättern).
+- **Zoom** von 25 % bis 1000 % (`Strg + Mausrad`, zwei Finger, `Strg + +/-/0`), Verschieben mit mittlerer Maustaste, `Leertaste + Ziehen` oder einem Finger.
+- **Seiten** anhängen oder direkt nach der aktuellen Seite einfügen, **Seitentitel** vergeben; die Seitenübersicht zeigt Vorschaubilder oder ein Inhaltsverzeichnis. Seitentitel werden im PDF zu Lesezeichen.
+- **Werkzeugleiste** links oder rechts andocken (für Links- und Rechtshänder).
+
+### Notizbücher und Speichern
+- Mehrere **Notizbücher** anlegen, umbenennen, wechseln und löschen (gelöschte landen zunächst im Papierkorb und lassen sich wiederherstellen).
+- **Automatisches Speichern** im Hintergrund: 1,5 Sekunden nach der letzten Änderung, bei ununterbrochenem Schreiben spätestens alle 10 Sekunden. Zeichnen wird dabei nicht unterbrochen.
+- Jede Datei wird erst vollständig in eine temporäre Datei geschrieben und dann ersetzt – ein Absturz beim Speichern hinterlässt keine halbe Datei.
+- **Beim Schließen** (Fenster oder `Strg + Q`) und beim Wechsel des Notizbuchs wird alles Ausstehende geschrieben, bevor es weitergeht. Schlägt das fehl, bleibt die App offen und bietet Wiederholen oder eine Notfall-Sicherung an.
+- `Strg + S` speichert sofort. Der Punkt am ☰-Knopf zeigt den Stand: grün = gespeichert, orange = Änderungen warten, gelb = speichert gerade, rot = Fehler.
+
+### Export
+- **PDF** (`Strg + E`) nach `~/Documents/<Titel>.pdf`: Striche und Formen als Vektoren, Textfelder als echter, durchsuchbarer Text, importierte PDF-Seiten als Vektor-Unterlage, Seitentitel als Lesezeichen.
+- **Einzelne Seite** als PNG (mit oder ohne Hintergrund) oder SVG über das ☰-Menü.
+
+### Eingabegeräte
+- Stifte über das Tablet-Protokoll von Wayland bzw. X11 (Druck, Stiftrückseite, Seitentaste).
+- Solange der Stift aufliegt oder in der Nähe ist, werden Berührungen mit der Hand ignoriert.
+- Finger: standardmäßig scrollen und zoomen; Zeichnen mit dem Finger lässt sich im ☰-Menü einschalten.
+
+### Updates
+- Die App prüft auf neue Versionen auf Gitea und installiert sie auf Wunsch. Installiert wird nur, wenn die Minisign-Signatur und die SHA-256-Prüfsumme stimmen (Details unten).
+
+---
+
+## Installation
+
+Pakete gibt es unter [Releases](https://gitea.pansi.eu/harald/ink-notes/releases) als `.deb` und `.AppImage` (x86_64). `<version>` steht für die Versionsnummer, z. B. `0.11.0`.
 
 ```bash
-# Baut .deb, .AppImage und berechnet SHA256SUMS.txt in target/
-./scripts/build-release.sh
+# Debian-Paket (Zorin OS 18 / Ubuntu 24.04)
+sudo apt install ./ink-notes_<version>_amd64.deb
+
+# oder AppImage
+chmod +x ink-notes_<version>_x86_64.AppImage
+./ink-notes_<version>_x86_64.AppImage
 ```
 
-Ergebnis in `target/`:
-- `ink-notes_0.1.0_amd64.deb`
-- `ink-notes_0.1.0_x86_64.AppImage`
-- `SHA256SUMS.txt`
-- `SHA256SUMS.txt.minisig` (nur mit gesetztem `MINISIGN_SECRET_KEY`, siehe unten)
+Hinweise:
+- Benötigt `glibc >= 2.39` (Ubuntu 24.04, Zorin OS 18) und einen Grafiktreiber mit Vulkan oder OpenGL.
+- Meldet das AppImage einen Fehler zu `libfuse.so.2`, entweder `sudo apt install libfuse2t64` installieren oder mit `--appimage-extract-and-run` starten.
+
+---
+
+## Tastenkürzel
+
+| Aktion | Taste / Geste |
+| :--- | :--- |
+| Zeichnen | Stiftspitze, linke Maustaste (Finger, wenn eingeschaltet) |
+| Radieren | `E` umschalten, rechte Maustaste, Stiftrückseite oder Seitentaste |
+| Stift in Schwarz / Blau / Rot | `B` / `U` / `R` |
+| Formen-Werkzeug | `S` oder `F` |
+| Auswahlwerkzeug | `V` |
+| Text-Werkzeug | `T`, dann ins Blatt klicken; `Esc` beendet die Eingabe |
+| Lineal ein/aus | `L` |
+| Hintergrund wechseln | `G` |
+| Auswahl um 90° drehen | `R` (bei Auswahl) |
+| Kopieren / Einfügen | `Strg + C` / `Strg + V` |
+| Auswahl löschen | `Entf` oder `Rücktaste` |
+| Rückgängig / Wiederholen | `Strg + Z` / `Strg + Y` oder `Strg + Umschalt + Z` |
+| Bild einfügen | `Strg + I` |
+| Scrollen | Mausrad (`Umschalt` = waagerecht), ein Finger |
+| Zoomen | `Strg + Mausrad`, zwei Finger, `Strg + +` / `Strg + -` |
+| Zoom zurücksetzen | `Strg + 0` |
+| Verschieben | mittlere Maustaste oder `Leertaste + Ziehen` |
+| Nächste / vorherige Seite | `Bild ab` oder `N` / `Bild auf` |
+| Erste / letzte Seite | `Pos 1` / `Ende` |
+| Jetzt speichern | `Strg + S` |
+| PDF exportieren | `Strg + E` |
+| Menüs schließen, Auswahl aufheben | `Esc` |
+| Beenden (speichert vorher) | `Strg + Q` oder Fenster schließen |
+
+---
+
+## Entwicklung
+
+### Voraussetzungen
+- Rust 1.92 oder neuer (`rustup update stable`)
+- Vulkan- oder OpenGL-Treiber (z. B. `mesa-vulkan-drivers`)
+- X11-/Wayland-Bibliotheken: `libx11-dev`, `libxcursor-dev`, `libxrandr-dev`, `libxi-dev`, `libxkbcommon-dev`
+
+### Bauen, starten, testen
+
+```bash
+git clone https://gitea.pansi.eu/harald/ink-notes.git
+cd ink-notes
+cargo run --release          # oder ./run.sh
+cargo test                   # Unit- und Integrationstests
+```
+
+Die CI prüft zusätzlich `cargo fmt --check` und `cargo clippy --all-targets -- -D warnings`.
+
+### Projektstruktur
+
+```text
+src/
+├── main.rs         # Event-Loop (winit), Eingaben von Maus, Touch und Stift, Ablaufsteuerung
+├── lib.rs          # Bibliotheks-Exporte (für Tests)
+├── canvas.rs       # wgpu-Rendering: Papier, Muster, Bilder, Tinte, Nachbarseiten
+├── shader.wgsl     # Vertex- und Fragment-Shader
+├── viewport.rs     # Kamera (Zoom, Verschieben), Seitenstapel der durchgehenden Ansicht
+├── filter.rs       # 1€-Filter gegen Zittern
+├── spline.rs       # Catmull-Rom-Splines, Ecken-Erhaltung, Dreiecksstreifen
+├── geometry.rs     # Formerkennung (Douglas-Peucker, Kreis-Fit, …)
+├── selection.rs    # Auswahl, Griffe, Verschieben/Drehen/Skalieren
+├── ruler.rs        # Virtuelles Lineal
+├── text.rs         # Textfelder: Satz, Zeilenumbruch, Rasterung
+├── background.rs   # Papierfarben, Musterfarben, Karo/Linien/Punkte
+├── image_layer.rs  # Texturen für Bilder, PDF-Seiten und Text
+├── assets.rs       # Bilder und PDFs im Notizbuchordner
+├── pdf_doc.rs      # PDF lesen und rendern (hayro)
+├── pdf_merge.rs    # Importierte PDF-Seiten beim Export unterlegen
+├── document.rs     # Datenmodell: Notizbuch, Seiten, Striche, Seitengrößen
+├── history.rs      # Rückgängig/Wiederholen
+├── storage.rs      # Laden/Speichern (atomar), Notizbücher, Papierkorb
+├── autosave.rs     # Speichern im Hintergrund
+├── export.rs       # PDF-Export (printpdf)
+├── page_export.rs  # Seite als PNG/SVG, Auswahl als Bild
+├── file_picker.rs  # Eingebaute Dateiauswahl
+├── settings.rs     # Einstellungen (~/.config/ink-notes/ui.json)
+├── platform.rs     # Wayland/X11-Erkennung
+├── updater.rs      # Updates von Gitea (Signatur- und Prüfsummenprüfung)
+└── ui.rs           # Oberfläche (egui): Werkzeugleiste, Menüs, Dialoge
+```
+
+Mehr dazu in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md), das Speicherformat steht in [`docs/FILE_FORMAT.md`](docs/FILE_FORMAT.md).
+
+---
+
+## Releases bauen und veröffentlichen
+
+```bash
+./scripts/build-release.sh          # .deb, .AppImage und SHA256SUMS.txt in target/
+```
+
+Veröffentlicht wird über Gitea Actions ([`.gitea/workflows/release.yaml`](.gitea/workflows/release.yaml)), sobald ein Tag `vX.Y.Z` gepusht wird: Tests, Pakete bauen, signieren, Release anlegen. Manuell geht es mit `GITEA_TOKEN=… ./scripts/publish-gitea-release.sh`.
 
 ### Release-Signatur einrichten (einmalig)
 
-In-App-Updates werden nur mit gültiger Minisign-Signatur installiert. Signiert wird mit [rsign2](https://crates.io/crates/rsign2), einer Minisign-kompatiblen Implementierung (`cargo install rsign2 --locked`). Einmalig ein Schlüsselpaar erzeugen (ohne Passwort, da es nur als CI-Secret verwendet wird):
+Updates werden in der App nur mit gültiger Minisign-Signatur installiert. Signiert wird mit [rsign2](https://crates.io/crates/rsign2) (`cargo install rsign2 --locked`). Schlüsselpaar ohne Passwort erzeugen (es wird nur als CI-Secret verwendet):
 
 ```bash
 rsign generate -W -p ink-notes.pub -s ink-notes.key
 ```
 
-> **Wichtig:** Schlüssel und Signierwerkzeug müssen zusammenpassen. `rsign generate -W` verschlüsselt den Schlüssel mit einem leeren Passwort; das `minisign`-CLI (z. B. Ubuntu-Paket 0.11) kann ihn ohne Terminal nicht laden. `build-release.sh` und die CI signieren deshalb mit `rsign`.
+1. Die zweite Zeile von `ink-notes.pub` (beginnt mit `RW`) in `src/updater.rs` als `UPDATE_SIGNING_PUBLIC_KEY` eintragen.
+2. Den Inhalt von `ink-notes.key` in Gitea unter *Repository → Einstellungen → Actions → Secrets* als `MINISIGN_SECRET_KEY` hinterlegen.
+3. `ink-notes.key` offline aufbewahren. Geht er verloren, können bestehende Installationen keine Updates mehr prüfen.
 
-1. Die zweite Zeile aus `ink-notes.pub` (beginnt mit `RW`) in `src/updater.rs` als `UPDATE_SIGNING_PUBLIC_KEY` eintragen und committen.
-2. Den kompletten Inhalt von `ink-notes.key` in Gitea unter *Repository → Einstellungen → Actions → Secrets* als `MINISIGN_SECRET_KEY` anlegen.
-3. `ink-notes.key` sicher offline aufbewahren und vom Rechner löschen. Geht der Schlüssel verloren, können bestehende Installationen keine Updates mehr prüfen.
+`rsign generate -W` verschlüsselt den Schlüssel mit leerem Passwort; das `minisign`-Programm (z. B. Ubuntu-Paket 0.11) kann ihn ohne Terminal nicht lesen, deshalb signieren Skript und CI mit `rsign`. In der CI ist die Signatur Pflicht (`INK_NOTES_REQUIRE_SIGNATURE=1`), und das Skript prüft, dass der geheime Schlüssel zum eingebauten öffentlichen passt.
 
-Lokal signiert `build-release.sh` nur, wenn `MINISIGN_SECRET_KEY` gesetzt und `rsign` installiert ist. In der CI ist die Signatur Pflicht (`INK_NOTES_REQUIRE_SIGNATURE=1`), und das Skript prüft, dass der geheime Schlüssel zum eingebauten öffentlichen Schlüssel passt.
+### CI-Runner (act_runner)
 
-### 2. Installation auf Zorin OS 18 / Ubuntu 24.04
+Der Workflow läuft auf dem Label `ubuntu-latest`. Im `config.yaml` des Runners muss es zugeordnet sein, z. B.:
 
-```bash
-# Natives Debian-Paket installieren
-sudo dpkg -i target/ink-notes_0.1.0_amd64.deb
-
-# Oder portables AppImage starten
-chmod +x target/ink-notes_0.1.0_x86_64.AppImage
-./target/ink-notes_0.1.0_x86_64.AppImage
-```
-
-#### Hinweise zu AppImage, glibc & FUSE:
-- **glibc-Mindestversion:** `ink-notes` benötigt `glibc >= 2.39` (Standard unter Ubuntu 24.04 LTS und Zorin OS 18).
-- **Host-Grafikstack:** Das AppImage bündelt die Anwendungslogik, nutzt für maximale Performance und Hardwarebeschleunigung jedoch den Treiber- und Grafikstack des Host-Systems (Vulkan ICD-Treiber, Wayland bzw. X11).
-- **FUSE 2 / FUSE 3 Kompatibilität:** Ubuntu 24.04-basierte Distributionen nutzen standardmäßig FUSE 3 (`fuse3`). Sollte das AppImage beim Start einen Fehler bezüglich `libfuse.so.2` ausgeben, kann entweder das Kompatibilitätspaket installiert werden:
-  ```bash
-  sudo apt install libfuse2t64
-  ```
-  oder das AppImage direkt ohne FUSE entpackt und ausgeführt werden:
-  ```bash
-  ./ink-notes_0.1.0_x86_64.AppImage --appimage-extract-and-run
-  ```
-
-### 3. Release auf Gitea veröffentlichen
-
-Das Skript arbeitet vollkommen idempotent und aktualisiert bei wiederholter Ausführung Release-Notizen und Assets:
-
-```bash
-export GITEA_TOKEN="<DEIN_GITEA_TOKEN>"
-./scripts/publish-gitea-release.sh
-```
-
----
-
-## 🛡️ Updater-Sicherheit
-
-Der In-App-Updater (`src/updater.rs`) folgt strengen Sicherheitsrichtlinien:
-
-1. **Minisign-Signatur (Pflicht):**
-   - Jedes Release enthält `SHA256SUMS.txt.minisig`, eine Minisign-Signatur der Prüfsummendatei.
-   - Der Updater lädt `SHA256SUMS.txt` und die Signatur **vor** dem Paket und prüft sie gegen den in die App eingebauten öffentlichen Schlüssel (`UPDATE_SIGNING_PUBLIC_KEY` in `src/updater.rs`, Crate `minisign-verify`).
-   - Fehlt die Signatur, ist sie ungültig oder ist kein Schlüssel eingebaut, wird das Update abgelehnt. Ein kompromittierter Release-Server kann so keine manipulierten Pakete ausliefern.
-2. **SHA-256-Integritätsprüfung:**
-   - Der SHA-256-Hash des heruntergeladenen Pakets wird mit dem Eintrag in der signierten `SHA256SUMS.txt` verglichen (`sha2`).
-   - Weicht die Prüfsumme ab oder fehlt ein Eintrag, wird die Datei sofort gelöscht und der Installationsvorgang mit Fehlermeldung abgebrochen.
-3. **Redirect-Schutz & HTTPS:**
-   - Jede Anfrage erzwingt HTTPS – auch Download-Links aus der Release-API und jedes Weiterleitungsziel.
-   - Bei HTTP-Redirects werden sensible Autorisierungs-Header (`Authorization: token ...`) verworfen, sobald die Weiterleitung auf eine andere Origin oder ein externes CDN verweist.
-4. **Isolierter Download-Pfad & Path-Traversal-Schutz:**
-   - Downloads werden in einem isolierten Benutzerverzeichnis abgelegt (`$XDG_CACHE_HOME/ink-notes/updates` bzw. `~/.cache/ink-notes/updates`, Berechtigung `0700`).
-   - Asset-Namen werden sanitisiert: Pfadtrenner (`/`, `\`), Pfadüberquerungen (`..`), Steuerzeichen und leere Dateinamen werden strikt abgewiesen.
-5. **Atomarer AppImage-Tausch:**
-   - Kein direktes Überschreiben laufender Programmdateien per `fs::copy` (verhindert den Linux-Kernel-Fehler *"Text file busy"*).
-   - Die neue Datei wird temporär im selben Verzeichnis angelegt (`<name>.new.<pid>`), mit Ausführungsrechten (`0755`) versehen, das bestehende AppImage als `<name>.bak` gesichert (dessen Fehler nicht ignoriert werden) und anschließend per atomarem `fs::rename` ausgetauscht.
-
----
-
-## ⚙️ CI-Runner einrichten (Gitea Actions / act_runner)
-
-Der Veröffentlichungs-Workflow liegt unter [`.gitea/workflows/release.yaml`](.gitea/workflows/release.yaml).
-
-### Runner-Label konfigurieren
-Der Workflow nutzt standardmäßig das Runner-Label:
-```yaml
-runs-on: ubuntu-latest
-```
-
-In der Konfigurationsdatei Ihres Gitea `act_runner` (`config.yaml`) muss dieses Label auf ein passendes Container-Image oder den Host gemappt sein:
 ```yaml
 runner:
   labels:
     - "ubuntu-latest:docker://catthehacker/ubuntu:act-latest"
-    # oder für native Host-Ausführung:
-    # - "ubuntu-latest:host"
 ```
 
-### Diagnose & Fehlerbehebung
-Bleibt ein Release-Job auf **"Waiting to run"** hängen:
-1. **Runner online?** Prüfen Sie in Gitea unter *Einstellungen -> Aktionen -> Runner*, ob der `act_runner` aktiv und mit einem grünen Punkt als *Online* markiert ist.
-2. **Label-Übereinstimmung:** Stimmen die im Runner registrierten Labels exakt mit dem `runs-on`-Feld in `.gitea/workflows/release.yaml` überein?
-3. **Rechte:** Der Workflow prüft `if [ "$(id -u)" -ne 0 ]` und setzt `sudo` nur ein, wenn der Runner nicht als `root` läuft. Das verhindert Fehler sowohl in unprivilegierten Host-Umgebungen als auch in Root-Containern.
+Bleibt ein Job auf „Waiting to run“ stehen: Ist der Runner online (*Einstellungen → Aktionen → Runner*) und stimmt das Label mit `runs-on` überein? `sudo` verwendet der Workflow nur, wenn der Runner nicht als `root` läuft.
 
 ---
 
-## 🚀 Schnellstart (Entwicklung)
+## Sicherheit der Updates
 
-### Voraussetzungen
-- **Rust & Cargo:** Version 1.75 oder neuer (`rustup update stable`)
-- **System-Bibliotheken (Linux):**
-  - Vulkan-Treiber (z. B. `mesa-vulkan-drivers` oder proprietäre Treiber)
-  - X11 / Wayland Bibliotheken (`libx11-dev`, `libxcursor-dev`, `libxrandr-dev`, `libxi-dev`, `libxkbcommon-dev`)
-
-### Bauen & Ausführen
-
-```bash
-# Repository klonen
-git clone https://gitea.pansi.eu/harald/ink-notes.git
-cd ink-notes
-
-# Kompilieren und starten via Starter-Skript
-./run.sh
-```
-
-Alternativ direkt mit Cargo:
-
-```bash
-cargo run --release
-```
+1. **Signatur:** Jedes Release enthält `SHA256SUMS.txt.minisig`. Die App lädt `SHA256SUMS.txt` und die Signatur vor dem Paket und prüft sie gegen den eingebauten öffentlichen Schlüssel (`minisign-verify`). Ohne gültige Signatur wird nicht installiert.
+2. **Prüfsumme:** Der SHA-256-Wert des heruntergeladenen Pakets muss zum Eintrag in der signierten Liste passen, sonst wird die Datei gelöscht.
+3. **Nur HTTPS:** Auch Download-Links und Weiterleitungen müssen HTTPS sein. Bei Weiterleitungen auf einen anderen Server wird der `Authorization`-Header nicht mitgeschickt.
+4. **Eigener Download-Ordner:** `~/.cache/ink-notes/updates` (Rechte `0700`); Dateinamen mit Pfadtrennern, `..` oder Steuerzeichen werden abgelehnt.
+5. **AppImage-Austausch:** Die neue Datei wird neben der alten angelegt, die alte als `.bak` gesichert und dann per `rename` ersetzt – die laufende Datei wird nie überschrieben.
 
 ---
 
-## ⌨️ Tastatur- & Maus-Shortcuts
+## Lizenz
 
-| Aktion | Tastenkürzel / Mausgeste |
-| :--- | :--- |
-| **Zeichnen** | Linke Maustaste / Stiftspitze |
-| **Canvas verschieben (Pan)** | Mittlere Maustaste **oder** `Leertaste + Drag` |
-| **Scrollen (durchgehende Ansicht)** | Mausrad (`Umschalt` = waagerecht) / ein Finger |
-| **Zoom zentriert auf Cursor** | `Strg + Mausrad` / Touchpad-Pinch (Einzelseiten-Ansicht: Mausrad) |
-| **Zoom zurücksetzen (100 %)** | `Strg + 0` |
-| **Zoom In / Out** | `Strg + +` / `Strg + -` |
-| **Auswahlwerkzeug (Lasso)** | `V` |
-| **Text-Werkzeug** | `T`, dann ins Blatt klicken; `Esc` beendet die Eingabe |
-| **Auswahl um 90° drehen** | `R` |
-| **Kopieren & Einfügen** | `Strg + C` / `Strg + V` |
-| **Auswahl löschen** | `Entf` oder `Backspace` |
-| **Undo / Redo** | `Strg + Z` / `Strg + Y` (oder `Strg + Shift + Z`) |
-| **Nächste Seite** | `Bild ab (PageDown)` oder `N` |
-| **Vorherige Seite** | `Bild auf (PageUp)` |
-| **Erste / Letzte Seite** | `Pos 1 (Home)` / `Ende (End)` |
-| **Jetzt speichern (Disk Flush)** | `Strg + S` |
-| **Vektor-PDF-Export** | `Strg + E` |
-| **Dialoge / Menüs schließen** | `Esc` |
-| **Beenden (mit Disk-Flush)** | `Strg + Q` (oder Fenster schließen) |
-
----
-
-## 🏗️ Projekt- und Modul-Architektur
-
-```text
-src/
-├── main.rs         # Event-Loop (winit), Input-Routing, App-Orchestrierung
-├── lib.rs          # Bibliotheks-Exporte für Tests und Komponenten
-├── canvas.rs       # wgpu Render-Pipeline, GPU-Buffer, Zeichenzustand
-├── viewport.rs     # Kamera-Pan, Zoom, 2D-Transformationsmatrizen
-├── shader.wgsl     # WGSL Vertex- & Fragment-Shader für Inking-Meshes
-├── filter.rs       # One-Euro-Filter gegen Eingabe-Jitter
-├── spline.rs       # Catmull-Rom, Corner Preservation & Dreiecksstreifen
-├── geometry.rs     # RDP-Algorithmus, Least-Squares Circle Fit, Shape Recognition
-├── selection.rs    # Lasso-Auswahl, Bounding-Box, Griffe, Rotation & Skalierung
-├── background.rs   # Tessellierung für Kariert, Liniert, Punktraster
-├── document.rs     # Notizbuch-Datenmodell, Seiten, DIN-A4-Koordinatensystem
-├── history.rs      # Undo/Redo-Transaktionsstapel (Add, Erase, Transform)
-├── storage.rs      # Atomares Laden/Speichern von Manifest & Seiten, Multi-Notebooks
-├── autosave.rs     # Debounced Hintergrund-Autosave mit MPSC-Kanal
-├── updater.rs      # In-App Gitea Updater (SemVer, HTTPS, SHA256-Integrität, Self-Update)
-├── export.rs       # Skalierbarer Vektor-PDF-Export via printpdf
-└── ui.rs           # Floating Glassmorphism-Toolbar, Dokumenten- & Update-Manager (egui)
-```
-
-Ausführliche Details zur Architektur und mathematischen Modellen findest du unter [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
-
----
-
-## 🧪 Tests ausführen
-
-Die gesamte Inking-Pipeline, Geometrieerkennung, Speicherlogik und der Updater sind mit umfassenden Unit-Tests abgesichert:
-
-```bash
-cargo test
-```
-
-Alle Unit-Tests prüfen Berechnungen, Hit-Testing, Undo/Redo, Persistenz, Updater-Sicherheit und Versionsvergleiche konsistent ab.
-
----
-
-## 📄 Lizenz
-
-Dieses Projekt ist unter der [MIT-Lizenz](LICENSE) lizenziert (Copyright © 2026 Harald Pansi).
+[MIT](LICENSE), Copyright © 2026 Harald Pansi.

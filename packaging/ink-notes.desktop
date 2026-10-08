@@ -2,13 +2,13 @@
 Version=1.0
 Name=ink-notes
 GenericName=Notizbuch- & Inking-App
-Comment=Latenzoptimierte Vektor-Notizen mit Stylus, Stift & Geometrie-Erkennung
+Comment=Handschriftliche Notizen mit Stift, Touch und Maus; PDFs beschriften
 Exec=ink-notes %F
 Icon=eu.pansi.ink-notes
 Terminal=false
 Type=Application
 Categories=Office;Graphics;Utility;
-Keywords=Note;Notiz;Pen;Stift;Ink;Inking;Stylus;Drawing;Zeichnen;PDF;Vector;
+Keywords=Note;Notiz;Pen;Stift;Ink;Inking;Stylus;Drawing;Zeichnen;PDF;Vector;Text;Annotation;
 StartupWMClass=ink-notes
 MimeType=application/x-inknotes;
 Actions=NewWindow;

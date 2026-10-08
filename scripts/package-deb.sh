@@ -104,9 +104,7 @@ cat <<EOF > "${CHANGELOG_TMP}"
 ink-notes (${VERSION}-1) stable; urgency=medium
 
   * Release v${VERSION}.
-  * Low-latency vector inking with two-stage pipeline.
-  * Shape recognition and infinite canvas with zoom/pan.
-  * Multi-notebook management and PDF export.
+  * See the release notes on https://gitea.pansi.eu/harald/ink-notes/releases
 
  -- Harald <harald@pansi.eu>  $(date -R)
 EOF
@@ -130,10 +128,10 @@ Depends: libc6 (>= 2.38), libgcc-s1, libvulkan1, mesa-vulkan-drivers | vulkan-ic
 Section: utils
 Priority: optional
 Homepage: https://gitea.pansi.eu/harald/ink-notes
-Description: Latenzoptimierte Vektor-Notizbuch- und Inking-App für Linux
- ink-notes kombiniert minimale Stylus-Latenz mit GPU-Hardwarebeschleunigung (wgpu),
- stufenlosem Viewport, Geometrie- und Formerkennung, Objekt-Transformationen,
- Multi-Dokumenten-Verwaltung und Vektor-PDF-Export.
+Description: Notizbuch-App für Stift, Touch und Maus
+ ink-notes speichert Handschrift als Vektoren, erkennt auf Wunsch Formen und
+ kann PDFs zum Beschriften importieren sowie Bilder und Textfelder einfügen.
+ Mehrere Notizbücher, automatisches Speichern und Export als PDF, PNG oder SVG.
 EOF
 chmod 644 "${STAGING_DIR}/DEBIAN/control"
 

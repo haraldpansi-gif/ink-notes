@@ -4,20 +4,22 @@
   <metadata_license>CC0-1.0</metadata_license>
   <project_license>MIT</project_license>
   <name>ink-notes</name>
-  <summary>Latenzoptimierte Vektor-Notizbuch- und Inking-App für Linux</summary>
+  <summary>Notizbuch-App für Stift, Touch und Maus</summary>
   <description>
     <p>
-      ink-notes ist eine hardwarebeschleunigte, hochperformante Notizbuch- und Inking-Anwendung für Linux,
-      geschrieben in Rust mit wgpu. Sie bietet minimale Eingabelatenz mit Stylus, Touchpad oder Maus.
+      ink-notes ist eine Notizbuch-App für Linux, geschrieben in Rust mit wgpu. Handschrift wird als
+      Vektoren gespeichert; geschrieben wird mit Stift, Finger, Touchpad oder Maus.
     </p>
-    <p>Hauptmerkmale:</p>
+    <p>Funktionen:</p>
     <ul>
-      <li>Zwei-Stufen-Inking-Modell: Echtzeit-Glättung mit 1€-Filter und akausale Ecken-Erhaltung</li>
-      <li>Automatische Geometrie- und Formerkennung (Geraden, Rechtecke, Kreise, Koordinatensysteme, Polygone)</li>
-      <li>Stufenloser Viewport mit cursor-zentriertem Zoom (25% bis 500%) und Panning</li>
-      <li>Objektauswahl, Lasso, Skalieren, stufenloses Drehen und Multicolor-Umfärbung</li>
-      <li>Multi-Dokumenten- und Notizbuch-Verwaltung mit atomarem Autosave</li>
-      <li>Vektor-PDF-Export für Druck und Weitergabe</li>
+      <li>Stift und Textmarker mit Druckstärke, Glättung beim Schreiben und Ecken-Erhaltung</li>
+      <li>Radierer für ganze Striche, Teilstriche oder nur Textmarker; virtuelles Lineal</li>
+      <li>Formerkennung (Linien, Pfeile, Kreise, Ellipsen, Rechtecke, Dreiecke, Rauten, Koordinatensysteme)</li>
+      <li>Auswählen, Verschieben, Drehen, Skalieren und Umfärben; Rückgängig für alle Änderungen</li>
+      <li>Textfelder, Bilder und PDF-Import zum Beschriften (Querformat-Folien bekommen Querformat-Seiten)</li>
+      <li>Durchgehendes Scrollen, Zoom von 25 bis 1000 Prozent, Papier- und Musterfarben</li>
+      <li>Mehrere Notizbücher, automatisches Speichern im Hintergrund</li>
+      <li>Export als PDF (mit durchsuchbarem Text), PNG oder SVG</li>
     </ul>
   </description>
   <launchable type="desktop-id">eu.pansi.ink-notes.desktop</launchable>

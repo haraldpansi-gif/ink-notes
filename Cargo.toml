@@ -2,7 +2,7 @@
 name = "ink-notes"
 version = "0.11.0"
 edition = "2021"
-description = "Latenzoptimierte Vektor-Notizbuch- und Inking-Anwendung für Linux"
+description = "Notizbuch-App für Stift, Touch und Maus unter Linux"
 repository = "https://gitea.pansi.eu/harald/ink-notes"
 license = "MIT"
 readme = "README.md"

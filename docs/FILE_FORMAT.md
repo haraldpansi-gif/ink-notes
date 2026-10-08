@@ -1,137 +1,173 @@
-# Dateiformat & Speicherstruktur von ink-notes
+# Dateiformat von ink-notes
 
-Dieses Dokument beschreibt die Speicherstruktur, die JSON-Dateiformate und die Versionshistorie, mit denen `ink-notes` Dokumente auf dem Dateisystem ablegt.
+Dieses Dokument beschreibt, wo und wie ink-notes Notizbücher speichert, und die Versionen des Dateiformats. Aktuell ist **Version 8**.
 
 ---
 
-## 1. Verzeichnisstruktur
-
-Notizbücher werden standardmäßig unter dem XDG-Datenpfad gespeichert:
+## 1. Ordner
 
 ```text
-~/.local/share/ink-notes/
-└── notebooks/
-    ├── <notebook_id_1>/
-    │   ├── manifest.json
-    │   ├── manifest.json.v0.bak (optional, Migrations-Backup)
-    │   ├── page_1.json
-    │   ├── page_1.json.corrupt-1775460000 (optional, Quarantäne bei Parsefehlern)
-    │   ├── page_2.json
-    │   └── ...
-    └── <notebook_id_2>/
-        ├── manifest.json
-        └── page_1.json
+~/.local/share/ink-notes/              ($XDG_DATA_HOME/ink-notes)
+├── notebooks/
+│   ├── <notizbuch-id>/
+│   │   ├── manifest.json              Metadaten und Seitenreihenfolge
+│   │   ├── manifest.json.bak          Kopie des vorherigen Manifests
+│   │   ├── page_1.json                eine Datei je Seite
+│   │   ├── page_2.json
+│   │   ├── page_7.json.corrupt-<ts>   beiseitegelegte beschädigte Seite (falls vorgekommen)
+│   │   ├── assets/                    eingefügte Bilder und importierte PDFs
+│   │   │   ├── <sha256>.png
+│   │   │   └── <sha256>.pdf
+│   │   └── .lock                      Sperrdatei, solange das Notizbuch geöffnet ist
+│   └── .trash/                        gelöschte Notizbücher (<id>_<zeitstempel>)
+└── recovery/                          Notfall-Sicherungen ungespeicherter Seiten
+
+~/.config/ink-notes/ui.json            ($XDG_CONFIG_HOME) Einstellungen der Oberfläche
 ```
+
+- **Notizbuch-IDs** werden aus dem Titel und dem Zeitpunkt gebildet (z. B. `mathematik_1775460000`); das erste Notizbuch heißt `default`.
+- **Assets** sind nach dem SHA-256-Hash ihres Inhalts benannt; dasselbe Bild wird nur einmal gespeichert. Bilder werden als PNG oder (unverändert) JPEG abgelegt, PDFs unverändert.
+- Alle Dateien werden mit Rechten `0600`, Ordner mit `0700` angelegt.
 
 ---
 
-## 2. Dokumenten-Manifest (`manifest.json`)
-
-Das Manifest enthält Metadaten über das gesamte Dokument sowie die Reihenfolge und IDs aller Seiten:
+## 2. Manifest (`manifest.json`)
 
 ```json
 {
-  "format_version": 2,
-  "id": "notebook-a1b2c3d4",
-  "title": "Mathematik Vorlesung",
+  "format_version": 8,
+  "id": "vorlesung_1775460000",
+  "title": "Vorlesung",
+  "created_at": 1775460000,
+  "modified_at": 1775463600,
+  "current_page_index": 0,
   "pages": [
-    {
-      "id": 1,
-      "background": "Grid5mm"
-    },
-    {
-      "id": 2,
-      "background": "DotGrid"
-    }
+    { "id": 1, "background": "Blank", "title": "Einführung", "size": [2970.0, 1671.0] },
+    { "id": 2, "background": "Grid5mm" }
   ],
   "page_ids": [1, 2],
-  "current_page_index": 0,
-  "next_page_id": 3,
   "next_stroke_id": 42,
-  "created_at": 1775460000,
-  "modified_at": 1775463600
+  "next_page_id": 3
 }
 ```
 
-### Felder:
-- `format_version`: Format-Versionsnummer (aktuell `2`, bei unversionierten Legacy-Dateien implizit `0`).
-- `id`: Eindeutige ID des Notizbuchs (z. B. UUID oder `"default"`).
-- `title`: Vom Nutzer vergebener Anzeigename des Notizbuchs.
-- `pages`: Geordnete Liste von Seitenmetadaten (`id`, optional `background`).
-- `page_ids`: Abwärtskompatible Liste der Seiten-IDs.
-- `current_page_index`: Index der zuletzt aktiven Seite für Session-Restore.
-- `next_page_id`: Inkrementierender ID-Zähler für neue Seiten.
-- `next_stroke_id`: Globaler ID-Zähler für neue Striche.
-- `created_at` / `modified_at`: UNIX-Zeitstempel in Sekunden.
+| Feld | Bedeutung |
+| :--- | :--- |
+| `format_version` | Formatversion (siehe Abschnitt 5) |
+| `id`, `title` | ID (= Ordnername) und Anzeigename |
+| `created_at`, `modified_at` | UNIX-Zeit in Sekunden |
+| `current_page_index` | zuletzt geöffnete Seite |
+| `pages` | Seiten in ihrer Reihenfolge: `id`, `background`, optional `title` und `size` (siehe unten) – damit Seitenübersicht und Ansicht sie kennen, ohne jede Seite zu laden |
+| `page_ids` | dieselbe Reihenfolge als reine ID-Liste (für ältere Versionen) |
+| `next_stroke_id`, `next_page_id` | nächste freie IDs |
 
 ---
 
-## 3. Seitendatei (`page_<id>.json`)
+## 3. Seite (`page_<id>.json`)
 
-Jede Seite wird in einer eigenen Datei gespeichert, um Lazy-Loading und schnelles inkrementelles Speichern zu ermöglichen.
-Die Speicherung erfolgt ab Version 2 als kompaktes JSON (`serde_json::to_vec`), wodurch gegenüber Pretty-Printed JSON über 50 % Speicherplatz eingespart wird.
+Jede Seite liegt in einer eigenen Datei (kompaktes JSON, hier zur Lesbarkeit umbrochen):
 
 ```json
-{"format_version":2,"id":1,"background":"Grid5mm","strokes":[{"id":1,"color":[0.12,0.12,0.14,1.0],"samples":[{"x":350.2,"y":420.5,"p":0.65,"t":12.345},{"x":352.1,"y":425.8,"p":0.70,"t":12.355}],"shape":null,"tool":"pen","width":5.0,"finalized":true},{"id":2,"color":[0.15,0.35,0.85,1.0],"samples":[],"shape":{"Rectangle":{"top_left":{"x":500.0,"y":600.0},"width":300.0,"height":200.0}},"tool":"shape","width":20.0,"finalized":true}]}
+{
+  "format_version": 8,
+  "id": 1,
+  "background": "Blank",
+  "title": "Einführung",
+  "size": [2970.0, 1671.0],
+  "pdf_background": { "asset": "<sha256>.pdf", "page": 0, "width_pt": 960.0, "height_pt": 540.0 },
+  "strokes": [ … ]
+}
 ```
 
-### Felder:
-- `format_version`: Format-Versionsnummer (`2`).
-- `id`: Eindeutige ID der Seite.
-- `background`: Papiermuster (`Blank`, `Grid5mm`, `Lined`, `DotGrid`).
-- `strokes`: Liste der auf der Seite gezeichneten Striche und Vektorformen.
-  - `id`: Eindeutige ID des Strichs.
-  - `color`: RGBA-Farbwerte im Bereich `[0.0, 1.0]`.
-  - `samples`: Rohabtastpunkte entlang des Pfads (`x`, `y` in DIN-A4-Einheiten, `p` Druckwert in `[0.0, 1.0]`, `t` Zeitstempel in Sekunden).
-  - `shape`: Optionales Enum für geometrische Vektorformen:
-    - `Line { start, end }`
-    - `Rectangle { top_left, width, height }`
-    - `Circle { center, radius }`
-    - `Axes { origin, x_end, y_end, has_arrows }`
-    - `Triangle { p1, p2, p3 }`
-    - `Rhombus { center, width, height }`
-    - `Octahedron { center, radius }`
-  - `tool`: Zeichenwerkzeug (`"pen"`, `"highlighter"`, `"shape"`).
-  - `width`: Strichbreite in internen DIN-A4-Einheiten (10 Einheiten = 1 mm; z. B. `5.0` für 0.5 mm Stift, `60.0` für 6.0 mm Marker).
-  - `finalized`: Boolesches Flag für Striche, die das Zwei-Stufen-Inking (Eckenerkennung, Glättung, runde Endkappen) durchlaufen haben.
+| Feld | Bedeutung |
+| :--- | :--- |
+| `background` | Muster: `Blank`, `Grid5mm`, `Lined`, `DotGrid` |
+| `title` | Seitentitel (optional) |
+| `size` | Seitengröße `[breite, höhe]` in Seiteneinheiten (10 = 1 mm); fehlt bei DIN A4 hoch (`[2100, 2970]`) |
+| `pdf_background` | importierte PDF-Seite als Hintergrund (optional): Datei, Seitennummer ab 0, Größe in Punkt |
+| `strokes` | alle Objekte der Seite, von unten nach oben |
+
+### 3.1 Objekte (`strokes`)
+
+Jedes Objekt hat eine `id`, eine `color` (RGBA, linear, Werte 0–1) und `samples`: Punkte mit `x`, `y` (Seiteneinheiten), `p` (Druck 0–1) und `t` (Zeit in Sekunden). Die Dreiecke für die Anzeige werden beim Laden aus den Punkten berechnet und nicht gespeichert.
+
+**Tinte**
+
+```json
+{ "id": 7, "color": [0.12, 0.12, 0.14, 1.0],
+  "samples": [{ "x": 350.2, "y": 420.5, "p": 0.65, "t": 12.345 }, …],
+  "tool": "pen", "width": 5.0, "finalized": true }
+```
+
+- `tool`: `pen`, `highlighter` oder `shape`
+- `width`: Strichbreite in Seiteneinheiten (5.0 = 0,5 mm)
+- `finalized`: Der Strich wurde nach dem Absetzen nachbearbeitet (Glättung, Ecken, Endkappen)
+
+**Formen** haben zusätzlich `shape`, z. B.:
+
+```json
+"shape": { "Rectangle": { "corners": [[500, 600], [800, 600], [800, 800], [500, 800]] } }
+```
+
+Mögliche Formen: `Line { start, end }`, `Arrow { start, end, double }`, `Circle { center, radius }`, `Ellipse { center, radius_x, radius_y, rotation }`, `Rectangle { corners }`, `Triangle { corners }`, `Rhombus { corners }`, `Polygon { vertices }`, `CoordinateSystem { origin, x_axis_end, y_axis_end, with_arrows }`, `Octahedron { … }`. Punkte sind `[x, y]`.
+
+**Bilder** haben `image` (Dateiname in `assets/`); die vier `samples` sind die Ecken oben links, oben rechts, unten rechts, unten links:
+
+```json
+{ "id": 9, "color": [1, 1, 1, 1], "samples": [ …4 Ecken… ], "width": 0.0, "image": "<sha256>.png" }
+```
+
+**Textfelder** haben `text`; die vier `samples` sind wie bei Bildern die Ecken des Felds:
+
+```json
+"text": { "content": "Überschrift\nzweite Zeile", "size": 42.3, "font": "Sans", "wrap_width": 1500.0 }
+```
+
+- `size`: Schriftgröße (Em) in Seiteneinheiten (12 pt ≈ 42,3)
+- `font`: `Sans` (Ubuntu Light) oder `Mono` (Hack)
+- `wrap_width`: Umbruchbreite in Seiteneinheiten; die Ecken bilden das Feld dieser Breite (und der Höhe des gesetzten Texts) ab, Drehung und Skalierung stecken in den Ecken
 
 ---
 
-## 4. Datensicherheit & Migration
+## 4. Sicherheit beim Speichern
 
-### Atomares Schreiben & Verzeichnis-Sync
-1. Daten werden in `<ziel>.tmp.<pid>.<nanos>` serialisiert und per `fsync` auf das Speichermedium geschrieben (Dateirechte `0600` auf Unix).
-2. Mittels `std::fs::rename("<ziel>.tmp", "<ziel>")` wird die Zieldatei auf POSIX-Systemen atomar ersetzt.
-3. Nach dem Rename wird das übergeordnete Verzeichnis synchronisiert (`sync_all()`), um Persistenz bei Stromausfall zu garantieren. Verzeichnisse erhalten Berechtigung `0700`.
+### Atomares Schreiben
+1. Der Inhalt wird in `<datei>.tmp.<pid>.<nanosekunden>` geschrieben und mit `fsync` auf den Datenträger gebracht.
+2. `rename` ersetzt die alte Datei in einem Schritt.
+3. Danach wird auch der Ordner mit `fsync` gesichert.
 
-### Quarantäne bei Parsefehlern
-Wird eine Seitendatei beim Laden als fehlerhaft erkannt (z. B. unvollständiges oder korruptes JSON), wird sie nicht stillschweigend gelöscht oder überschrieben, sondern nach `page_<id>.json.corrupt-<unix_ts>` verschoben. Die Ersatzseite wird als schreibgeschützt markiert.
+Ein Absturz während des Speicherns hinterlässt deshalb entweder die alte oder die neue Datei, nie eine halbe.
 
-### Migrations-Backups & Rolling Backups
-Beim ersten Speichern einer Datei im Legacy-Format (Version 0) wird vor dem Überschreiben ein Backup `*.v0.bak` angelegt (z. B. `manifest.json.v0.bak`, `page_1.json.v0.bak`).
-Zusätzlich existiert ein Rolling-Backup `manifest.json.bak`, auf das bei beschädigtem Manifest automatisch zurückgegriffen wird.
+### Beschädigte Dateien
+- Lässt sich eine Seite nicht lesen, wird sie nach `page_<id>.json.corrupt-<zeitstempel>` verschoben (nicht gelöscht) und die Seite schreibgeschützt angezeigt.
+- Ist `manifest.json` beschädigt oder fehlt, wird `manifest.json.bak` verwendet.
 
----
+### Neuere Versionen
+Dateien mit einer höheren `format_version` als der unterstützten werden nicht geöffnet – so kann eine ältere App-Version keine Inhalte verlieren, die sie nicht kennt.
 
-## 5. Versionshistorie
-
-| Version | Status | Beschreibung |
-|---|---|---|
-| **0** | Legacy | Unversioniertes Format. `format_version` fehlt in JSON. Implizit als Version 0 interpretiert. |
-| **1** | Überholt | Einführung von `format_version: u32` in `manifest.json` und `page_<id>.json`. Seiten-Hintergrund im Manifest gecached (`pages: Vec<PageMeta>`). Strenges Versionsmatching (neuere Versionen werden abgelehnt). Automatische Migration mit `*.v0.bak`. |
-| **2** | **Aktuell** | Stroke-Treue: Ergänzung von `tool`, `width` und `finalized` in `StrokeData` für exakte Rekonstruktion aller Vertizes und Splines. Umstellung auf kompaktes JSON (`serde_json::to_vec`, ca. 54% Platzerparnis). |
+### Migration
+Beim ersten Speichern einer unversionierten Datei (Version 0) wird vorher eine Kopie `*.v0.bak` angelegt.
 
 ---
 
-## 6. Analyse & Bewertung: Binärformat (z. B. `postcard`)
+## 5. Versionen
 
-Eine Umstellung auf ein Binärformat wie `postcard` wurde evaluiert:
-- **Vorteile**:
-  - Weitere 20–30 % Reduktion der Dateigröße gegenüber kompaktem JSON.
-  - Minimal schnellere Serialisierung auf leistungsschwachen Systemen.
-- **Nachteile**:
-  - Verlust der Text-Transparenz (JSON lässt sich direkt inspizieren, mit `git`/Tools diffen und bei Korruption manuell reparieren).
-  - Snapshotting und JSON-Verarbeitung liegen im Benchmark bereits bei **0,02 ms (1k Samples)** bis **0,70 ms (50k Samples)** – also weit unter dem Zielwert von 1 ms.
-  - Kompaktes JSON spart bereits über 53 % Dateigröße ein.
-- **Entscheidung**:
-  Kompaktes JSON bietet aktuell das optimale Verhältnis aus Ausfallsicherheit, Benutzerfreundlichkeit, Performance und Portabilität. Ein Binärformat wie `postcard` bleibt als Option für spätere Riesen-Notizbücher (> 500 Seiten) denkbar, wird aktuell jedoch nicht eingeführt.
+| Version | App | Änderung |
+| :--- | :--- | :--- |
+| 0 | – | ohne `format_version` |
+| 1 | – | `format_version`, Hintergründe im Manifest |
+| 2 | – | `tool`, `width`, `finalized` an Strichen; kompaktes JSON |
+| 3 | 0.3.7 | Formen `Ellipse` und `Arrow` |
+| 4 | 0.5 | Bilder (`image`, Ordner `assets/`) |
+| 5 | 0.6.1 | importierte PDF-Seiten (`pdf_background`) |
+| 6 | 0.7 | Seitentitel (`title` in Seite und Manifest) |
+| 7 | 0.10 | Textfelder (`text`) |
+| 8 | 0.11 | Seitengröße je Seite (`size` in Seite und Manifest) |
+
+Jede neue Version ändert nur Ergänzungen; ältere Dateien werden ohne Umwandlung gelesen und beim nächsten Speichern mit der aktuellen Versionsnummer geschrieben.
+
+---
+
+## 6. Warum JSON
+
+Ein Binärformat (z. B. `postcard`) würde Dateien um weitere 20–30 % verkleinern. JSON bleibt trotzdem, weil es sich ansehen, vergleichen und im Notfall von Hand reparieren lässt und das Speichern einer Seite auch bei vielen Strichen deutlich unter einer Millisekunde dauert.

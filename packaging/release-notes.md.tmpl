@@ -1,6 +1,6 @@
 ## ink-notes {{TAG_NAME}}
 
-Latenzoptimierte Vektor-Notizbuch- und Inking-Anwendung für Linux (Zorin OS 18 / Ubuntu 24.04).
+Notizbuch-App für Stift, Touch und Maus unter Linux (getestet mit Zorin OS 18 / Ubuntu 24.04).
 
 ### Highlights:
 - **Beta-Feedback**: Querformat-PDFs (z. B. PowerPoint-Folien) bekommen Querformat-Seiten ohne leeren Streifen (Dateiformat-Version 8); neue Seiten direkt nach der aktuellen einfügen; Auswahlwerkzeug funktioniert mit dem Stift; Zoom bis 1000 % mit schärfer nachgerenderten PDF-Seiten
@@ -14,7 +14,7 @@ Latenzoptimierte Vektor-Notizbuch- und Inking-Anwendung für Linux (Zorin OS 18 
 - **Bilder einfügen**: Screenshots per Strg+V, Bilddateien über die eingebaute Dateiauswahl (Strg+I) oder per Drag & Drop; verschieben, drehen, skalieren und darauf schreiben – auch im PDF-Export (Dateiformat-Version 4: ältere Versionen öffnen solche Notizbücher nicht)
 - **Dunkelmodus & Papierfarben**: Weiß, Creme, Dunkelgrau oder Schwarz; auf dunklem Papier werden dunkle Stiftfarben automatisch aufgehellt (nur Anzeige – Dateien und PDF-Export bleiben unverändert)
 - **Nur Textmarker radieren**: Markierungen korrigieren, ohne die Handschrift darunter zu löschen – auch mit Stiftrückseite und Seitentaste
-- **Einstellbare Druckkurve**: Kennlinie weich bis hart und Mindestdruck mit Live-Vorschau, passend für jeden Digitizer
+- **Einstellbare Druckkurve**: Kennlinie weich bis hart und Mindestdruck mit Vorschau, zum Anpassen an den eigenen Stift
 - **Neue Formen**: Ellipsen sowie in einem Zug gezeichnete Pfeile und Doppelpfeile werden erkannt (Dateiformat-Version 3: ältere Versionen öffnen solche Notizbücher nicht)
 - **Stabiler Start**: Kein Absturz mehr, wenn die Grafikkarte nicht nutzbar ist (z. B. fehlende Rechte auf /dev/dri); Software-Renderer als Ausweichlösung und verständliche Fehlermeldung
 - **WSL (WSLg)**: Läuft unter WSL automatisch über X11 statt Wayland, da WSLg die Wayland-Verbindung abbricht; übersteuerbar mit `INK_NOTES_DISPLAY=x11|wayland`
@@ -22,21 +22,21 @@ Latenzoptimierte Vektor-Notizbuch- und Inking-Anwendung für Linux (Zorin OS 18 
 - **Neue Werkzeugleiste**: Schmale senkrechte Leiste mit Symbol-Knöpfen, links oder rechts andockbar; selten genutzte Funktionen im ☰-Menü, das Blatt wird daneben zentriert
 - **Einheitliche Dialoge**: Deckende Fenster ohne doppelte Titel, Seitenauswahl mit Vorschaubildern, größere Bedienelemente in allen Popovern
 - **UI per Stift und Touch bedienbar**: Werkzeugleiste, Popover und Dialoge reagieren jetzt auch auf Stift und Finger, auch bei Display-Skalierung
-- **Aktive Stylus-Unterstützung (Lazarite / MPP / AES)**: Natives Wayland-Tablet-Protokoll mit präziser Druck- und Neigungserfassung
-- **Touchscreen Multi-Touch**: Stufenloses 2-Finger Pinch-to-Zoom und Panning mit umschaltbarem Finger-Zeichenmodus
-- **Zwei-Stufen-Inking-Modell**: Kausale Echtzeit-Glättung via 1€-Filter & akausale Ecken-Erhaltung (Corner Preservation)
+- **Aktive Stylus-Unterstützung (Lazarite / MPP / AES)**: Stifteingabe über das Tablet-Protokoll von Wayland bzw. X11, mit Druckstärke
+- **Touchscreen Multi-Touch**: Zoomen mit zwei Fingern, Verschieben mit einem; Zeichnen mit dem Finger zuschaltbar
+- **Zwei-Stufen-Inking-Modell**: Glättung während des Schreibens (1€-Filter), beim Absetzen Nachbearbeitung mit Ecken-Erhaltung
 - **Geometrie- und Formerkennung**: Geraden, Pfeile & Doppelpfeile, Rechtecke, Kreise, Ellipsen, Dreiecke, Rauten, Vielecke & Koordinatensysteme mit spitzen Pfeilspitzen (Draw-and-Hold); Freiformen bleiben unverändert
-- **Multi-Dokumenten-Manager**: Unbegrenzte Notizbücher mit atomarem Autosave, Papierkorb und fortlaufenden Backups
-- **Datensicherheit**: Versioniertes Dateiformat mit Migration, Quarantäne beschädigter Seiten, Schutz vor Doppelöffnung und Crash-getestetem Speichern
-- **In-App Updater**: Automatische Versionsprüfung und sichere Atomar-Aktualisierung via Gitea Releases – mit Pflicht-Signaturprüfung (Minisign) und durchgängigem HTTPS
-- **Vektor-PDF-Export**: Verlustfreie Ausgabe für Druck und Weitergabe
+- **Mehrere Notizbücher**: Anlegen, umbenennen, löschen (mit Papierkorb); automatisches Speichern im Hintergrund
+- **Datensicherheit**: Versioniertes Dateiformat mit Migration, beschädigte Seiten werden beiseitegelegt statt überschrieben, Schutz vor gleichzeitigem Öffnen, atomares Speichern
+- **In-App Updater**: Prüft auf neue Versionen auf Gitea und installiert sie auf Wunsch – nur mit gültiger Minisign-Signatur und über HTTPS
+- **PDF-Export**: Striche und Formen als Vektoren, für Druck und Weitergabe
 
 ### Installation:
 - **Zorin OS / Ubuntu / Debian (.deb)**:
   ```bash
   sudo dpkg -i ink-notes_{{VERSION}}_amd64.deb
   ```
-- **Portables AppImage (Alle Linux-Distributionen)**:
+- **AppImage (andere Distributionen mit glibc ≥ 2.39)**:
   ```bash
   chmod +x ink-notes_{{VERSION}}_x86_64.AppImage
   ./ink-notes_{{VERSION}}_x86_64.AppImage
