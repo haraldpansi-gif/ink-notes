@@ -15,6 +15,8 @@ pub const A4_ASPECT_RATIO: f32 = A4_WIDTH_MM / A4_HEIGHT_MM;
 /// Virtuelle Seitenauflösung in internen Einheiten (10 Einheiten = 1 mm).
 pub const PAGE_WIDTH: f32 = 2100.0;
 pub const PAGE_HEIGHT: f32 = 2970.0;
+/// Größe einer DIN-A4-Hochformatseite (Standard) in Seiteneinheiten.
+pub const A4_SIZE: glam::Vec2 = glam::Vec2::new(PAGE_WIDTH, PAGE_HEIGHT);
 pub const UNITS_PER_MM: f32 = 10.0;
 
 /// Ein gefilterter Stylus-Abtastpunkt in DIN-A4-Seitenkoordinaten.
@@ -156,21 +158,32 @@ impl PdfBackground {
         format!("{}#{}", self.asset, self.page)
     }
 
-    /// Ecken (oben links, oben rechts, unten rechts, unten links) der PDF-Seite auf dem
-    /// A4-Blatt, siehe [`pdf_placement`].
-    pub fn corners(&self) -> [glam::Vec2; 4] {
-        pdf_placement(self.width_pt, self.height_pt)
+    /// Ecken (oben links, oben rechts, unten rechts, unten links) der PDF-Seite auf einem
+    /// Blatt der Größe `page_size`, siehe [`pdf_placement`].
+    pub fn corners(&self, page_size: glam::Vec2) -> [glam::Vec2; 4] {
+        pdf_placement(self.width_pt, self.height_pt, page_size)
     }
 }
 
-/// Lage einer PDF-Seite von `width_pt` × `height_pt` auf dem A4-Blatt: so groß wie möglich,
-/// waagerecht zentriert und oben bündig. Querformat-Folien liegen so oben auf der Seite,
-/// darunter bleibt Platz für Notizen.
-pub fn pdf_placement(width_pt: f32, height_pt: f32) -> [glam::Vec2; 4] {
+/// Seitengröße für eine importierte PDF-Seite von `width_pt` × `height_pt`: Hochformat wird
+/// DIN A4 hoch (wie bisher), Querformat (z. B. Folien) eine Seite mit der Breite von A4 quer
+/// (297 mm) und dem Seitenverhältnis der PDF-Seite – ohne leeren Streifen darunter.
+pub fn pdf_page_size(width_pt: f32, height_pt: f32) -> glam::Vec2 {
     let (w, h) = (width_pt.max(1.0), height_pt.max(1.0));
-    let scale = (PAGE_WIDTH / w).min(PAGE_HEIGHT / h);
+    if w <= h {
+        return A4_SIZE;
+    }
+    // Auf ganze Zehntelmillimeter runden, damit gleich große Folien gleich große Seiten geben
+    glam::Vec2::new(PAGE_HEIGHT, (PAGE_HEIGHT * h / w).round().max(1.0))
+}
+
+/// Lage einer PDF-Seite von `width_pt` × `height_pt` auf einem Blatt der Größe `page_size`:
+/// so groß wie möglich, waagerecht zentriert und oben bündig.
+pub fn pdf_placement(width_pt: f32, height_pt: f32, page_size: glam::Vec2) -> [glam::Vec2; 4] {
+    let (w, h) = (width_pt.max(1.0), height_pt.max(1.0));
+    let scale = (page_size.x / w).min(page_size.y / h);
     let size = glam::Vec2::new(w * scale, h * scale);
-    let tl = glam::Vec2::new((PAGE_WIDTH - size.x) / 2.0, 0.0);
+    let tl = glam::Vec2::new((page_size.x - size.x) / 2.0, 0.0);
     [
         tl,
         tl + glam::Vec2::new(size.x, 0.0),
@@ -184,18 +197,24 @@ pub const IMAGE_UNITS_PER_PIXEL: f32 = UNITS_PER_MM * 25.4 / 96.0;
 
 /// Ecken (oben links, oben rechts, unten rechts, unten links) für ein neu eingefügtes Bild
 /// von `width` × `height` Pixeln um `center`: Bildschirmgröße bei 96 dpi, höchstens 80 % der
-/// Seitenbreite und 60 % der Seitenhöhe, und möglichst ganz auf dem Blatt.
-pub fn place_image(width: u32, height: u32, center: glam::Vec2) -> [glam::Vec2; 4] {
+/// Seitenbreite und 60 % der Seitenhöhe eines Blatts der Größe `page_size`, und möglichst
+/// ganz auf dem Blatt.
+pub fn place_image(
+    width: u32,
+    height: u32,
+    center: glam::Vec2,
+    page_size: glam::Vec2,
+) -> [glam::Vec2; 4] {
     let natural =
         glam::Vec2::new(width.max(1) as f32, height.max(1) as f32) * IMAGE_UNITS_PER_PIXEL;
-    let fit = (PAGE_WIDTH * 0.8 / natural.x)
-        .min(PAGE_HEIGHT * 0.6 / natural.y)
+    let fit = (page_size.x * 0.8 / natural.x)
+        .min(page_size.y * 0.6 / natural.y)
         .min(1.0);
     let size = natural * fit;
     let half = size / 2.0;
     let center = glam::Vec2::new(
-        center.x.clamp(half.x, PAGE_WIDTH - half.x),
-        center.y.clamp(half.y, PAGE_HEIGHT - half.y),
+        center.x.clamp(half.x, page_size.x - half.x),
+        center.y.clamp(half.y, page_size.y - half.y),
     );
     let tl = center - half;
     [
@@ -693,6 +712,9 @@ pub struct Page {
     pub id: u64,
     pub strokes: Vec<Stroke>,
     pub background: PageBackground,
+    /// Seitengröße in Seiteneinheiten (Standard DIN A4 hoch, Querformat für PDF-Folien); auch im
+    /// Manifest, damit sie ohne Laden der Seite bekannt ist
+    pub size: glam::Vec2,
     /// Importierte PDF-Seite als Hintergrund (unter Bildern und Tinte)
     pub pdf_background: Option<PdfBackground>,
     /// Seitentitel (Lesezeichen); auch im Manifest, damit er ohne Laden der Seite bekannt ist
@@ -711,6 +733,7 @@ impl Page {
             id,
             strokes: Vec::new(),
             background,
+            size: A4_SIZE,
             pdf_background: None,
             title: None,
             vertex_cache: Vec::new(),
@@ -728,6 +751,7 @@ impl Page {
             id,
             strokes: Vec::new(),
             background,
+            size: A4_SIZE,
             pdf_background: None,
             title: None,
             vertex_cache: Vec::new(),
@@ -737,6 +761,12 @@ impl Page {
             persist: PersistState::Normal,
             history: HistoryStack::new(),
         }
+    }
+
+    /// Dieselbe Seite mit der Größe `size`.
+    pub fn with_size(mut self, size: glam::Vec2) -> Self {
+        self.size = size;
+        self
     }
 
     pub fn is_readonly(&self) -> bool {
@@ -1054,9 +1084,9 @@ impl Page {
     }
 }
 
-/// Höhe des Bereichs am unteren Rand der letzten Seite, in dem Schreiben in der
+/// Anteil der Seitenhöhe am unteren Rand der letzten Seite, in dem Schreiben in der
 /// durchgehenden Ansicht automatisch eine neue Seite anhängt.
-pub const AUTO_APPEND_ZONE: f32 = PAGE_HEIGHT * 0.2;
+pub const AUTO_APPEND_FRACTION: f32 = 0.2;
 
 /// Das Notizbuch mit diskreter Seitenverwaltung und Navigation.
 #[derive(Debug, Clone)]
@@ -1141,30 +1171,58 @@ impl Notebook {
         id
     }
 
-    /// Fügt eine neue Seite mit dem angegebenen Hintergrund hinzu.
+    /// Rahmen, in den jede Seite des Notizbuchs passt (größte Breite und Höhe).
+    pub fn fit_box(&self) -> glam::Vec2 {
+        self.pages
+            .iter()
+            .map(|p| p.size)
+            .fold(glam::Vec2::ZERO, glam::Vec2::max)
+            .max(glam::Vec2::ONE)
+    }
+
+    /// Durchgehende Ansicht: Lage aller Seiten relativ zur aktuellen.
+    pub fn page_stack(&self) -> crate::viewport::PageStack {
+        crate::viewport::PageStack::new(
+            self.pages.iter().map(|p| p.size).collect(),
+            self.current_page_index,
+        )
+    }
+
+    /// Hängt eine neue Seite mit dem angegebenen Hintergrund und der Größe der aktuellen
+    /// Seite an.
     pub fn add_page(&mut self, background: PageBackground) -> usize {
         let id = self.next_page_id;
         self.next_page_id += 1;
-        self.pages.push(Page::new(id, background));
+        let size = self
+            .pages
+            .get(self.current_page_index)
+            .map_or(A4_SIZE, |p| p.size);
+        self.pages.push(Page::new(id, background).with_size(size));
         self.pages.len() - 1
     }
 
     /// Fügt direkt nach der aktuellen Seite eine leere Seite mit dem angegebenen
-    /// Hintergrund ein (die aktuelle Seite bleibt aktuell) und gibt ihren Index zurück.
+    /// Hintergrund und der Größe der aktuellen Seite ein (die aktuelle Seite bleibt aktuell)
+    /// und gibt ihren Index zurück.
     pub fn insert_page_after_current(&mut self, background: PageBackground) -> usize {
         let id = self.next_page_id;
         self.next_page_id += 1;
         let index = (self.current_page_index + 1).min(self.pages.len());
-        self.pages.insert(index, Page::new(id, background));
+        let size = self
+            .pages
+            .get(self.current_page_index)
+            .map_or(A4_SIZE, |p| p.size);
+        self.pages
+            .insert(index, Page::new(id, background).with_size(size));
         index
     }
 
     /// Durchgehende Ansicht: Reicht ein neuer Strich auf der letzten Seite bis in deren
-    /// unteres Fünftel ([`AUTO_APPEND_ZONE`]), wird darunter eine leere Seite mit gleichem
+    /// unteres Fünftel ([`AUTO_APPEND_FRACTION`]), wird darunter eine leere Seite mit gleichem
     /// Hintergrund angehängt. `true`, wenn eine Seite angehängt wurde.
     pub fn append_page_if_writing_at_end(&mut self, stroke_bottom: f32) -> bool {
         if self.current_page_index + 1 != self.pages.len()
-            || stroke_bottom < PAGE_HEIGHT - AUTO_APPEND_ZONE
+            || stroke_bottom < self.current_page().size.y * (1.0 - AUTO_APPEND_FRACTION)
         {
             return false;
         }
@@ -1234,19 +1292,28 @@ impl Default for Notebook {
     }
 }
 
-/// Berechnet die DIN-A4-Darstellung im Fenster mit Letterboxing/Pillarboxing.
+/// Lage der aktuellen Seite im Fenster bei Zoom 100 % ohne Verschiebung: Ein Rahmen der
+/// Größe `fit_box` (alle Seiten des Notizbuchs passen hinein) wird ins Fenster eingepasst
+/// (Letterboxing/Pillarboxing); die aktuelle Seite liegt darin waagerecht zentriert und oben.
+/// So bleibt der Maßstab beim Wechsel zwischen verschieden großen Seiten gleich.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PageViewport {
     pub window_width: f32,
     pub window_height: f32,
+    /// Bildschirmposition der linken oberen Ecke der aktuellen Seite
     pub page_x: f32,
     pub page_y: f32,
+    /// Größe der aktuellen Seite auf dem Bildschirm (Pixel)
     pub page_width: f32,
     pub page_height: f32,
+    /// Bildschirmpixel je Seiteneinheit
+    pub scale: f32,
+    /// Größe der aktuellen Seite in Seiteneinheiten
+    pub page_size: glam::Vec2,
 }
 
 impl PageViewport {
-    /// Berechnet die zentrierte DIN-A4-Projektionsfläche unter Beibehaltung des 210x297-Seitenverhältnisses.
+    /// Zentrierte DIN-A4-Seite im Fenster.
     pub fn calculate(window_width: f32, window_height: f32, margin: f32) -> Self {
         Self::calculate_with_insets(window_width, window_height, margin, 0.0, 0.0)
     }
@@ -1260,65 +1327,69 @@ impl PageViewport {
         inset_left: f32,
         inset_right: f32,
     ) -> Self {
+        Self::calculate_for(
+            window_width,
+            window_height,
+            margin,
+            (inset_left, inset_right),
+            A4_SIZE,
+            A4_SIZE,
+        )
+    }
+
+    /// Wie [`Self::calculate_with_insets`] für eine Seite der Größe `page_size` in einem
+    /// Notizbuch, dessen Seiten in `fit_box` passen.
+    pub fn calculate_for(
+        window_width: f32,
+        window_height: f32,
+        margin: f32,
+        (inset_left, inset_right): (f32, f32),
+        fit_box: glam::Vec2,
+        page_size: glam::Vec2,
+    ) -> Self {
         let inset_left = inset_left.clamp(0.0, window_width * 0.5);
         let inset_right = inset_right.clamp(0.0, window_width * 0.5);
         let avail_w = (window_width - inset_left - inset_right - 2.0 * margin).max(10.0);
         let avail_h = (window_height - 2.0 * margin).max(10.0);
+        let fit_box = fit_box.max(page_size).max(glam::Vec2::ONE);
 
-        let window_ratio = avail_w / avail_h;
-        let page_ratio = A4_ASPECT_RATIO;
-
-        let (page_w, page_h) = if window_ratio > page_ratio {
-            // Fenster ist breiter als DIN A4 -> Pillarboxing (Balken links/rechts)
-            let h = avail_h;
-            let w = h * page_ratio;
-            (w, h)
-        } else {
-            // Fenster ist höher als DIN A4 -> Letterboxing (Balken oben/unten)
-            let w = avail_w;
-            let h = w / page_ratio;
-            (w, h)
-        };
-
-        let page_x = inset_left + (window_width - inset_left - inset_right - page_w) / 2.0;
-        let page_y = (window_height - page_h) / 2.0;
+        let scale = (avail_w / fit_box.x).min(avail_h / fit_box.y);
+        let box_x =
+            inset_left + (window_width - inset_left - inset_right - fit_box.x * scale) / 2.0;
+        let box_y = (window_height - fit_box.y * scale) / 2.0;
 
         Self {
             window_width,
             window_height,
-            page_x,
-            page_y,
-            page_width: page_w,
-            page_height: page_h,
+            page_x: box_x + (fit_box.x - page_size.x) / 2.0 * scale,
+            page_y: box_y,
+            page_width: page_size.x * scale,
+            page_height: page_size.y * scale,
+            scale,
+            page_size,
         }
     }
 
-    /// Transformiert einen Fenster-Pixelpunkt in DIN-A4-Seitenkoordinaten [0.0, PAGE_WIDTH] x [0.0, PAGE_HEIGHT].
+    /// Transformiert einen Fenster-Pixelpunkt in Seitenkoordinaten.
     ///
-    /// Liefert `None`, falls der Punkt außerhalb der DIN-A4-Papierfläche liegt.
+    /// Liefert `None`, falls der Punkt außerhalb der Seite liegt.
     pub fn screen_to_page(&self, screen_x: f32, screen_y: f32) -> Option<glam::Vec2> {
-        let u = (screen_x - self.page_x) / self.page_width;
-        let v = (screen_y - self.page_y) / self.page_height;
-
-        if (0.0..=1.0).contains(&u) && (0.0..=1.0).contains(&v) {
-            Some(glam::Vec2::new(u * PAGE_WIDTH, v * PAGE_HEIGHT))
-        } else {
-            None
-        }
+        let p = glam::Vec2::new(screen_x - self.page_x, screen_y - self.page_y) / self.scale;
+        ((0.0..=self.page_size.x).contains(&p.x) && (0.0..=self.page_size.y).contains(&p.y))
+            .then_some(p)
     }
 
-    /// Transformiert einen Fenster-Pixelpunkt und klemmt ihn auf die DIN-A4-Papierfläche.
+    /// Transformiert einen Fenster-Pixelpunkt und klemmt ihn auf die Seite.
     pub fn screen_to_page_clamped(&self, screen_x: f32, screen_y: f32) -> glam::Vec2 {
-        let u = ((screen_x - self.page_x) / self.page_width).clamp(0.0, 1.0);
-        let v = ((screen_y - self.page_y) / self.page_height).clamp(0.0, 1.0);
-        glam::Vec2::new(u * PAGE_WIDTH, v * PAGE_HEIGHT)
+        let p = glam::Vec2::new(screen_x - self.page_x, screen_y - self.page_y) / self.scale;
+        p.clamp(glam::Vec2::ZERO, self.page_size)
     }
 
     /// Berechnet die Shader-Transformationsparameter (Scale, Offset),
-    /// um DIN-A4-Seitenkoordinaten direkt im Vertex-Shader in den NDC-Bereich [-1.0, 1.0] abzubilden.
+    /// um Seitenkoordinaten direkt im Vertex-Shader in den NDC-Bereich [-1.0, 1.0] abzubilden.
     pub fn ndc_transform(&self) -> ([f32; 2], [f32; 2]) {
-        let scale_x = (2.0 * self.page_width) / (self.window_width * PAGE_WIDTH);
-        let scale_y = (-2.0 * self.page_height) / (self.window_height * PAGE_HEIGHT);
+        let scale_x = (2.0 * self.scale) / self.window_width;
+        let scale_y = (-2.0 * self.scale) / self.window_height;
         let offset_x = (2.0 * self.page_x) / self.window_width - 1.0;
         let offset_y = 1.0 - (2.0 * self.page_y) / self.window_height;
         ([scale_x, scale_y], [offset_x, offset_y])
@@ -1585,23 +1656,94 @@ mod tests {
     }
 
     #[test]
+    fn test_pdf_page_size_follows_orientation() {
+        // Hochformat (A4, Letter) bleibt A4 hoch
+        assert_eq!(pdf_page_size(595.0, 842.0), A4_SIZE);
+        assert_eq!(pdf_page_size(612.0, 792.0), A4_SIZE);
+        // 16:9-Folie: 297 mm breit, Höhe nach Seitenverhältnis
+        let slide = pdf_page_size(960.0, 540.0);
+        assert_eq!(slide, glam::Vec2::new(2970.0, 1671.0));
+        // Die Folie füllt ihre Seite ganz aus
+        let [tl, _, br, _] = pdf_placement(960.0, 540.0, slide);
+        assert!(
+            tl.length() < 1e-3 && (br - slide).length() < 1.0,
+            "{tl} {br}"
+        );
+    }
+
+    #[test]
+    fn test_viewport_scale_is_shared_by_pages_of_different_size() {
+        let slide = glam::Vec2::new(2970.0, 1671.0);
+        // Nur Folien: die Folie wird ins Fenster eingepasst
+        let only_slides =
+            PageViewport::calculate_for(1600.0, 900.0, 20.0, (0.0, 0.0), slide, slide);
+        // 1560 × 860 frei: die Höhe begrenzt
+        assert!(
+            (only_slides.page_height - 860.0).abs() < 0.5,
+            "{only_slides:?}"
+        );
+        assert!(
+            (only_slides.page_width / only_slides.page_height - slide.x / slide.y).abs() < 1e-3
+        );
+        // Gemischt: gleicher Maßstab für beide Seiten, schmale Seite waagerecht zentriert
+        let fit = A4_SIZE.max(slide);
+        let a4 = PageViewport::calculate_for(1600.0, 900.0, 20.0, (0.0, 0.0), fit, A4_SIZE);
+        let wide = PageViewport::calculate_for(1600.0, 900.0, 20.0, (0.0, 0.0), fit, slide);
+        assert_eq!(a4.scale, wide.scale);
+        let center = |v: &PageViewport| v.page_x + v.page_width / 2.0;
+        assert!((center(&a4) - center(&wide)).abs() < 1e-3);
+        assert_eq!(a4.page_y, wide.page_y);
+        // Bildschirm → Seite berücksichtigt die Seitengröße
+        let p = wide
+            .screen_to_page(wide.page_x + wide.page_width - 1.0, wide.page_y + 1.0)
+            .unwrap();
+        assert!(p.x > 2900.0);
+        assert!(wide
+            .screen_to_page(wide.page_x + 5.0, wide.page_y + wide.page_height + 5.0)
+            .is_none());
+    }
+
+    #[test]
+    fn test_new_pages_take_size_of_current_page() {
+        let slide = glam::Vec2::new(2970.0, 1671.0);
+        let mut nb = Notebook::new();
+        nb.pages[0].size = slide;
+        nb.add_page(PageBackground::Blank);
+        nb.insert_page_after_current(PageBackground::Blank);
+        nb.next_page();
+        nb.current_page_index = nb.pages.len() - 1;
+        nb.next_page();
+        assert!(nb.pages.iter().all(|p| p.size == slide));
+        assert_eq!(nb.fit_box(), slide);
+        // Auto-Anhängen bezieht sich auf die Höhe der Folie
+        nb.current_page_index = nb.pages.len() - 1;
+        assert!(!nb.append_page_if_writing_at_end(slide.y * 0.7));
+        assert!(nb.append_page_if_writing_at_end(slide.y * 0.9));
+    }
+
+    #[test]
     fn test_place_image() {
         let center = glam::Vec2::new(PAGE_WIDTH / 2.0, PAGE_HEIGHT / 2.0);
         // Kleines Bild: Bildschirmgröße, zentriert
-        let [tl, tr, br, bl] = place_image(200, 100, center);
+        let [tl, tr, br, bl] = place_image(200, 100, center, A4_SIZE);
         assert!(((tr - tl).length() - 200.0 * IMAGE_UNITS_PER_PIXEL).abs() < 1e-3);
         assert!(((bl - tl).length() - 100.0 * IMAGE_UNITS_PER_PIXEL).abs() < 1e-3);
         assert!(((tl + br) / 2.0 - center).length() < 1e-3);
 
         // Großer Screenshot: auf 80 % der Breite verkleinert, Seitenverhältnis bleibt
-        let [tl, tr, br, _] = place_image(3840, 2160, center);
+        let [tl, tr, br, _] = place_image(3840, 2160, center, A4_SIZE);
         let size = br - tl;
         assert!((size.x - PAGE_WIDTH * 0.8).abs() < 1e-2);
         assert!((size.x / size.y - 3840.0 / 2160.0).abs() < 1e-3);
         assert_eq!(tr.y, tl.y);
 
         // Am Rand eingefügt: wird aufs Blatt geschoben
-        let corners = place_image(400, 400, glam::Vec2::new(-50.0, PAGE_HEIGHT + 50.0));
+        let corners = place_image(
+            400,
+            400,
+            glam::Vec2::new(-50.0, PAGE_HEIGHT + 50.0),
+            A4_SIZE,
+        );
         for c in corners {
             assert!(c.x >= -1e-3 && c.x <= PAGE_WIDTH + 1e-3);
             assert!(c.y >= -1e-3 && c.y <= PAGE_HEIGHT + 1e-3);

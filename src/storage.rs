@@ -166,7 +166,8 @@ impl StrokeData {
 /// - Version 5: importierte PDF-Seiten als Seitenhintergrund (`pdf_background`).
 /// - Version 6: Seitentitel (`title` in Seite und Manifest).
 /// - Version 7: Textfelder (`text` am Strich).
-pub const CURRENT_FORMAT_VERSION: u32 = 7;
+/// - Version 8: Seitengröße je Seite (`size` in Seite und Manifest), Querformat für Folien.
+pub const CURRENT_FORMAT_VERSION: u32 = 8;
 
 /// Standardwert für ältere Dateien ohne explizite Formatversion (Legacy v0).
 pub fn legacy_format_version() -> u32 {
@@ -186,7 +187,25 @@ pub struct PageData {
     /// Seitentitel (steht zusätzlich im Manifest)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    /// Seitengröße in Seiteneinheiten, wenn nicht DIN A4 hoch (steht zusätzlich im Manifest)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<[f32; 2]>,
     pub strokes: Vec<StrokeData>,
+}
+
+/// Gespeicherte Seitengröße: `None` für DIN A4 hoch.
+fn stored_size(size: glam::Vec2) -> Option<[f32; 2]> {
+    (size != crate::document::A4_SIZE).then(|| size.to_array())
+}
+
+/// Seitengröße aus einer (evtl. von Hand bearbeiteten) Datei; unbrauchbare Werte ergeben A4.
+pub fn page_size_from(stored: Option<[f32; 2]>) -> glam::Vec2 {
+    match stored {
+        Some([w, h]) if w.is_finite() && h.is_finite() && w >= 100.0 && h >= 100.0 => {
+            glam::Vec2::new(w.min(20_000.0), h.min(20_000.0))
+        }
+        _ => crate::document::A4_SIZE,
+    }
 }
 
 impl From<&Page> for PageData {
@@ -197,6 +216,7 @@ impl From<&Page> for PageData {
             background: page.background,
             pdf_background: page.pdf_background.clone(),
             title: page.title.clone(),
+            size: stored_size(page.size),
             strokes: page.strokes.iter().map(StrokeData::from).collect(),
         }
     }
@@ -205,7 +225,7 @@ impl From<&Page> for PageData {
 impl PageData {
     /// Wandelt die Seitendaten in eine runtime-aktive `Page` mit initialisiertem Cache um.
     pub fn to_page(&self) -> Page {
-        let mut page = Page::new(self.id, self.background);
+        let mut page = Page::new(self.id, self.background).with_size(page_size_from(self.size));
         page.pdf_background = self.pdf_background.clone();
         page.title = self.title.clone();
         for stroke_data in &self.strokes {
@@ -227,6 +247,9 @@ pub struct PageMeta {
     /// Seitentitel (Lesezeichen), damit die Seitenübersicht ihn ohne Laden der Seite kennt
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    /// Seitengröße, wenn nicht DIN A4 hoch (für Lage und Maßstab ungeladener Seiten)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<[f32; 2]>,
 }
 
 impl PageMeta {
@@ -235,6 +258,7 @@ impl PageMeta {
             id,
             background,
             title: None,
+            size: None,
         }
     }
 }
@@ -292,6 +316,15 @@ impl NotebookManifest {
             .and_then(|p| p.title.clone())
     }
 
+    pub fn size_for_page(&self, page_id: u64) -> glam::Vec2 {
+        page_size_from(
+            self.pages
+                .iter()
+                .find(|p| p.id == page_id)
+                .and_then(|p| p.size),
+        )
+    }
+
     pub fn background_for_page(&self, page_id: u64) -> Option<PageBackground> {
         self.pages
             .iter()
@@ -308,6 +341,7 @@ impl NotebookManifest {
                 id: p.id,
                 background: Some(p.background),
                 title: p.title.clone(),
+                size: stored_size(p.size),
             })
             .collect();
         self.page_ids = self.pages.iter().map(|p| p.id).collect();
@@ -718,7 +752,7 @@ pub fn load_notebook(notebook_dir: &Path) -> Result<(Notebook, NotebookManifest)
                     quarantine_path: q_path,
                 },
             );
-            let mut page = Page::new(id, first_bg);
+            let mut page = Page::new(id, first_bg).with_size(manifest.size_for_page(id));
             page.persist = PersistState::ReadOnlyAfterLoadError;
             page
         }
@@ -734,13 +768,15 @@ pub fn load_notebook(notebook_dir: &Path) -> Result<(Notebook, NotebookManifest)
                     quarantine_path: None,
                 },
             );
-            let mut page = Page::new(first_id, first_bg);
+            let mut page =
+                Page::new(first_id, first_bg).with_size(manifest.size_for_page(first_id));
             page.persist = PersistState::ReadOnlyAfterLoadError;
             page
         }
         Err(e) => {
             eprintln!("[Storage] Konnte erste Seite {first_id} nicht laden: {e}. Erstelle leere Ersatzseite.");
-            let mut page = Page::new(first_id, first_bg);
+            let mut page =
+                Page::new(first_id, first_bg).with_size(manifest.size_for_page(first_id));
             page.persist = PersistState::ReadOnlyAfterLoadError;
             page
         }
@@ -752,7 +788,7 @@ pub fn load_notebook(notebook_dir: &Path) -> Result<(Notebook, NotebookManifest)
         let bg = manifest
             .background_for_page(page_id)
             .unwrap_or(PageBackground::Grid5mm);
-        pages.push(Page::new_unloaded(page_id, bg));
+        pages.push(Page::new_unloaded(page_id, bg).with_size(manifest.size_for_page(page_id)));
     }
 
     // Titel aus dem Manifest (Platzhalter und Ersatzseiten kennen sie sonst nicht)
@@ -808,7 +844,7 @@ pub fn ensure_page_loaded(
         // Angehängt, aber nie gespeichert (noch leer): leere Seite statt Ladefehler
         Err(StorageError::PageNotFound(_)) => {
             let placeholder = &mut notebook.pages[page_idx];
-            let mut page = Page::new(page_id, placeholder.background);
+            let mut page = Page::new(page_id, placeholder.background).with_size(placeholder.size);
             page.title = placeholder.title.take();
             *placeholder = page;
             Ok(())
@@ -1132,7 +1168,8 @@ pub fn create_notebook_from_pdf(
             .iter()
             .enumerate()
             .map(|(i, &(width_pt, height_pt))| {
-                let mut page = Page::new(i as u64 + 1, PageBackground::Blank);
+                let mut page = Page::new(i as u64 + 1, PageBackground::Blank)
+                    .with_size(crate::document::pdf_page_size(width_pt, height_pt));
                 page.pdf_background = Some(crate::document::PdfBackground {
                     asset: asset.clone(),
                     page: i as u32,
@@ -1358,7 +1395,9 @@ pub fn load_all_pages(notebook_dir: &Path, notebook: &mut Notebook) -> Result<()
             *page = match load_page(notebook_dir, page.id) {
                 Ok(data) => data.to_page(),
                 // Wie beim Lazy Loading: nie gespeicherte Seite = leere Seite
-                Err(StorageError::PageNotFound(_)) => Page::new(page.id, page.background),
+                Err(StorageError::PageNotFound(_)) => {
+                    Page::new(page.id, page.background).with_size(page.size)
+                }
                 Err(e) => return Err(e),
             };
             page.title = page.title.take().or(title);
@@ -2523,6 +2562,35 @@ mod tests {
         assert_eq!(stroke.object_corners(), Some(corners));
         assert_eq!(stroke.color, [0.15, 0.35, 0.85, 1.0]);
         assert!(stroke.is_text() && !stroke.is_image() && stroke.vertices.is_empty());
+    }
+
+    #[test]
+    fn test_page_size_round_trips_and_is_known_before_loading() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let (mut notebook, mut manifest, dir) =
+            create_new_notebook(temp_dir.path(), "Folien").unwrap();
+        let slide = glam::Vec2::new(2970.0, 1671.0);
+        notebook.pages[0].size = slide;
+        notebook.add_page(PageBackground::Blank);
+        notebook.add_page(PageBackground::Blank);
+        notebook.pages[2].size = crate::document::A4_SIZE;
+        save_notebook(&dir, &notebook, &mut manifest).unwrap();
+
+        let (mut reloaded, _) = load_notebook(&dir).unwrap();
+        let sizes: Vec<glam::Vec2> = reloaded.pages.iter().map(|p| p.size).collect();
+        assert_eq!(sizes, vec![slide, slide, crate::document::A4_SIZE]);
+        // Ungeladene Platzhalter kennen ihre Größe aus dem Manifest
+        assert!(!reloaded.pages[1].is_loaded);
+        ensure_page_loaded(&dir, &mut reloaded, 1).unwrap();
+        assert_eq!(reloaded.pages[1].size, slide);
+        // A4-Seiten speichern keine Größe (Dateien bleiben wie bisher)
+        let data = load_page(&dir, reloaded.pages[2].id).unwrap();
+        assert_eq!(data.size, None);
+        // Unsinnige Werte aus einer bearbeiteten Datei ergeben A4
+        assert_eq!(
+            page_size_from(Some([f32::NAN, 5.0])),
+            crate::document::A4_SIZE
+        );
     }
 
     #[test]

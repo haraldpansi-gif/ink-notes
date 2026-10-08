@@ -32,7 +32,6 @@ use ink_notes::settings::{SidebarSide, UiSettings};
 use ink_notes::storage::{self, NotebookManifest};
 use ink_notes::ui::{self, ActiveTool, UiAction, UiState};
 use ink_notes::updater::UpdaterController;
-use ink_notes::viewport::PAGE_PITCH;
 
 /// Aktualisiert den Fenstertitel als minimales On-Screen-Display (OSD) inklusive Autosave-Status.
 /// Speichert die UI-Einstellungen; ein Fehler wird gemeldet, bricht aber nichts ab.
@@ -197,10 +196,10 @@ fn switch_to_page(
         return;
     }
     if keep_view {
-        let k = index as i64 - current as i64;
-        canvas.shift_reference_page(k);
+        let origin = notebook.page_stack().origins[index];
+        canvas.shift_reference_page(origin);
         if let Some(ruler) = &mut ui_state.ruler {
-            ruler.center.y -= k as f32 * PAGE_PITCH;
+            ruler.center -= origin;
         }
         canvas.ruler = ui_state.ruler;
     }
@@ -234,11 +233,9 @@ fn page_to_focus(
     if !ui_state.continuous_scroll {
         return None;
     }
-    let k = canvas.page_offset_at_screen(sx, sy).filter(|&k| k != 0)?;
-    let index = usize::try_from(notebook.current_page_index as i64 + k).ok()?;
-    if index >= notebook.pages.len() {
-        return None;
-    }
+    let index = canvas
+        .page_at_screen(&notebook.page_stack(), sx, sy)
+        .filter(|&i| i != notebook.current_page_index)?;
     let grabs_selection = ui_state.active_tool == ActiveTool::Select
         && !selection_state.is_empty()
         && !matches!(
@@ -364,7 +361,12 @@ fn insert_image_on_page(
     ui_state: &mut UiState,
 ) {
     let id = notebook.next_stroke_id();
-    let corners = ink_notes::document::place_image(imported.width, imported.height, center);
+    let corners = ink_notes::document::place_image(
+        imported.width,
+        imported.height,
+        center,
+        notebook.current_page().size,
+    );
     let page = notebook.current_page_mut();
     page.add_stroke(ink_notes::document::Stroke::new_image(
         id,
@@ -587,6 +589,7 @@ fn insert_text_on_page(
     let mut edit = ink_notes::text::TextEditing::new_at(
         notebook.current_page().id,
         Vec2::new((center.x - 600.0).max(150.0), center.y),
+        notebook.current_page().size.x,
         ui_state.text_size_pt * ink_notes::text::UNITS_PER_PT,
         ui_state.text_font,
         ui_state.text_color,
@@ -680,6 +683,7 @@ fn text_tool_click(
         None => Some(ink_notes::text::TextEditing::new_at(
             page.id,
             page_pt,
+            page.size.x,
             ui_state.text_size_pt * ink_notes::text::UNITS_PER_PT,
             ui_state.text_font,
             ui_state.text_color,
@@ -2545,13 +2549,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         //    der Fenstermitte zur aktuellen (nicht während eines Strichs, einer
                         //    Auswahl oder beim Ziehen des Lineals). Wer auf einer Nachbarseite
                         //    schreibt, bleibt dort, bis wieder gescrollt wird (Undo betrifft sie).
+                        canvas.set_fit_box(notebook.fit_box());
                         if ui_state.continuous_scroll {
-                            canvas.clamp_scroll(notebook.current_page_index, notebook.pages.len());
+                            let stack = notebook.page_stack();
+                            canvas.clamp_scroll(&stack);
+                            // Unabhängig von der Bezugsseite: Lage bezogen auf die erste Seite
                             let scroll = [
                                 canvas.camera.zoom,
                                 canvas.camera.pan_offset[0],
-                                canvas.camera.pan_offset[1]
-                                    - notebook.current_page_index as f32 * PAGE_PITCH,
+                                canvas.camera.pan_offset[1] + stack.origins[0].y,
                             ];
                             let scrolled = last_scroll
                                 .is_none_or(|last: [f32; 3]| last.iter().zip(scroll).any(|(a, b)| (a - b).abs() > 1e-3));
@@ -2564,9 +2570,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             if scrolled && !busy {
                                 last_scroll = Some(scroll);
                                 let target = canvas
-                                    .page_offset_at_view_center()
-                                    .filter(|&k| k != 0)
-                                    .and_then(|k| usize::try_from(notebook.current_page_index as i64 + k).ok());
+                                    .page_at_view_center(&stack)
+                                    .filter(|&i| i != notebook.current_page_index);
                                 if let Some(index) = target {
                                     switch_to_page(
                                         index,
@@ -2770,15 +2775,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     canvas.sync_page(notebook.current_page_mut());
                                     manifest.current_page_index = notebook.current_page_index;
                                     manifest.next_page_id = notebook.next_page_id;
-                                    manifest.pages = notebook
-                                        .pages
-                                        .iter()
-                                        .map(|p| storage::PageMeta {
-                                            id: p.id,
-                                            background: Some(p.background),
-                                            title: p.title.clone(),
-                                        })
-                                        .collect();
                                     manifest.sync_from_notebook(&notebook);
                                     autosave.mark_manifest_dirty(&manifest);
                                     autosave.mark_dirty(&notebook, &mut manifest);
@@ -3249,19 +3245,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         // 5. Canvas (Pass 1) und egui UI (Pass 2) in Surface-Textur rendern
                         //    Durchgehende Ansicht: sichtbare Nachbarseiten laden und mitzeichnen
                         if ui_state.continuous_scroll {
-                            let current = notebook.current_page_index;
-                            let visible: Vec<(i64, usize)> = canvas
-                                .visible_neighbor_offsets(current, notebook.pages.len())
-                                .into_iter()
-                                .map(|k| (k, (current as i64 + k) as usize))
-                                .collect();
-                            for &(_, index) in &visible {
+                            let stack = notebook.page_stack();
+                            let visible = canvas.visible_neighbors(&stack);
+                            for &index in &visible {
                                 let _ = storage::ensure_page_loaded(&storage_dir, &mut notebook, index);
                                 notebook.pages[index].rebuild_cache_if_dirty();
                             }
-                            let neighbors: Vec<(i64, &ink_notes::document::Page)> = visible
+                            let neighbors: Vec<(Vec2, &ink_notes::document::Page)> = visible
                                 .iter()
-                                .map(|&(k, index)| (k, &notebook.pages[index]))
+                                .map(|&index| (stack.origins[index], &notebook.pages[index]))
                                 .collect();
                             canvas.set_neighbor_pages(&neighbors);
                         } else {

@@ -14,7 +14,7 @@ use ab_glyph::{Font, FontRef, GlyphId, PxScale};
 use serde::{Deserialize, Serialize};
 
 use crate::assets::RgbaImage;
-use crate::document::{Stroke, PAGE_WIDTH, UNITS_PER_MM};
+use crate::document::{Stroke, UNITS_PER_MM};
 
 /// Schriftart eines Textfelds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
@@ -270,15 +270,16 @@ pub struct TextEditing {
 
 impl TextEditing {
     /// Neues, leeres Feld: die erste Zeile mittig auf `pos`, umbrochen 1 cm vor dem rechten
-    /// Blattrand (mindestens 3 cm breit).
+    /// Rand eines Blatts der Breite `page_width` (mindestens 3 cm breit).
     pub fn new_at(
         page_id: u64,
         pos: glam::Vec2,
+        page_width: f32,
         size: f32,
         font: TextFont,
         color: [f32; 4],
     ) -> Self {
-        let right = PAGE_WIDTH - RIGHT_MARGIN;
+        let right = page_width - RIGHT_MARGIN;
         let x = pos.x.min(right - MIN_WRAP_WIDTH).max(0.0);
         let text = TextBox::new(String::new(), size, font, (right - x).max(MIN_WRAP_WIDTH));
         let line_height = text.layout().line_height;
@@ -400,6 +401,7 @@ pub fn rasterize(text: &TextBox, color: [f32; 4], px_per_unit: f32) -> RgbaImage
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::document::PAGE_WIDTH;
 
     fn sample(content: &str, wrap_width: f32) -> TextBox {
         TextBox::new(content.to_string(), 50.0, TextFont::Sans, wrap_width)
@@ -483,6 +485,7 @@ mod tests {
         let edit = TextEditing::new_at(
             1,
             glam::Vec2::new(500.0, 800.0),
+            PAGE_WIDTH,
             50.0,
             TextFont::Sans,
             [0.0; 4],
@@ -496,6 +499,7 @@ mod tests {
         let edge = TextEditing::new_at(
             1,
             glam::Vec2::new(2050.0, 100.0),
+            PAGE_WIDTH,
             50.0,
             TextFont::Sans,
             [0.0; 4],
@@ -509,6 +513,7 @@ mod tests {
         let mut edit = TextEditing::new_at(
             1,
             glam::Vec2::new(400.0, 400.0),
+            PAGE_WIDTH,
             50.0,
             TextFont::Sans,
             [0.0; 4],

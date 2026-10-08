@@ -297,6 +297,26 @@ mod tests {
     }
 
     #[test]
+    fn test_landscape_page_export_keeps_positions() {
+        // Strich unten rechts auf einer Querformat-Seite: im PNG an derselben Stelle
+        let mut page = page_with_line();
+        page.size = glam::Vec2::new(2970.0, 1671.0);
+        page.strokes[0].translate(glam::Vec2::new(1900.0, 500.0)); // x 2400–2800, y 1500
+        let png = decode(&page_png(&page, None, ImageBackground::Transparent).unwrap());
+        let ratio = png.width() as f32 / png.height() as f32;
+        assert!((ratio - 2970.0 / 1671.0).abs() < 0.01, "{ratio}");
+        let px_per_unit = png.width() as f32 / 2970.0;
+        let at = |x: f32, y: f32| {
+            png.get_pixel((x * px_per_unit) as u32, (y * px_per_unit) as u32)
+                .0
+        };
+        assert!(at(2600.0, 1500.0)[3] > 200, "Strich liegt unten rechts");
+        assert!(at(2600.0, 1300.0)[3] == 0);
+        let svg = page_svg(&page, None).unwrap();
+        assert!(svg.contains("<path"));
+    }
+
+    #[test]
     fn test_selection_image_is_cropped() {
         let page = page_with_line();
         let image = selection_image(&page, &[7], None).unwrap().unwrap();

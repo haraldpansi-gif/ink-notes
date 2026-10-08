@@ -16,6 +16,7 @@ use crate::background::{generate_background_mesh, generate_paper_quad, PaperThem
 use crate::document::{Page, PageBackground, PageViewport, Stroke, StylusSample};
 use crate::filter::OneEuroFilter;
 use crate::spline::{self, ControlPoint, SplineConfig};
+use crate::viewport::PageStack;
 
 /// 2D-Vertex für Inking-Meshes mit Positions- und Farbattributen (Multi-Color).
 #[repr(C)]
@@ -119,6 +120,7 @@ pub fn choose_present_mode(available: &[wgpu::PresentMode]) -> Option<wgpu::Pres
 struct NeighborFingerprint {
     page_id: u64,
     background: PageBackground,
+    size: [u32; 2],
     paper_theme: PaperTheme,
     vertex_count: usize,
     stroke_count: usize,
@@ -130,6 +132,7 @@ impl NeighborFingerprint {
         Self {
             page_id: page.id,
             background: page.background,
+            size: page.size.to_array().map(f32::to_bits),
             paper_theme,
             vertex_count: page.vertex_cache.len(),
             stroke_count: page.strokes.len(),
@@ -141,8 +144,8 @@ impl NeighborFingerprint {
 /// GPU-Daten einer in der durchgehenden Ansicht sichtbaren Nachbarseite.
 struct NeighborPage {
     fingerprint: NeighborFingerprint,
-    /// Lage relativ zur aktuellen Seite (in Seiten, negativ = darüber)
-    offset: i64,
+    /// Ecke oben links in Koordinaten der aktuellen Seite
+    offset: glam::Vec2,
     camera_buffer: wgpu::Buffer,
     camera_bind_group: wgpu::BindGroup,
     background_buffer: Option<wgpu::Buffer>,
@@ -187,6 +190,9 @@ pub struct CanvasState {
     pub paper_theme: PaperTheme,
     /// Dunkle Tinte auf dunklem Papier aufhellen
     pub adapt_ink: bool,
+    /// Größe der aktuellen Seite und Rahmen, in den alle Seiten des Notizbuchs passen
+    page_size: glam::Vec2,
+    fit_box: glam::Vec2,
     /// Textfelder der sichtbaren Seiten nach Texturschlüssel (für die Rasterung)
     text_specs: HashMap<String, TextSpec>,
     /// Gerade bearbeitetes Textfeld der aktuellen Seite: nicht zeichnen (die Bearbeitung
@@ -431,7 +437,7 @@ impl CanvasState {
 
         // 6. Statische Buffer
         let paper_theme = PaperTheme::default();
-        let paper_quad = generate_paper_quad(paper_theme.paper_color());
+        let paper_quad = generate_paper_quad(paper_theme.paper_color(), crate::document::A4_SIZE);
         let paper_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Paper Quad Buffer"),
             size: (paper_quad.len() * std::mem::size_of::<InkVertex>()) as u64,
@@ -441,7 +447,11 @@ impl CanvasState {
         queue.write_buffer(&paper_buffer, 0, bytemuck::cast_slice(&paper_quad));
 
         let current_background = PageBackground::Grid5mm;
-        let bg_mesh = generate_background_mesh(current_background, paper_theme.pattern_color());
+        let bg_mesh = generate_background_mesh(
+            current_background,
+            paper_theme.pattern_color(),
+            crate::document::A4_SIZE,
+        );
         let background_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Background Mesh Buffer"),
             size: (Self::INITIAL_BACKGROUND_CAPACITY * std::mem::size_of::<InkVertex>()) as u64,
@@ -499,6 +509,8 @@ impl CanvasState {
             current_background,
             paper_theme,
             adapt_ink: false,
+            page_size: crate::document::A4_SIZE,
+            fit_box: crate::document::A4_SIZE,
             text_specs: HashMap::new(),
             hidden_text: None,
             text_resolution: 1.0,
@@ -530,7 +542,7 @@ impl CanvasState {
 
     /// Aktualisiert die 2D-Kamera Uniforms (Scale & Offset im NDC-Raum) basierend auf Viewport und Kamera.
     pub fn update_uniforms(&mut self) {
-        let camera_uniforms = self.camera_uniforms(0);
+        let camera_uniforms = self.camera_uniforms(glam::Vec2::ZERO);
         self.queue.write_buffer(
             &self.camera_buffer,
             0,
@@ -545,10 +557,11 @@ impl CanvasState {
         }
     }
 
-    /// Kamera für die Seite `page_offset` Seiten unter (negativ: über) der aktuellen.
-    fn camera_uniforms(&self, page_offset: i64) -> CameraUniforms {
+    /// Kamera für eine Seite mit der Ecke `origin` (Koordinaten der aktuellen Seite).
+    fn camera_uniforms(&self, origin: glam::Vec2) -> CameraUniforms {
         let (scale, mut offset) = self.camera.ndc_transform(&self.viewport);
-        offset[1] += page_offset as f32 * crate::viewport::PAGE_PITCH * scale[1];
+        offset[0] += origin.x * scale[0];
+        offset[1] += origin.y * scale[1];
         CameraUniforms {
             transform_scale: scale,
             transform_offset: offset,
@@ -577,13 +590,22 @@ impl CanvasState {
         true
     }
 
+    /// Rahmen, in den alle Seiten des Notizbuchs passen (bestimmt den Maßstab bei 100 %).
+    pub fn set_fit_box(&mut self, fit_box: glam::Vec2) {
+        if self.fit_box != fit_box {
+            self.fit_box = fit_box;
+            self.recalculate_viewport();
+        }
+    }
+
     fn recalculate_viewport(&mut self) {
-        self.viewport = PageViewport::calculate_with_insets(
+        self.viewport = PageViewport::calculate_for(
             self.size.width as f32,
             self.size.height as f32,
             Self::VIEWPORT_MARGIN,
-            self.ui_inset_left,
-            self.ui_inset_right,
+            (self.ui_inset_left, self.ui_inset_right),
+            self.fit_box,
+            self.page_size,
         );
         self.update_uniforms();
     }
@@ -653,60 +675,60 @@ impl CanvasState {
         self.camera.page_to_screen_vec2(page_pt, &self.viewport)
     }
 
-    /// Durchgehende Ansicht: Versatz (in Seiten) der Seite unter dem Bildschirmpunkt,
-    /// `None` neben den Seiten und zwischen zwei Seiten.
-    pub fn page_offset_at_screen(&self, screen_x: f32, screen_y: f32) -> Option<i64> {
+    /// Durchgehende Ansicht: Seite unter dem Bildschirmpunkt, `None` neben den Seiten und
+    /// zwischen zwei Seiten.
+    pub fn page_at_screen(&self, stack: &PageStack, screen_x: f32, screen_y: f32) -> Option<usize> {
         let p = self
             .camera
             .screen_to_page_unclamped(screen_x, screen_y, &self.viewport);
-        if !(0.0..=crate::document::PAGE_WIDTH).contains(&p.x) {
-            return None;
-        }
-        crate::viewport::page_offset_at(p.y)
+        let index = stack.page_at(p.y)?;
+        let x = p.x - stack.origins[index].x;
+        (0.0..=stack.sizes[index].x).contains(&x).then_some(index)
     }
 
-    /// Durchgehende Ansicht: Versatz (in Seiten) der Seite in der Mitte des Fensters.
-    pub fn page_offset_at_view_center(&self) -> Option<i64> {
+    /// Durchgehende Ansicht: Seite auf Höhe der Fenstermitte.
+    pub fn page_at_view_center(&self, stack: &PageStack) -> Option<usize> {
         let p = self.camera.screen_to_page_unclamped(
             0.0,
             self.size.height as f32 / 2.0,
             &self.viewport,
         );
-        crate::viewport::page_offset_at(p.y)
+        stack.page_at(p.y)
     }
 
-    /// Durchgehende Ansicht: Versätze der sichtbaren Nachbarseiten der aktuellen Seite.
-    pub fn visible_neighbor_offsets(&self, current: usize, page_count: usize) -> Vec<i64> {
+    /// Durchgehende Ansicht: sichtbare Nachbarseiten der aktuellen Seite.
+    pub fn visible_neighbors(&self, stack: &PageStack) -> Vec<usize> {
         let top = self
             .camera
             .screen_to_page_unclamped(0.0, 0.0, &self.viewport);
         let bottom =
             self.camera
                 .screen_to_page_unclamped(0.0, self.size.height as f32, &self.viewport);
-        crate::viewport::visible_neighbor_offsets(top.y, bottom.y, current, page_count)
+        stack.visible_neighbors(top.y, bottom.y)
     }
 
     /// Durchgehende Ansicht: Hält die Fenstermitte über dem Notizbuch (von der Oberkante der
-    /// ersten bis zur Unterkante der letzten Seite, waagerecht innerhalb der Seitenbreite), damit
+    /// ersten bis zur Unterkante der letzten Seite, waagerecht innerhalb der Seiten), damit
     /// man nicht ins Leere scrollt. `true`, wenn der Ausschnitt korrigiert wurde.
-    pub fn clamp_scroll(&mut self, current: usize, page_count: usize) -> bool {
+    pub fn clamp_scroll(&mut self, stack: &PageStack) -> bool {
         let center = [
             self.viewport.page_x + self.viewport.page_width / 2.0,
             self.size.height as f32 / 2.0,
         ];
-        let changed =
-            self.camera
-                .clamp_continuous_center(center, current, page_count, &self.viewport);
+        let changed = self
+            .camera
+            .clamp_continuous_center(center, stack, &self.viewport);
         if changed {
             self.update_uniforms();
         }
         changed
     }
 
-    /// Durchgehende Ansicht: Die Seite `k` Seiten weiter wird zur Bezugsseite, ohne dass sich
-    /// der Bildausschnitt bewegt. Die Nachbarseiten sind danach neu zu setzen.
-    pub fn shift_reference_page(&mut self, k: i64) {
-        self.camera.shift_reference_page(k);
+    /// Durchgehende Ansicht: Die Seite mit der Ecke `origin` (Koordinaten der aktuellen Seite)
+    /// wird zur Bezugsseite, ohne dass sich der Bildausschnitt bewegt. Danach ist die neue
+    /// Seite mit [`Self::sync_page`] zu setzen.
+    pub fn shift_reference_page(&mut self, origin: glam::Vec2) {
+        self.camera.shift_reference_page(origin);
         self.update_uniforms();
     }
 
@@ -756,7 +778,7 @@ impl CanvasState {
             self.queue.write_buffer(
                 &self.paper_buffer,
                 0,
-                bytemuck::cast_slice(&generate_paper_quad(theme.paper_color())),
+                bytemuck::cast_slice(&generate_paper_quad(theme.paper_color(), self.page_size)),
             );
             self.upload_background_mesh();
         }
@@ -774,8 +796,11 @@ impl CanvasState {
 
     /// Erzeugt das Muster für Hintergrund und Papierfarbe neu und lädt es auf die GPU.
     fn upload_background_mesh(&mut self) {
-        let mesh =
-            generate_background_mesh(self.current_background, self.paper_theme.pattern_color());
+        let mesh = generate_background_mesh(
+            self.current_background,
+            self.paper_theme.pattern_color(),
+            self.page_size,
+        );
         self.background_vertex_count = mesh.len() as u32;
 
         if mesh.len() > self.background_vertex_capacity {
@@ -799,6 +824,19 @@ impl CanvasState {
         page.rebuild_cache_if_dirty();
         // Die aktuelle Seite kann sich jetzt ändern: als Nachbarseite später neu hochladen
         self.neighbors.retain(|n| n.fingerprint.page_id != page.id);
+        if self.page_size != page.size {
+            self.page_size = page.size;
+            self.queue.write_buffer(
+                &self.paper_buffer,
+                0,
+                bytemuck::cast_slice(&generate_paper_quad(
+                    self.paper_theme.paper_color(),
+                    self.page_size,
+                )),
+            );
+            self.upload_background_mesh();
+            self.recalculate_viewport();
+        }
         self.set_background(page.background);
         let quads = self.page_image_quads(page, self.hidden_text);
         self.image_layer.set_quads(quads);
@@ -832,7 +870,7 @@ impl CanvasState {
     /// aktuellen Seite (in Seiten). Die Vertex-Caches der Seiten müssen aktuell sein
     /// ([`Page::rebuild_cache_if_dirty`]); unveränderte Seiten werden nicht erneut hochgeladen.
     /// Eine leere Liste schaltet die Nachbarseiten ab.
-    pub fn set_neighbor_pages(&mut self, pages: &[(i64, &Page)]) {
+    pub fn set_neighbor_pages(&mut self, pages: &[(glam::Vec2, &Page)]) {
         let mut old = std::mem::take(&mut self.neighbors);
         let mut image_groups = Vec::with_capacity(pages.len());
         for &(offset, page) in pages {
@@ -882,11 +920,16 @@ impl CanvasState {
                 buffer
             })
         };
-        let background =
-            generate_background_mesh(page.background, self.paper_theme.pattern_color());
+        // Papier und Muster in einem Puffer (Nachbarseiten können anders groß sein)
+        let mut background = generate_paper_quad(self.paper_theme.paper_color(), page.size);
+        background.extend(generate_background_mesh(
+            page.background,
+            self.paper_theme.pattern_color(),
+            page.size,
+        ));
         NeighborPage {
             fingerprint,
-            offset: 0,
+            offset: glam::Vec2::ZERO,
             camera_buffer,
             camera_bind_group,
             background_buffer: vertex_buffer_with("Neighbor Background Buffer", &background),
@@ -903,19 +946,14 @@ impl CanvasState {
         load: &mut dyn FnMut(&str) -> crate::image_layer::TextureSource,
     ) {
         // Text schärfer rastern, sobald weiter hineingezoomt wird (und gröber beim Herauszoomen)
-        let resolution = text_resolution(
-            self.viewport.page_width / crate::document::PAGE_WIDTH * self.camera.zoom,
-        );
+        let resolution = text_resolution(self.viewport.scale * self.camera.zoom);
         if resolution != self.text_resolution {
             self.text_resolution = resolution;
             self.image_layer
                 .forget_textures(|key| key.starts_with(TEXT_KEY_PREFIX));
         }
         // Importierte PDF-Seiten schärfer rendern, sobald die Standardauflösung vergrößert würde
-        let page_long_edge = crate::document::PAGE_HEIGHT.max(crate::document::PAGE_WIDTH)
-            * self.viewport.page_width
-            / crate::document::PAGE_WIDTH
-            * self.camera.zoom;
+        let page_long_edge = self.page_size.max_element() * self.viewport.scale * self.camera.zoom;
         self.image_layer.set_pdf_pixels(
             (page_long_edge > crate::pdf_doc::DISPLAY_RENDER_PIXELS as f32 * 1.25)
                 .then_some(crate::pdf_doc::ZOOMED_RENDER_PIXELS),
@@ -950,7 +988,7 @@ impl CanvasState {
         let mut quads: Vec<_> = page
             .pdf_background
             .iter()
-            .map(|pdf| (pdf.key(), pdf.corners()))
+            .map(|pdf| (pdf.key(), pdf.corners(page.size)))
             .collect();
         for stroke in &page.strokes {
             let Some(corners) = stroke.object_corners() else {
@@ -1196,8 +1234,6 @@ impl CanvasState {
             for (i, neighbor) in self.neighbors.iter().enumerate() {
                 render_pass.set_bind_group(0, &neighbor.camera_bind_group, &[]);
                 render_pass.set_pipeline(&self.triangle_pipeline);
-                render_pass.set_vertex_buffer(0, self.paper_buffer.slice(..));
-                render_pass.draw(0..6, 0..1);
                 if let Some(buffer) = &neighbor.background_buffer {
                     render_pass.set_vertex_buffer(0, buffer.slice(..));
                     render_pass.draw(0..neighbor.background_vertex_count, 0..1);

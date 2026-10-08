@@ -54,6 +54,7 @@ Eine latenzoptimierte, hardwarebeschleunigte Inking- und Notizbuch-Anwendung fü
 
 ### 📄 Seiten & Hintergründe
 - **Virtuelles DIN-A4-Raster:** 2100 × 2970 Koordinateneinheiten (10 Einheiten = 1 mm).
+- **Seitenformat aus dem PDF:** Beim PDF-Import bleiben Hochformat-Seiten DIN A4; Querformat-Seiten wie PowerPoint-Folien bekommen eine Querformat-Seite (297 mm breit, Höhe nach Seitenverhältnis) ohne leeren Streifen darunter. Eingefügte Seiten übernehmen das Format der aktuellen Seite.
 - **Hintergrundmuster:** Blanko, Kariert (5 mm), Liniert (7.5 mm), Punktraster (5 mm).
 - **Seitenverwaltung:** Vor- und Zurückblättern, neue Seiten anhängen oder direkt nach der aktuellen Seite einfügen (☰-Menü oder Seitenauswahl, z. B. zwischen zwei PDF-Folien), Seitensprung-Menü.
 

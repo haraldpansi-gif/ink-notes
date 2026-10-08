@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::canvas::InkVertex;
-use crate::document::{PageBackground, PAGE_HEIGHT, PAGE_WIDTH};
+use crate::document::PageBackground;
 
 /// Linienstärke für Gitter- und Schreiblinien in Seiteneinheiten (1.5 = 0.15 mm).
 pub const LINE_THICKNESS: f32 = 1.5;
@@ -99,15 +99,16 @@ pub fn adapt_ink_color(color: [f32; 4]) -> [f32; 4] {
     [color[0] + lift, color[1] + lift, color[2] + lift, color[3]]
 }
 
-/// Erzeugt die 6 Vertizes (2 Dreiecke) für das DIN-A4-Papierblatt.
-pub fn generate_paper_quad(color: [f32; 4]) -> Vec<InkVertex> {
+/// Erzeugt die 6 Vertizes (2 Dreiecke) für ein Blatt der Größe `size`.
+pub fn generate_paper_quad(color: [f32; 4], size: glam::Vec2) -> Vec<InkVertex> {
+    let (page_width, page_height) = (size.x, size.y);
     vec![
         InkVertex::new(0.0, 0.0, color),
-        InkVertex::new(PAGE_WIDTH, 0.0, color),
-        InkVertex::new(0.0, PAGE_HEIGHT, color),
-        InkVertex::new(0.0, PAGE_HEIGHT, color),
-        InkVertex::new(PAGE_WIDTH, 0.0, color),
-        InkVertex::new(PAGE_WIDTH, PAGE_HEIGHT, color),
+        InkVertex::new(page_width, 0.0, color),
+        InkVertex::new(0.0, page_height, color),
+        InkVertex::new(0.0, page_height, color),
+        InkVertex::new(page_width, 0.0, color),
+        InkVertex::new(page_width, page_height, color),
     ]
 }
 
@@ -129,8 +130,14 @@ fn push_quad(
     vertices.push(InkVertex::new(x_max, y_max, color));
 }
 
-/// Generiert das statische Vektor-Mesh für den gewählten Seitenhintergrund in `color`.
-pub fn generate_background_mesh(background: PageBackground, color: [f32; 4]) -> Vec<InkVertex> {
+/// Generiert das statische Vektor-Mesh für den gewählten Seitenhintergrund in `color` auf
+/// einem Blatt der Größe `size`.
+pub fn generate_background_mesh(
+    background: PageBackground,
+    color: [f32; 4],
+    size: glam::Vec2,
+) -> Vec<InkVertex> {
+    let (page_width, page_height) = (size.x, size.y);
     match background {
         PageBackground::Blank => Vec::new(),
         PageBackground::Grid5mm => {
@@ -139,27 +146,27 @@ pub fn generate_background_mesh(background: PageBackground, color: [f32; 4]) -> 
 
             // Vertikale Linien alle 5 mm
             let mut x = GRID_5MM_SPACING;
-            while x < PAGE_WIDTH {
+            while x < page_width {
                 push_quad(
                     &mut vertices,
                     color,
                     x - half_t,
                     0.0,
                     x + half_t,
-                    PAGE_HEIGHT,
+                    page_height,
                 );
                 x += GRID_5MM_SPACING;
             }
 
             // Horizontale Linien alle 5 mm
             let mut y = GRID_5MM_SPACING;
-            while y < PAGE_HEIGHT {
+            while y < page_height {
                 push_quad(
                     &mut vertices,
                     color,
                     0.0,
                     y - half_t,
-                    PAGE_WIDTH,
+                    page_width,
                     y + half_t,
                 );
                 y += GRID_5MM_SPACING;
@@ -176,13 +183,13 @@ pub fn generate_background_mesh(background: PageBackground, color: [f32; 4]) -> 
             let margin_bottom = 150.0;
 
             let mut y = margin_top;
-            while y <= PAGE_HEIGHT - margin_bottom {
+            while y <= page_height - margin_bottom {
                 push_quad(
                     &mut vertices,
                     color,
                     0.0,
                     y - half_t,
-                    PAGE_WIDTH,
+                    page_width,
                     y + half_t,
                 );
                 y += LINED_SPACING;
@@ -195,9 +202,9 @@ pub fn generate_background_mesh(background: PageBackground, color: [f32; 4]) -> 
             let half_d = DOT_SIZE / 2.0;
 
             let mut y = GRID_5MM_SPACING;
-            while y < PAGE_HEIGHT {
+            while y < page_height {
                 let mut x = GRID_5MM_SPACING;
-                while x < PAGE_WIDTH {
+                while x < page_width {
                     push_quad(
                         &mut vertices,
                         color,
@@ -220,22 +227,29 @@ pub fn generate_background_mesh(background: PageBackground, color: [f32; 4]) -> 
 mod tests {
     use super::*;
 
+    use crate::document::{A4_SIZE, PAGE_HEIGHT, PAGE_WIDTH};
+
     #[test]
     fn test_paper_quad_generation() {
-        let quad = generate_paper_quad(PaperTheme::White.paper_color());
+        let quad = generate_paper_quad(PaperTheme::White.paper_color(), A4_SIZE);
         assert_eq!(quad.len(), 6);
         assert_eq!(quad[0].position, [0.0, 0.0]);
         assert_eq!(quad[5].position, [PAGE_WIDTH, PAGE_HEIGHT]);
+        let slide = generate_paper_quad(
+            PaperTheme::White.paper_color(),
+            glam::Vec2::new(2970.0, 1671.0),
+        );
+        assert_eq!(slide[5].position, [2970.0, 1671.0]);
     }
 
     const PATTERN: [f32; 4] = [0.5, 0.5, 0.5, 1.0];
 
     #[test]
     fn test_background_meshes() {
-        let blank = generate_background_mesh(PageBackground::Blank, PATTERN);
+        let blank = generate_background_mesh(PageBackground::Blank, PATTERN, A4_SIZE);
         assert!(blank.is_empty());
 
-        let grid = generate_background_mesh(PageBackground::Grid5mm, PATTERN);
+        let grid = generate_background_mesh(PageBackground::Grid5mm, PATTERN, A4_SIZE);
         assert!(!grid.is_empty());
         assert_eq!(
             grid.len() % 6,
@@ -243,11 +257,11 @@ mod tests {
             "Muss ein Vielfaches von 6 Vertizes sein (Dreiecke)"
         );
 
-        let lined = generate_background_mesh(PageBackground::Lined, PATTERN);
+        let lined = generate_background_mesh(PageBackground::Lined, PATTERN, A4_SIZE);
         assert!(!lined.is_empty());
         assert_eq!(lined.len() % 6, 0);
 
-        let dots = generate_background_mesh(PageBackground::DotGrid, PATTERN);
+        let dots = generate_background_mesh(PageBackground::DotGrid, PATTERN, A4_SIZE);
         assert!(!dots.is_empty());
         assert_eq!(dots.len() % 6, 0);
     }
@@ -255,9 +269,9 @@ mod tests {
     #[test]
     fn test_background_mesh_uses_theme_color() {
         let dark = PaperTheme::Black.pattern_color();
-        let mesh = generate_background_mesh(PageBackground::Lined, dark);
+        let mesh = generate_background_mesh(PageBackground::Lined, dark, A4_SIZE);
         assert!(mesh.iter().all(|v| v.color == dark));
-        let quad = generate_paper_quad(PaperTheme::Cream.paper_color());
+        let quad = generate_paper_quad(PaperTheme::Cream.paper_color(), A4_SIZE);
         assert!(quad
             .iter()
             .all(|v| v.color == PaperTheme::Cream.paper_color()));

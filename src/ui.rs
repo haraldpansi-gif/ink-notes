@@ -929,27 +929,37 @@ const PAGE_TILE: egui::Vec2 = egui::vec2(66.0, 66.0 * PAGE_HEIGHT / PAGE_WIDTH +
 /// Höchstzahl gezeichneter Punkte pro Vorschau (dünnt volle Seiten aus).
 const THUMBNAIL_POINT_BUDGET: usize = 1500;
 
-/// Zeichenbefehle für die verkleinerte Vorschau einer Seite in `rect` (A4-Format) in der
-/// Papierfarbe `paper`. Striche werden als Linien gezeichnet und bei vielen Punkten
-/// gleichmäßig ausgedünnt; `adapt_ink` hellt dunkle Tinte wie auf dem Blatt auf.
+/// Zeichenbefehle für die verkleinerte Vorschau einer Seite in `rect` in der Papierfarbe
+/// `paper`: so groß wie möglich, waagerecht zentriert und oben (Querformat-Seiten sind
+/// flacher). Striche werden als Linien gezeichnet und bei vielen Punkten gleichmäßig
+/// ausgedünnt; `adapt_ink` hellt dunkle Tinte wie auf dem Blatt auf.
 pub fn page_thumbnail_shapes(
     page: &Page,
     rect: egui::Rect,
     paper: PaperTheme,
     adapt_ink: bool,
 ) -> Vec<egui::Shape> {
+    let scale = (rect.width() / page.size.x).min(rect.height() / page.size.y);
+    let size = egui::vec2(page.size.x, page.size.y) * scale;
+    let sheet = egui::Rect::from_min_size(
+        rect.min + egui::vec2((rect.width() - size.x) / 2.0, 0.0),
+        size,
+    );
     let mut shapes = vec![egui::Shape::rect_filled(
-        rect,
+        sheet,
         egui::Rounding::same(3.0),
         linear_color32(paper.paper_color()),
     )];
     let adapt = adapt_ink && paper.is_dark();
-    let scale = rect.width() / PAGE_WIDTH;
-    let to_screen = |p: glam::Vec2| rect.min + egui::vec2(p.x * scale, p.y * scale);
+    let to_screen = |p: glam::Vec2| sheet.min + egui::vec2(p.x * scale, p.y * scale);
 
     // Importierte PDF-Seite als helle Fläche mit Rand
     if let Some(pdf) = &page.pdf_background {
-        let points: Vec<egui::Pos2> = pdf.corners().iter().map(|&c| to_screen(c)).collect();
+        let points: Vec<egui::Pos2> = pdf
+            .corners(page.size)
+            .iter()
+            .map(|&c| to_screen(c))
+            .collect();
         shapes.push(egui::Shape::convex_polygon(
             points,
             egui::Color32::from_rgb(236, 238, 243),
@@ -3763,6 +3773,7 @@ mod tests {
         state.text_edit = Some(TextEditing::new_at(
             notebook.current_page().id,
             glam::Vec2::new(200.0, 300.0),
+            PAGE_WIDTH,
             42.0,
             TextFont::Sans,
             [0.0, 0.0, 0.0, 1.0],

@@ -117,15 +117,41 @@ pub enum ExportStrategy {
 }
 
 /// Rechnet eine interne Seitenkoordinate (x, y) in PDF-Millimeter-Koordinaten um (mit Y-Inversion).
+///
+/// Bezugshöhe ist die A4-Seite; für anders hohe Seiten verschiebt [`begin_page_layer`] die
+/// Ebene entsprechend.
 #[inline]
 pub fn page_to_pdf_mm(x: f32, y: f32) -> (f32, f32) {
-    let x_norm = (x / PAGE_WIDTH).clamp(0.0, 1.0);
-    let y_norm = (y / PAGE_HEIGHT).clamp(0.0, 1.0);
-
-    let x_mm = x_norm * A4_WIDTH_MM;
-    let y_mm = (1.0 - y_norm) * A4_HEIGHT_MM; // PDF-Ursprung liegt unten links
-
+    let x_mm = x / PAGE_WIDTH * A4_WIDTH_MM;
+    let y_mm = (1.0 - y / PAGE_HEIGHT) * A4_HEIGHT_MM; // PDF-Ursprung liegt unten links
     (x_mm, y_mm)
+}
+
+/// PDF-Punkte je Seiteneinheit.
+const PT_PER_UNIT: f32 = A4_WIDTH_MM / PAGE_WIDTH * 72.0 / 25.4;
+
+/// Größe der Seite `page` im PDF.
+fn pdf_page_mm(page: &Page) -> (Mm, Mm) {
+    let mm = page.size / crate::document::UNITS_PER_MM;
+    (Mm(mm.x), Mm(mm.y))
+}
+
+/// Beginnt eine Ebene: Koordinaten beziehen sich auf eine A4-hohe Seite (siehe
+/// [`page_to_pdf_mm`]) und werden auf die tatsächliche Höhe von `page` verschoben.
+fn begin_page_layer(layer: &printpdf::PdfLayerReference, page: &Page) {
+    layer.save_graphics_state();
+    let dy = (page.size.y - PAGE_HEIGHT) * PT_PER_UNIT;
+    if dy != 0.0 {
+        layer.set_ctm(printpdf::CurTransMat::Translate(
+            printpdf::Pt(0.0),
+            printpdf::Pt(dy),
+        ));
+    }
+}
+
+/// Beendet eine mit [`begin_page_layer`] begonnene Ebene.
+fn end_page_layer(layer: &printpdf::PdfLayerReference) {
+    layer.restore_graphics_state();
 }
 
 /// Erzeugt ein PDF-Dokument aus einem Notizbuch und speichert es als Datei.
@@ -240,9 +266,11 @@ fn pdf_underlays(notebook: &Notebook) -> Vec<crate::pdf_merge::Underlay> {
         .enumerate()
         .filter_map(|(i, page)| {
             let pdf = page.pdf_background.as_ref()?;
-            let corners = pdf.corners();
-            let top_right = page_to_pdf_pt(corners[1]);
-            let bottom_left = page_to_pdf_pt(corners[3]);
+            let corners = pdf.corners(page.size);
+            // Unterlagen werden ohne die Verschiebung von `begin_page_layer` gesetzt
+            let shift = glam::Vec2::new(0.0, (page.size.y - PAGE_HEIGHT) * PT_PER_UNIT);
+            let top_right = page_to_pdf_pt(corners[1]) + shift;
+            let bottom_left = page_to_pdf_pt(corners[3]) + shift;
             let size = top_right - bottom_left;
             Some(crate::pdf_merge::Underlay {
                 target_page: i,
@@ -292,62 +320,50 @@ fn generate_pdf_document_with(
         .into());
     }
 
-    // 1. Erstes Dokument mit Seite 1 erstellen
+    // Erste Seite legt das Dokument an, alle weiteren werden angehängt (je in ihrer Größe)
     let title = "ink-notes Notebook";
-    let (doc, page1_idx, layer1_bg) =
-        PdfDocument::new(title, Mm(A4_WIDTH_MM), Mm(A4_HEIGHT_MM), "Background");
+    let (width, height) = pdf_page_mm(&notebook.pages[0]);
+    let (doc, page1_idx, layer1_bg) = PdfDocument::new(title, width, height, "Background");
     let fonts = embed_text_fonts(&doc, notebook)?;
 
-    // Seitentitel werden zu Lesezeichen (Inhaltsverzeichnis im PDF-Betrachter)
-    if let Some(title) = &notebook.pages[0].title {
-        doc.add_bookmark(title.clone(), page1_idx);
-    }
-
-    // Seite 1 befüllen
-    let page1_ref = doc.get_page(page1_idx);
-    let layer1_bg_ref = page1_ref.get_layer(layer1_bg);
-    render_background_layer(&layer1_bg_ref, notebook.pages[0].background);
-    if raster_pdf_pages.contains(&0) {
-        render_pdf_raster(&page1_ref.add_layer("PDF"), &notebook.pages[0], assets);
-    }
-    if notebook.pages[0].strokes.iter().any(Stroke::is_image) {
-        render_image_layer(&page1_ref.add_layer("Images"), &notebook.pages[0], assets);
-    }
-    if notebook.pages[0].strokes.iter().any(Stroke::is_text) {
-        render_text_layer(&page1_ref.add_layer("Text"), &notebook.pages[0], &fonts);
-    }
-
-    let layer1_ink_ref = page1_ref.add_layer("Ink");
-    render_ink_layer(&layer1_ink_ref, &notebook.pages[0], strategy);
-
-    // 2. Alle nachfolgenden Seiten hinzufügen
-    for (i, page) in notebook.pages.iter().enumerate().skip(1) {
-        let (page_idx, layer_bg) = doc.add_page(Mm(A4_WIDTH_MM), Mm(A4_HEIGHT_MM), "Background");
+    for (i, page) in notebook.pages.iter().enumerate() {
+        let (page_idx, layer_bg) = if i == 0 {
+            (page1_idx, layer1_bg)
+        } else {
+            let (width, height) = pdf_page_mm(page);
+            doc.add_page(width, height, "Background")
+        };
+        // Seitentitel werden zu Lesezeichen (Inhaltsverzeichnis im PDF-Betrachter)
         if let Some(title) = &page.title {
             doc.add_bookmark(title.clone(), page_idx);
         }
         let page_ref = doc.get_page(page_idx);
-        let layer_bg_ref = page_ref.get_layer(layer_bg);
-        render_background_layer(&layer_bg_ref, page.background);
+        render_background_layer(&page_ref.get_layer(layer_bg), page);
+        let layer = |name: &str, render: &dyn Fn(&printpdf::PdfLayerReference)| {
+            let layer = page_ref.add_layer(name);
+            begin_page_layer(&layer, page);
+            render(&layer);
+            end_page_layer(&layer);
+        };
         if raster_pdf_pages.contains(&i) {
-            render_pdf_raster(&page_ref.add_layer("PDF"), page, assets);
+            layer("PDF", &|l| render_pdf_raster(l, page, assets));
         }
         if page.strokes.iter().any(Stroke::is_image) {
-            render_image_layer(&page_ref.add_layer("Images"), page, assets);
+            layer("Images", &|l| render_image_layer(l, page, assets));
         }
         if page.strokes.iter().any(Stroke::is_text) {
-            render_text_layer(&page_ref.add_layer("Text"), page, &fonts);
+            layer("Text", &|l| render_text_layer(l, page, &fonts));
         }
-
-        let layer_ink_ref = page_ref.add_layer("Ink");
-        render_ink_layer(&layer_ink_ref, page, strategy);
+        layer("Ink", &|l| render_ink_layer(l, page, strategy));
     }
 
     Ok(doc)
 }
 
 /// Rendert das Vektorraster auf Layer 1 ("Background").
-fn render_background_layer(layer: &printpdf::PdfLayerReference, background: PageBackground) {
+fn render_background_layer(layer: &printpdf::PdfLayerReference, page: &Page) {
+    let background = page.background;
+    let (Mm(page_width_mm), Mm(page_height_mm)) = pdf_page_mm(page);
     let grid_color = Color::Rgb(Rgb::new(0.88, 0.88, 0.88, None));
     layer.set_outline_color(grid_color.clone());
     layer.set_outline_thickness(0.4); // Feine 0.15 mm Haarlinie (ca. 0.4 pt)
@@ -361,11 +377,11 @@ fn render_background_layer(layer: &printpdf::PdfLayerReference, background: Page
 
             // Vertikale Linien alle 5 mm
             let mut x = spacing_mm;
-            while x < A4_WIDTH_MM {
+            while x < page_width_mm {
                 let line = Line {
                     points: vec![
                         (Point::new(Mm(x), Mm(0.0)), false),
-                        (Point::new(Mm(x), Mm(A4_HEIGHT_MM)), false),
+                        (Point::new(Mm(x), Mm(page_height_mm)), false),
                     ],
                     is_closed: false,
                 };
@@ -375,11 +391,11 @@ fn render_background_layer(layer: &printpdf::PdfLayerReference, background: Page
 
             // Horizontale Linien alle 5 mm
             let mut y = spacing_mm;
-            while y < A4_HEIGHT_MM {
+            while y < page_height_mm {
                 let line = Line {
                     points: vec![
                         (Point::new(Mm(0.0), Mm(y)), false),
-                        (Point::new(Mm(A4_WIDTH_MM), Mm(y)), false),
+                        (Point::new(Mm(page_width_mm), Mm(y)), false),
                     ],
                     is_closed: false,
                 };
@@ -394,11 +410,11 @@ fn render_background_layer(layer: &printpdf::PdfLayerReference, background: Page
             let margin_bottom_mm = 15.0;
 
             let mut y = margin_bottom_mm;
-            while y <= A4_HEIGHT_MM - margin_top_mm {
+            while y <= page_height_mm - margin_top_mm {
                 let line = Line {
                     points: vec![
                         (Point::new(Mm(0.0), Mm(y)), false),
-                        (Point::new(Mm(A4_WIDTH_MM), Mm(y)), false),
+                        (Point::new(Mm(page_width_mm), Mm(y)), false),
                     ],
                     is_closed: false,
                 };
@@ -412,9 +428,9 @@ fn render_background_layer(layer: &printpdf::PdfLayerReference, background: Page
             let half_dot = 0.2; // 0.4 mm Kantenlänge
 
             let mut y = spacing_mm;
-            while y < A4_HEIGHT_MM {
+            while y < page_height_mm {
                 let mut x = spacing_mm;
-                while x < A4_WIDTH_MM {
+                while x < page_width_mm {
                     let dot_poly = Polygon {
                         rings: vec![vec![
                             (Point::new(Mm(x - half_dot), Mm(y - half_dot)), false),
@@ -613,7 +629,7 @@ fn render_text_layer(
         let size = glam::Vec2::new(text.wrap_width.max(text.size), layout.height());
         let (origin, [right, down]) = crate::text::frame_axes(&corners, size);
         // Seite → PDF-Punkte: x · k, Höhe − y · k
-        let k = A4_WIDTH_MM / PAGE_WIDTH * 72.0 / 25.4;
+        let k = PT_PER_UNIT;
         let o = page_to_pdf_pt(origin);
         let matrix = [right.x * k, -right.y * k, -down.x * k, down.y * k, o.x, o.y];
         layer.save_graphics_state();
@@ -730,7 +746,7 @@ fn render_pdf_raster(
             placeholder_xobject()
         }
     };
-    draw_image_xobject(layer, xobject, &pdf.corners());
+    draw_image_xobject(layer, xobject, &pdf.corners(page.size));
 }
 
 /// Rendert eine mathematisch bereinigte Form (Gerade, Kreis, Rechteck, Koordinatensystem)
@@ -1513,7 +1529,8 @@ mod tests {
             );
         }
 
-        // Exportiertes PDF lässt sich wieder rendern: Folie oben, rotes Quadrat oben links
+        // Exportiertes PDF lässt sich wieder rendern: Querformat-Folie füllt ihre Seite, rotes
+        // Quadrat oben links
         let pdf = hayro::hayro_syntax::Pdf::new(bytes).unwrap();
         let image = crate::pdf_doc::render_page(&pdf, 0, 600).unwrap();
         let px = |x: u32, y: u32| {
@@ -1521,10 +1538,10 @@ mod tests {
             image.pixels[i..i + 3].to_vec()
         };
         assert_eq!(px(5, 5), vec![255, 0, 0], "Quadrat der Folie oben links");
-        assert_eq!(
-            px(200, 500),
-            vec![255, 255, 255],
-            "unter der Folie ist Platz"
+        let ratio = image.width as f32 / image.height as f32;
+        assert!(
+            (ratio - 842.0 / 595.0).abs() < 0.01,
+            "Seite im Folienformat: {ratio}"
         );
 
         // Gedrehte Seite (/Rotate 90) erscheint wie im PDF-Betrachter: das Quadrat liegt
