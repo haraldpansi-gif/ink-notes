@@ -128,6 +128,8 @@ struct NeighborFingerprint {
     vertex_count: usize,
     stroke_count: usize,
     last_stroke_id: Option<u64>,
+    /// Neuaufbau des Caches (z. B. verschobener Inhalt bei gleicher Strichzahl)
+    cache_generation: u64,
 }
 
 impl NeighborFingerprint {
@@ -141,6 +143,7 @@ impl NeighborFingerprint {
             vertex_count: page.vertex_cache.len(),
             stroke_count: page.strokes.len(),
             last_stroke_id: page.strokes.last().map(|s| s.id),
+            cache_generation: page.cache_generation,
         }
     }
 }

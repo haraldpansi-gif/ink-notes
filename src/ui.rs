@@ -35,6 +35,8 @@ pub enum ActiveTool {
     Select,
     /// Textfelder schreiben und bearbeiten
     Text,
+    /// Platz schaffen: Inhalt ab einer Höhe nach unten oder oben schieben
+    Space,
 }
 
 impl ActiveTool {
@@ -46,6 +48,7 @@ impl ActiveTool {
             ActiveTool::Shape => "Formen (Shape)",
             ActiveTool::Select => "Auswahl / Lasso (Select)",
             ActiveTool::Text => "Text (T)",
+            ActiveTool::Space => "Platz schaffen",
         }
     }
 
@@ -177,6 +180,23 @@ pub enum MoveSubject {
     Notebook(String),
     /// Pfad des Ordners
     Folder(String),
+}
+
+/// Laufendes Platzschaffen (für die Vorschau): Seite, Höhe auf der Seite, bisherige
+/// Verschiebung und wie weit es nach oben höchstens geht (Seiteneinheiten).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SpaceDrag {
+    pub page_index: usize,
+    pub y: f32,
+    pub dy: f32,
+    pub up_limit: f32,
+}
+
+impl SpaceDrag {
+    /// Verschiebung nach oben begrenzt auf den leeren Platz.
+    pub fn clamped_dy(&self) -> f32 {
+        self.dy.max(-self.up_limit)
+    }
 }
 
 /// Kontextmenü nach langem Drücken auf das Blatt.
@@ -378,6 +398,8 @@ pub struct UiState {
     pub show_color_picker: bool,
     /// Kontextmenü nach langem Drücken (Einfügen an dieser Stelle)
     pub context_menu: Option<ContextMenu>,
+    /// Laufendes Platzschaffen (Vorschau)
+    pub space_drag: Option<SpaceDrag>,
     /// Tasten am Stift und ihre Belegung; die gerade gedrückte (Index) wird hervorgehoben
     pub stylus_buttons: Vec<crate::settings::StylusButton>,
     pub pressed_stylus_button: Option<usize>,
@@ -476,6 +498,7 @@ impl Default for UiState {
             is_text_color_menu_open: false,
             show_color_picker: false,
             context_menu: None,
+            space_drag: None,
             stylus_buttons: Vec::new(),
             pressed_stylus_button: None,
             confirm_delete_page: false,
@@ -593,10 +616,10 @@ impl UiState {
     /// Blätterpfeile).
     pub fn sidebar_button_size(tool: ActiveTool, max_height: f32, continuous: bool) -> f32 {
         let select = matches!(tool, ActiveTool::Select | ActiveTool::Text);
-        // Notizbücher, 6 Werkzeuge, Undo/Redo, Seitenzahl und neue Seite (einzeln blättern:
-        // dazu zwei Pfeile), Menü (+ 4 Auswahl-Aktionen bzw. Schriftknöpfe)
+        // Notizbücher, 7 Werkzeuge, Lineal, Undo/Redo, Seitenzahl und neue Seite (einzeln
+        // blättern: dazu zwei Pfeile), Menü (+ 4 Auswahl-Aktionen bzw. Schriftknöpfe)
         let page_buttons = if continuous { 2 } else { 4 };
-        let buttons = 10 + page_buttons + if select { 4 } else { 0 };
+        let buttons = 11 + page_buttons + if select { 4 } else { 0 };
         let dividers = 5 + usize::from(select);
         let spacing = 3.0;
         let needed = |b: f32| {
@@ -679,7 +702,7 @@ impl UiState {
             ActiveTool::Pen | ActiveTool::Shape | ActiveTool::Select => self.pen_color,
             ActiveTool::Highlighter => self.highlighter_color,
             ActiveTool::Text => self.text_color,
-            ActiveTool::Eraser => [0.0, 0.0, 0.0, 0.0],
+            ActiveTool::Eraser | ActiveTool::Space => [0.0, 0.0, 0.0, 0.0],
         }
     }
 
@@ -690,7 +713,7 @@ impl UiState {
                 self.pen_stroke_width_mm
             }
             ActiveTool::Highlighter => self.highlighter_stroke_width_mm,
-            ActiveTool::Eraser => 3.0,
+            ActiveTool::Eraser | ActiveTool::Space => 3.0,
         }
     }
 
@@ -2125,6 +2148,55 @@ fn context_menu(ctx: &egui::Context, state: &mut UiState, actions: &mut Vec<UiAc
     }
 }
 
+/// Vorschau beim Platzschaffen: Linie an der Ansatzhöhe und das Band, das eingefügt (grün)
+/// bzw. geschlossen (orange) wird, mit Angabe in Millimetern.
+fn space_preview(ctx: &egui::Context, state: &UiState, notebook: &Notebook) {
+    let (Some(drag), Some(view)) = (state.space_drag, state.page_view) else {
+        return;
+    };
+    let Some(page) = notebook.pages.get(drag.page_index) else {
+        return;
+    };
+    let dy = drag.clamped_dy();
+    let painter = ctx.layer_painter(egui::LayerId::new(
+        egui::Order::Foreground,
+        egui::Id::new("space_preview"),
+    ));
+    let left = view.to_screen(glam::Vec2::new(0.0, drag.y));
+    let right = view.to_screen(glam::Vec2::new(page.size.x, drag.y));
+    let moved = view.to_screen(glam::Vec2::new(page.size.x, drag.y + dy));
+    let (fill, line) = if dy >= 0.0 {
+        (
+            egui::Color32::from_rgba_unmultiplied(46, 204, 113, 50),
+            egui::Color32::from_rgb(39, 174, 96),
+        )
+    } else {
+        (
+            egui::Color32::from_rgba_unmultiplied(230, 126, 34, 60),
+            egui::Color32::from_rgb(211, 84, 0),
+        )
+    };
+    let band = egui::Rect::from_two_pos(left, moved);
+    painter.rect_filled(band, 0.0, fill);
+    painter.line_segment([left, right], egui::Stroke::new(2.0_f32, line));
+    painter.line_segment(
+        [egui::pos2(left.x, moved.y), moved],
+        egui::Stroke::new(2.0_f32, line),
+    );
+    let mm = dy / crate::document::UNITS_PER_MM;
+    painter.text(
+        egui::pos2(right.x - 8.0, moved.y.max(left.y) + 4.0),
+        egui::Align2::RIGHT_TOP,
+        if dy >= 0.0 {
+            format!("⏷ {mm:.0} mm Platz")
+        } else {
+            format!("⏶ {:.0} mm", -mm)
+        },
+        egui::FontId::proportional(14.0),
+        line,
+    );
+}
+
 /// Durchgehende Ansicht: dunkle Linie an jeder Grenze zweier Seiten (die Seiten liegen
 /// lückenlos untereinander). Unter allen Fenstern der Oberfläche, über der Tinte.
 fn page_separators(ctx: &egui::Context, state: &UiState, notebook: &Notebook) {
@@ -2555,6 +2627,7 @@ pub fn render_ui(
     let mut actions = std::mem::take(&mut state.queued_actions);
     state.screen_size = ctx.screen_rect().size();
     page_separators(ctx, state, notebook);
+    space_preview(ctx, state, notebook);
     ruler_overlay(ctx, state);
     text_edit_overlay(ctx, state);
     context_menu(ctx, state, &mut actions);
@@ -2732,6 +2805,13 @@ pub fn render_ui(
                                         ActiveTool::Select,
                                         SidebarIcon::Lasso,
                                         "Auswählen: verschieben, drehen, skalieren, kopieren (V)",
+                                    ),
+                                    (
+                                        ActiveTool::Space,
+                                        SidebarIcon::Glyph("↕"),
+                                        "Platz schaffen: auf das Blatt tippen und nach unten ziehen – alles \
+                                         darunter rutscht mit, auch auf die folgenden Seiten; nach oben \
+                                         schließt leeren Platz",
                                     ),
                                     (
                                         ActiveTool::Text,

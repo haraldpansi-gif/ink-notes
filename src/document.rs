@@ -722,6 +722,8 @@ pub struct Page {
     pub vertex_cache: Vec<InkVertex>,
     pub stroke_ranges: Vec<Range<u32>>,
     pub is_dirty: bool,
+    /// Zählt die Neuaufbauten des Vertex-Caches (erkennt geänderte Nachbarseiten)
+    pub cache_generation: u64,
     pub is_loaded: bool,
     pub persist: PersistState,
     pub history: HistoryStack,
@@ -742,6 +744,7 @@ impl Page {
             is_loaded: true,
             persist: PersistState::Normal,
             history: HistoryStack::new(),
+            cache_generation: 0,
         }
     }
 
@@ -760,6 +763,7 @@ impl Page {
             is_loaded: false,
             persist: PersistState::Normal,
             history: HistoryStack::new(),
+            cache_generation: 0,
         }
     }
 
@@ -958,6 +962,7 @@ impl Page {
         }
 
         self.is_dirty = false;
+        self.cache_generation += 1;
     }
 
     /// Berechnet die kombinierte AABB einer Menge von Strichen.
@@ -1312,6 +1317,298 @@ impl Notebook {
 impl Default for Notebook {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Abstand zum oberen Rand, mit dem ein Objekt auf der nächsten Seite landet, wenn es beim
+/// Platzschaffen über das Seitenende rutschen würde (10 mm).
+pub const SPACE_PAGE_BREAK_MARGIN: f32 = 10.0 * UNITS_PER_MM;
+
+/// Ein beim Platzschaffen verschobener Strich: vorher und nachher, jeweils mit Seite.
+#[derive(Debug, Clone)]
+pub struct StrokeMove {
+    pub from_page: u64,
+    pub before: Stroke,
+    pub to_page: u64,
+    pub after: Stroke,
+}
+
+/// Für das Platzschaffen neu eingefügte Seite.
+#[derive(Debug, Clone)]
+pub struct AddedPage {
+    pub id: u64,
+    /// Seite, hinter der sie liegt
+    pub after_page: u64,
+    pub size: glam::Vec2,
+    pub background: PageBackground,
+}
+
+/// Ein Platzschaffen-Schritt (für Rückgängig und Wiederholen).
+#[derive(Debug, Clone)]
+pub struct SpaceShift {
+    pub moves: Vec<StrokeMove>,
+    pub added_pages: Vec<AddedPage>,
+}
+
+impl Notebook {
+    /// Seiten, die beim Platzschaffen auf Seite `page_index` mitrutschen: sie selbst und die
+    /// folgenden bis vor die nächste Seite mit importiertem PDF (deren Notizen gehören zur
+    /// PDF-Seite). `None` auf einer PDF-Seite.
+    pub fn space_run(&self, page_index: usize) -> Option<std::ops::Range<usize>> {
+        let page = self.pages.get(page_index)?;
+        if page.pdf_background.is_some() {
+            return None;
+        }
+        let end = (page_index + 1..self.pages.len())
+            .find(|&i| self.pages[i].pdf_background.is_some())
+            .unwrap_or(self.pages.len());
+        Some(page_index..end)
+    }
+
+    /// Wie weit sich der Inhalt unter `y` auf Seite `page_index` höchstens nach oben schieben
+    /// lässt: bis an das unterste Objekt darüber (bzw. den oberen Seitenrand).
+    pub fn space_up_limit(&self, page_index: usize, y: f32) -> f32 {
+        let Some(page) = self.pages.get(page_index) else {
+            return 0.0;
+        };
+        let bottom = page
+            .strokes
+            .iter()
+            .filter(|s| s.aabb.min.y < y)
+            .map(|s| s.aabb.max.y)
+            .fold(0.0_f32, f32::max);
+        (y - bottom).max(0.0)
+    }
+
+    /// Platz schaffen: Alles, was auf Seite `page_index` unterhalb von `y` beginnt, und der
+    /// ganze Inhalt der folgenden Seiten (siehe [`Self::space_run`]) rutscht um `dy` nach unten
+    /// (negativ: nach oben, höchstens bis [`Self::space_up_limit`]). Die Seiten gelten dabei
+    /// als durchgehende Spalte: Was über ein Seitenende hinausragen würde, beginnt auf der
+    /// nächsten Seite (mit [`SPACE_PAGE_BREAK_MARGIN`] Abstand), alles danach rutscht
+    /// entsprechend weiter; fehlende Seiten werden angehängt. Der Schritt landet im Verlauf
+    /// der Seite und gibt die Kennungen der geänderten Seiten zurück (`None`: nichts zu tun).
+    pub fn make_space(&mut self, page_index: usize, y: f32, dy: f32) -> Option<Vec<u64>> {
+        let run = self.space_run(page_index)?;
+        if self.pages[run.clone()].iter().any(|p| !p.is_loaded) {
+            return None;
+        }
+        let dy = if dy < 0.0 {
+            dy.max(-self.space_up_limit(page_index, y))
+        } else {
+            dy
+        };
+        if dy.abs() < 1.0 {
+            return None;
+        }
+
+        // Seiten als durchgehende Spalte: Lage jeder Seite (auch noch anzulegender)
+        let last_size = self.pages[run.end - 1].size;
+        let mut tops = Vec::new();
+        let mut heights = Vec::new();
+        let mut top = 0.0;
+        for page in &self.pages[run.clone()] {
+            tops.push(top);
+            heights.push(page.size.y);
+            top += page.size.y;
+        }
+
+        // Verschoben wird alles unterhalb von y, in der Reihenfolge von oben nach unten
+        let mut movable: Vec<(usize, f32, Stroke)> = Vec::new();
+        for (k, page) in self.pages[run.clone()].iter().enumerate() {
+            for stroke in &page.strokes {
+                if k > 0 || stroke.aabb.min.y >= y {
+                    movable.push((k, tops[k] + stroke.aabb.min.y, stroke.clone()));
+                }
+            }
+        }
+        if movable.is_empty() {
+            return None;
+        }
+        movable.sort_by(|a, b| a.1.total_cmp(&b.1));
+
+        let mut extra = 0.0_f32;
+        let mut targets = Vec::with_capacity(movable.len());
+        for (_, global_top, stroke) in &movable {
+            let height = stroke.aabb.max.y - stroke.aabb.min.y;
+            let mut new_top = global_top + dy + extra;
+            let mut target = 0;
+            for _ in 0..2 {
+                // Seite, auf der das Objekt beginnt (bei Bedarf weitere Seiten)
+                target = 0;
+                while target + 1 < tops.len() && tops[target + 1] <= new_top {
+                    target += 1;
+                }
+                while tops[target] + heights[target] <= new_top {
+                    tops.push(tops[target] + heights[target]);
+                    heights.push(last_size.y);
+                    target += 1;
+                }
+                let page_end = tops[target] + heights[target];
+                let fits_on_a_page = height <= heights[target] - 2.0 * SPACE_PAGE_BREAK_MARGIN;
+                if new_top + height <= page_end || !fits_on_a_page {
+                    break;
+                }
+                // Ragt über das Seitenende: auf die nächste Seite, alles Folgende rutscht mit
+                let margin = if dy > 0.0 {
+                    SPACE_PAGE_BREAK_MARGIN
+                } else {
+                    0.0
+                };
+                let bump = page_end + margin - new_top;
+                extra += bump;
+                new_top += bump;
+            }
+            targets.push((target, new_top));
+        }
+
+        // Fehlende Seiten hinter dem Abschnitt einfügen
+        let needed = targets.iter().map(|(t, _)| t + 1).max().unwrap_or(0);
+        let mut added_pages = Vec::new();
+        let background = self.pages[run.end - 1].background;
+        for k in run.len()..needed {
+            let after_page = self.pages[run.start + k - 1].id;
+            let id = self.next_page_id;
+            self.next_page_id += 1;
+            self.pages.insert(
+                run.start + k,
+                Page::new(id, background).with_size(last_size),
+            );
+            added_pages.push(AddedPage {
+                id,
+                after_page,
+                size: last_size,
+                background,
+            });
+        }
+
+        // Umbuchen
+        let mut moves = Vec::with_capacity(movable.len());
+        for ((k, _, before), (target, new_top)) in movable.into_iter().zip(targets) {
+            let mut after = before.clone();
+            after.translate(glam::Vec2::new(
+                0.0,
+                new_top - tops[target] - before.aabb.min.y,
+            ));
+            moves.push(StrokeMove {
+                from_page: self.pages[run.start + k].id,
+                before,
+                to_page: self.pages[run.start + target].id,
+                after,
+            });
+        }
+        let shift = SpaceShift { moves, added_pages };
+        let changed = self.apply_space_moves(&shift, false);
+        self.pages[page_index]
+            .history
+            .push(HistoryAction::SpaceShift(Box::new(shift)));
+        Some(changed)
+    }
+
+    /// Bucht die Striche eines Platzschaffen-Schritts um (`undo`: zurück) und gibt die
+    /// geänderten Seiten zurück. Später geänderte oder gelöschte Striche bleiben unberührt.
+    fn apply_space_moves(&mut self, shift: &SpaceShift, undo: bool) -> Vec<u64> {
+        let mut changed = Vec::new();
+        let index_of = |pages: &[Page], id: u64| pages.iter().position(|p| p.id == id);
+        for m in &shift.moves {
+            let (from, old, to, new) = if undo {
+                (m.to_page, &m.after, m.from_page, &m.before)
+            } else {
+                (m.from_page, &m.before, m.to_page, &m.after)
+            };
+            let (Some(from_i), Some(to_i)) =
+                (index_of(&self.pages, from), index_of(&self.pages, to))
+            else {
+                continue;
+            };
+            let Some(pos) = self.pages[from_i]
+                .strokes
+                .iter()
+                .position(|s| s.id == old.id)
+            else {
+                continue;
+            };
+            self.pages[from_i].strokes.remove(pos);
+            self.pages[to_i].strokes.push(new.clone());
+            for i in [from_i, to_i] {
+                self.pages[i].is_dirty = true;
+                if !changed.contains(&self.pages[i].id) {
+                    changed.push(self.pages[i].id);
+                }
+            }
+        }
+        changed
+    }
+
+    /// Macht die letzte Aktion der aktuellen Seite rückgängig; ein Platzschaffen-Schritt
+    /// betrifft dabei alle beteiligten Seiten. Gibt die geänderten Seiten zurück.
+    pub fn undo(&mut self) -> Option<Vec<u64>> {
+        let index = self.current_page_index;
+        if let Some(HistoryAction::SpaceShift(_)) = self.pages[index].history.undo_stack.last() {
+            let Some(HistoryAction::SpaceShift(shift)) = self.pages[index].history.undo_stack.pop()
+            else {
+                unreachable!()
+            };
+            let mut changed = self.apply_space_moves(&shift, true);
+            // Dafür angelegte Seiten wieder entfernen, sofern sie leer geblieben sind
+            for added in shift.added_pages.iter().rev() {
+                if let Some(i) = self.pages.iter().position(|p| p.id == added.id) {
+                    if self.pages[i].strokes.is_empty() && self.pages.len() > 1 {
+                        self.pages.remove(i);
+                        if self.current_page_index >= i && self.current_page_index > 0 {
+                            self.current_page_index -= 1;
+                        }
+                        changed.retain(|&id| id != added.id);
+                    }
+                }
+            }
+            // Der Schritt gehört weiter zur aktuellen Seite (sie selbst wird nie entfernt)
+            let owner = self.current_page_index;
+            self.pages[owner]
+                .history
+                .redo_stack
+                .push(HistoryAction::SpaceShift(shift));
+            return Some(changed);
+        }
+        let page = &mut self.pages[index];
+        page.undo().then(|| vec![page.id])
+    }
+
+    /// Stellt die zuletzt rückgängig gemachte Aktion der aktuellen Seite wieder her.
+    pub fn redo(&mut self) -> Option<Vec<u64>> {
+        let index = self.current_page_index;
+        if let Some(HistoryAction::SpaceShift(_)) = self.pages[index].history.redo_stack.last() {
+            let Some(HistoryAction::SpaceShift(shift)) = self.pages[index].history.redo_stack.pop()
+            else {
+                unreachable!()
+            };
+            // Entfernte Seiten wieder einfügen
+            for added in &shift.added_pages {
+                if self.pages.iter().any(|p| p.id == added.id) {
+                    continue;
+                }
+                let at = self
+                    .pages
+                    .iter()
+                    .position(|p| p.id == added.after_page)
+                    .map_or(self.pages.len(), |i| i + 1);
+                self.pages.insert(
+                    at,
+                    Page::new(added.id, added.background).with_size(added.size),
+                );
+                if at <= self.current_page_index {
+                    self.current_page_index += 1;
+                }
+            }
+            let changed = self.apply_space_moves(&shift, false);
+            let owner = self.current_page_index;
+            self.pages[owner]
+                .history
+                .undo_stack
+                .push(HistoryAction::SpaceShift(shift));
+            return Some(changed);
+        }
+        let page = &mut self.pages[index];
+        page.redo().then(|| vec![page.id])
     }
 }
 
@@ -2003,6 +2300,111 @@ mod tests {
         assert!(!ids.contains(&new.id) && new.strokes.is_empty());
         assert_eq!(new.background, PageBackground::DotGrid);
         assert!(new.pdf_background.is_none());
+    }
+
+    /// Senkrechter Strich bei x = 300 von `y` bis `y + h`.
+    fn block(id: u64, y: f32, h: f32) -> Stroke {
+        let samples = [y, y + h]
+            .map(|y| StylusSample {
+                position: glam::Vec2::new(300.0, y),
+                pressure: 0.5,
+                timestamp: 0.0,
+            })
+            .to_vec();
+        Stroke::new(id, samples, Vec::new(), [0.0, 0.0, 0.0, 1.0])
+    }
+
+    fn top_of(nb: &Notebook, page: usize, id: u64) -> Option<f32> {
+        nb.pages[page]
+            .strokes
+            .iter()
+            .find(|s| s.id == id)
+            .map(|s| s.aabb.min.y)
+    }
+
+    #[test]
+    fn test_make_space_moves_content_below_and_following_pages() {
+        let mut nb = Notebook::new();
+        nb.add_page(PageBackground::Lined);
+        let a4 = A4_SIZE.y;
+        nb.pages[0].strokes = vec![block(1, 200.0, 100.0), block(2, 1000.0, 100.0)];
+        nb.pages[1].strokes = vec![block(3, 500.0, 100.0)];
+
+        // 30 mm Platz bei y = 800 auf Seite 1
+        let changed = nb.make_space(0, 800.0, 300.0).unwrap();
+        assert_eq!(top_of(&nb, 0, 1), Some(200.0), "darüber bleibt stehen");
+        assert_eq!(top_of(&nb, 0, 2), Some(1300.0));
+        assert_eq!(
+            top_of(&nb, 1, 3),
+            Some(800.0),
+            "die nächste Seite rutscht mit"
+        );
+        assert_eq!(changed.len(), 2);
+        assert_eq!(nb.pages.len(), 2);
+
+        // Rückgängig und wiederholen über beide Seiten
+        nb.current_page_index = 0;
+        assert!(nb.undo().is_some());
+        assert_eq!(top_of(&nb, 0, 2), Some(1000.0));
+        assert_eq!(top_of(&nb, 1, 3), Some(500.0));
+        assert!(nb.redo().is_some());
+        assert_eq!(top_of(&nb, 0, 2), Some(1300.0));
+        assert_eq!(top_of(&nb, 1, 3), Some(800.0));
+
+        // Über das Seitenende: auf die nächste Seite mit Abstand, das Folgende rutscht weiter
+        let mut nb = Notebook::new();
+        nb.pages[0].strokes = vec![block(1, a4 - 400.0, 200.0), block(2, a4 - 150.0, 100.0)];
+        nb.make_space(0, a4 - 500.0, 300.0).unwrap();
+        assert_eq!(nb.pages.len(), 2, "eine Seite wurde angehängt");
+        assert_eq!(nb.pages[1].background, nb.pages[0].background);
+        assert!(nb.pages[0].strokes.is_empty());
+        let first = top_of(&nb, 1, 1).unwrap();
+        assert!((first - SPACE_PAGE_BREAK_MARGIN).abs() < 1e-3, "{first}");
+        // Abstand zwischen beiden bleibt (50 Einheiten unter dem Ende des ersten)
+        assert!((top_of(&nb, 1, 2).unwrap() - (first + 250.0)).abs() < 1e-3);
+        // Rückgängig entfernt die angehängte leere Seite
+        assert!(nb.undo().is_some());
+        assert_eq!(nb.pages.len(), 1);
+        assert_eq!(top_of(&nb, 0, 2), Some(a4 - 150.0));
+        assert!(nb.redo().is_some());
+        assert_eq!(nb.pages.len(), 2);
+    }
+
+    #[test]
+    fn test_make_space_upwards_only_closes_empty_space() {
+        let mut nb = Notebook::new();
+        nb.pages[0].strokes = vec![block(1, 200.0, 100.0), block(2, 1000.0, 100.0)];
+        // Nach oben höchstens bis an das Objekt darüber (Unterkante 300)
+        assert_eq!(nb.space_up_limit(0, 900.0), 600.0);
+        nb.make_space(0, 900.0, -2000.0).unwrap();
+        assert_eq!(top_of(&nb, 0, 2), Some(400.0));
+        assert_eq!(top_of(&nb, 0, 1), Some(200.0));
+        // Kein Platz mehr: nichts zu tun
+        assert!(nb.make_space(0, 300.5, -50.0).is_none());
+    }
+
+    #[test]
+    fn test_make_space_stops_before_pdf_pages() {
+        let mut nb = Notebook::new();
+        nb.add_page(PageBackground::Blank);
+        nb.add_page(PageBackground::Blank);
+        nb.pages[1].pdf_background = Some(PdfBackground {
+            asset: "x.pdf".to_string(),
+            page: 0,
+            width_pt: 595.0,
+            height_pt: 842.0,
+        });
+        nb.pages[0].strokes = vec![block(1, 1000.0, 100.0)];
+        nb.pages[2].strokes = vec![block(2, 500.0, 100.0)];
+        assert!(nb.space_run(1).is_none(), "nicht auf PDF-Seiten");
+        assert_eq!(nb.space_run(0), Some(0..1));
+        nb.make_space(0, 900.0, 300.0).unwrap();
+        assert_eq!(top_of(&nb, 0, 1), Some(1300.0));
+        assert_eq!(
+            top_of(&nb, 2, 2),
+            Some(500.0),
+            "hinter der PDF-Seite bleibt alles"
+        );
     }
 
     #[test]

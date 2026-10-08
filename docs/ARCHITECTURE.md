@@ -132,6 +132,8 @@ Alles auf einer Seite ist ein `Stroke` (`document.rs`):
 ### 5.2 Rückgängig
 Jede Seite hat einen eigenen Verlauf (`history.rs`): Hinzufügen, Entfernen, Ersetzen und Ändern von Strichen. Verschieben/Drehen/Skalieren einer Auswahl, ein Radierzug mit dem Teilstrich-Radierer und eine Textbearbeitung sind jeweils ein Schritt.
 
+**Platz schaffen** (`Notebook::make_space`) betrifft mehrere Seiten: Die Seite, auf der angesetzt wurde, und die folgenden bis vor die nächste PDF-Seite gelten als durchgehende Spalte. Alles unterhalb der Ansatzhöhe rutscht um denselben Betrag; ein Objekt, das über ein Seitenende ragen würde, beginnt 10 mm unter dem Anfang der nächsten Seite, und alles danach rutscht entsprechend weiter. Fehlende Seiten werden eingefügt. Der Schritt (`SpaceShift`: jeder verschobene Strich vorher/nachher mit Seite) landet im Verlauf der Seite, auf der angesetzt wurde; `Notebook::undo`/`redo` buchen ihn über alle Seiten zurück (später geänderte Striche bleiben unberührt) und entfernen dafür angelegte, leer gebliebene Seiten wieder.
+
 ---
 
 ## 6. Formerkennung

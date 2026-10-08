@@ -37,6 +37,89 @@ use ink_notes::storage::{self, NotebookManifest};
 use ink_notes::ui::{self, ActiveTool, UiAction, UiState};
 use ink_notes::updater::UpdaterController;
 
+/// Platz schaffen: Druck auf das Blatt (physische Pixel) setzt die Ansatzhöhe auf der
+/// aktuellen Seite. `false` neben dem Blatt oder auf einer PDF-Seite.
+fn space_press(
+    screen: (f32, f32),
+    canvas: &CanvasState,
+    notebook: &Notebook,
+    ui_state: &mut UiState,
+) -> bool {
+    let Some(page_pt) = canvas.screen_to_page(screen.0, screen.1) else {
+        return false;
+    };
+    let index = notebook.current_page_index;
+    if notebook.space_run(index).is_none() {
+        ui_state.set_export_message(
+            "Auf Seiten mit importiertem PDF lässt sich kein Platz schaffen".to_string(),
+        );
+        return false;
+    }
+    ui_state.space_drag = Some(ui::SpaceDrag {
+        page_index: index,
+        y: page_pt.y,
+        dy: 0.0,
+        up_limit: notebook.space_up_limit(index, page_pt.y),
+    });
+    true
+}
+
+/// Platz schaffen: Verschiebung aus dem senkrechten Abstand zur Ansatzhöhe.
+fn space_move(screen: (f32, f32), canvas: &CanvasState, ui_state: &mut UiState) {
+    if let Some(drag) = &mut ui_state.space_drag {
+        let start = canvas.page_to_screen(Vec2::new(0.0, drag.y));
+        let below = canvas.page_to_screen(Vec2::new(0.0, drag.y + 1000.0));
+        let px_per_unit = (below[1] - start[1]) / 1000.0;
+        if px_per_unit > 0.0 {
+            drag.dy = (screen.1 - start[1]) / px_per_unit;
+        }
+    }
+}
+
+/// Platz schaffen beim Loslassen ausführen (alle beteiligten Seiten werden dafür geladen).
+fn space_release(
+    canvas: &mut CanvasState,
+    notebook: &mut Notebook,
+    manifest: &mut NotebookManifest,
+    autosave: &mut AutosaveController,
+    storage_dir: &Path,
+    ui_state: &mut UiState,
+) {
+    let Some(drag) = ui_state.space_drag.take() else {
+        return;
+    };
+    if let Some(run) = notebook.space_run(drag.page_index) {
+        for index in run {
+            let _ = storage::ensure_page_loaded(storage_dir, notebook, index);
+        }
+    }
+    let dy = drag.clamped_dy();
+    if let Some(changed) = notebook.make_space(drag.page_index, drag.y, dy) {
+        persist_pages(&changed, notebook, manifest, autosave);
+        canvas.sync_page(notebook.current_page_mut());
+        let mm = (dy / ink_notes::document::UNITS_PER_MM).abs().round();
+        ui_state.set_export_message(if dy > 0.0 {
+            format!("{mm} mm Platz geschaffen (Rückgängig mit Strg+Z)")
+        } else {
+            format!("{mm} mm Platz geschlossen (Rückgängig mit Strg+Z)")
+        });
+    }
+}
+
+/// Merkt geänderte Seiten (Kennungen) und das Manifest zum Speichern vor.
+fn persist_pages(
+    ids: &[u64],
+    notebook: &Notebook,
+    manifest: &mut NotebookManifest,
+    autosave: &mut AutosaveController,
+) {
+    manifest.sync_from_notebook(notebook);
+    for page in notebook.pages.iter().filter(|p| ids.contains(&p.id)) {
+        autosave.mark_page_dirty(page, manifest);
+    }
+    autosave.mark_manifest_dirty(manifest);
+}
+
 /// Wählt `tool` und stellt Farbe und Stärke des Live-Strichs passend ein.
 fn activate_tool(tool: ActiveTool, ui_state: &mut UiState, canvas: &mut CanvasState) {
     ui_state.active_tool = tool;
@@ -49,7 +132,7 @@ fn activate_tool(tool: ActiveTool, ui_state: &mut UiState, canvas: &mut CanvasSt
             canvas.set_stroke_color(ui_state.highlighter_color);
             canvas.set_stroke_width_mm(ui_state.highlighter_stroke_width_mm);
         }
-        ActiveTool::Eraser | ActiveTool::Select | ActiveTool::Text => {}
+        ActiveTool::Eraser | ActiveTool::Select | ActiveTool::Text | ActiveTool::Space => {}
     }
 }
 
@@ -1219,6 +1302,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // einer Werkzeug-Taste (Auswählen, Textmarker, Stift) vertreten wird
     let mut stylus_held: Option<(u64, StylusAction)> = None;
     let mut tool_before_button: Option<ActiveTool> = None;
+    // Platz schaffen läuft mit dem Stift bzw. dem Finger (sonst mit der Maus)
+    let mut is_stylus_spacing = false;
+    let mut is_touch_spacing = false;
     let mut stylus_screen_pos = (0.0_f32, 0.0_f32);
     // Stift hat auf der UI aufgesetzt: alle Ereignisse bis zum Abheben gehen an egui
     let mut stylus_ui_capture = false;
@@ -1390,6 +1476,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             if is_erasing {
                                                 is_erasing = false;
                                             }
+                                            if is_stylus_spacing {
+                                                is_stylus_spacing = false;
+                                                space_release(&mut canvas, &mut notebook, &mut manifest, &mut autosave, &storage_dir, &mut ui_state);
+                                                window.request_redraw();
+                                            }
                                             if is_stylus_selecting {
                                                 is_stylus_selecting = false;
                                                 selection_release(false, &mut notebook, &mut manifest, &mut autosave, &mut selection_state);
@@ -1465,7 +1556,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             continue;
                                         }
 
-                                        if is_erasing {
+                                        if is_stylus_spacing {
+                                            space_move((sx, sy), &canvas, &mut ui_state);
+                                            window.request_redraw();
+                                        } else if is_erasing {
                                             focus_page_at!((sx, sy));
                                             if let Some(page_pt) = canvas.screen_to_page(sx, sy) {
                                                 if notebook.erase_at(page_pt,
@@ -1549,7 +1643,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             || button_action == Some(StylusAction::Erase)
                                             || ui_state.active_tool == ActiveTool::Eraser;
 
-                                        if !should_erase && ui_state.active_tool == ActiveTool::Text {
+                                        if !should_erase && ui_state.active_tool == ActiveTool::Space {
+                                            is_stylus_spacing = space_press((sx, sy), &canvas, &notebook, &mut ui_state);
+                                            window.request_redraw();
+                                        } else if !should_erase && ui_state.active_tool == ActiveTool::Text {
                                             if let Some(page_pt) = canvas.screen_to_page(sx, sy) {
                                                 text_tool_click(page_pt, &mut canvas, &mut notebook, &mut manifest, &mut autosave, &mut ui_state);
                                                 update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
@@ -1616,6 +1713,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                                         if is_erasing {
                                             is_erasing = false;
+                                        }
+
+                                        if is_stylus_spacing {
+                                            is_stylus_spacing = false;
+                                            space_release(&mut canvas, &mut notebook, &mut manifest, &mut autosave, &storage_dir, &mut ui_state);
+                                            window.request_redraw();
                                         }
 
                                         if is_stylus_selecting {
@@ -1905,10 +2008,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             // Undo: Strg + Z
                             Key::Character(c) if c.eq_ignore_ascii_case("z") && ctrl && !shift => {
                                 finish_text_edit(&mut canvas, &mut notebook, &mut manifest, &mut autosave, &mut ui_state);
-                                if notebook.current_page_mut().undo() {
+                                if let Some(changed) = notebook.undo() {
                                     selection_state.clear();
                                     canvas.sync_page(notebook.current_page_mut());
-                                    autosave.mark_dirty(&notebook, &mut manifest);
+                                    persist_pages(&changed, &notebook, &mut manifest, &mut autosave);
                                     update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
                                     window.request_redraw();
                                 }
@@ -1920,10 +2023,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     || (c.eq_ignore_ascii_case("z") && ctrl && shift) =>
                             {
                                 finish_text_edit(&mut canvas, &mut notebook, &mut manifest, &mut autosave, &mut ui_state);
-                                if notebook.current_page_mut().redo() {
+                                if let Some(changed) = notebook.redo() {
                                     selection_state.clear();
                                     canvas.sync_page(notebook.current_page_mut());
-                                    autosave.mark_dirty(&notebook, &mut manifest);
+                                    persist_pages(&changed, &notebook, &mut manifest, &mut autosave);
                                     update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
                                     window.request_redraw();
                                 }
@@ -2010,7 +2113,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             // Radierer umschalten: E
                             Key::Character(c) if c.eq_ignore_ascii_case("e") && !ctrl => {
                                 ui_state.active_tool = match ui_state.active_tool {
-                                    ActiveTool::Pen | ActiveTool::Highlighter | ActiveTool::Shape | ActiveTool::Select | ActiveTool::Text => ActiveTool::Eraser,
+                                    ActiveTool::Pen | ActiveTool::Highlighter | ActiveTool::Shape | ActiveTool::Select | ActiveTool::Text | ActiveTool::Space => ActiveTool::Eraser,
                                     ActiveTool::Eraser => ActiveTool::Pen,
                                 };
                                 ui_state.is_pen_menu_open = false;
@@ -2287,6 +2390,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 } else if button == MouseButton::Left {
                                     let (sx, sy) = cursor_screen_pos;
 
+                                    // Platz schaffen: Ansatzhöhe merken
+                                    if ui_state.active_tool == ActiveTool::Space {
+                                        space_press((sx, sy), &canvas, &notebook, &mut ui_state);
+                                        window.request_redraw();
+                                        return;
+                                    }
+
                                     // Text-Werkzeug: Textfeld öffnen
                                     if ui_state.active_tool == ActiveTool::Text {
                                         if let Some(page_pt) = canvas.screen_to_page(sx, sy) {
@@ -2348,6 +2458,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 if is_erasing {
                                     is_erasing = false;
                                 }
+                                if ui_state.space_drag.is_some() && !is_stylus_spacing && !is_touch_spacing {
+                                    space_release(&mut canvas, &mut notebook, &mut manifest, &mut autosave, &storage_dir, &mut ui_state);
+                                    window.request_redraw();
+                                }
                                 if ui_state.active_tool == ActiveTool::Select
                                     && !is_stylus_selecting
                                     && selection_release(modifiers.shift_key(), &mut notebook, &mut manifest, &mut autosave, &mut selection_state)
@@ -2401,7 +2515,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                         // Wenn der Stylus aktiv zeichnet, keine Mauscursor-Bewegungen verarbeiten
                         if !is_stylus_drawing && !is_stylus_selecting {
-                            if ui_state.active_tool == ActiveTool::Select && selection_state.drag_mode != DragMode::None {
+                            if ui_state.space_drag.is_some() && !is_stylus_spacing && !is_touch_spacing {
+                                space_move((sx, sy), &canvas, &mut ui_state);
+                                window.request_redraw();
+                            } else if ui_state.active_tool == ActiveTool::Select && selection_state.drag_mode != DragMode::None {
                                 if let Some(page_pt) = canvas.screen_to_page(sx, sy) {
                                     selection_drag(page_pt, notebook.current_page_mut(), &mut canvas, &mut selection_state);
                                     window.request_redraw();
@@ -2554,6 +2671,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         window.request_redraw();
                                     }
                                     is_touch_panning = false;
+                                    if is_touch_spacing {
+                                        is_touch_spacing = false;
+                                        ui_state.space_drag = None;
+                                    }
                                     is_pinch_gesturing = true;
 
                                     let pts: Vec<(f32, f32)> = active_touches.values().copied().take(2).collect();
@@ -2594,6 +2715,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             if selection_press((tx, ty), false, &canvas, notebook.current_page(), egui_ctx.pixels_per_point(), &mut selection_state) {
                                                 window.request_redraw();
                                             }
+                                        } else if ui_state.active_tool == ActiveTool::Space {
+                                            is_touch_spacing = space_press((tx, ty), &canvas, &notebook, &mut ui_state);
+                                            window.request_redraw();
                                         } else if ui_state.active_tool.is_drawing() || ui_state.active_tool == ActiveTool::Shape {
                                             if let Some(page_pt) = canvas.screen_to_page(tx, ty) {
                                                 is_touch_drawing = true;
@@ -2660,6 +2784,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             canvas.extend_stroke(page_pt.x, page_pt.y, pressure, now);
                                             window.request_redraw();
                                         }
+                                    } else if is_touch_spacing {
+                                        space_move((tx, ty), &canvas, &mut ui_state);
+                                        window.request_redraw();
                                     } else if is_erasing {
                                         focus_page_at!((tx, ty));
                                         if let Some(page_pt) = canvas.screen_to_page(tx, ty) {
@@ -2690,6 +2817,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                                     if is_erasing {
                                         is_erasing = false;
+                                    }
+
+                                    if is_touch_spacing {
+                                        is_touch_spacing = false;
+                                        space_release(&mut canvas, &mut notebook, &mut manifest, &mut autosave, &storage_dir, &mut ui_state);
+                                        window.request_redraw();
                                     }
 
                                     if ui_state.active_tool == ActiveTool::Select
@@ -2754,6 +2887,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 .is_none_or(|last: [f32; 3]| last.iter().zip(scroll).any(|(a, b)| (a - b).abs() > 1e-3));
                             let busy = is_drawing
                                 || is_erasing
+                                || ui_state.space_drag.is_some()
                                 || !selection_state.is_empty()
                                 || selection_state.drag_mode != DragMode::None
                                 || ui_state.ruler_drag.is_some()
@@ -2831,7 +2965,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             ui_state.highlighter_color = color;
                                             canvas.set_stroke_color(color);
                                         }
-                                        ActiveTool::Eraser | ActiveTool::Select | ActiveTool::Text => {}
+                                        ActiveTool::Eraser | ActiveTool::Select | ActiveTool::Text | ActiveTool::Space => {}
                                     }
                                     window.request_redraw();
                                 }
@@ -2845,7 +2979,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             ui_state.highlighter_stroke_width_mm = width;
                                             canvas.set_stroke_width_mm(width);
                                         }
-                                        ActiveTool::Eraser | ActiveTool::Select | ActiveTool::Text => {}
+                                        ActiveTool::Eraser | ActiveTool::Select | ActiveTool::Text | ActiveTool::Space => {}
                                     }
                                     window.request_redraw();
                                 }
@@ -2920,20 +3054,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                                 UiAction::Undo => {
                                     finish_text_edit(&mut canvas, &mut notebook, &mut manifest, &mut autosave, &mut ui_state);
-                                    if notebook.current_page_mut().undo() {
+                                    if let Some(changed) = notebook.undo() {
                                         selection_state.clear();
                                         canvas.sync_page(notebook.current_page_mut());
-                                        autosave.mark_dirty(&notebook, &mut manifest);
+                                        persist_pages(&changed, &notebook, &mut manifest, &mut autosave);
                                         update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
                                         window.request_redraw();
                                     }
                                 }
                                 UiAction::Redo => {
                                     finish_text_edit(&mut canvas, &mut notebook, &mut manifest, &mut autosave, &mut ui_state);
-                                    if notebook.current_page_mut().redo() {
+                                    if let Some(changed) = notebook.redo() {
                                         selection_state.clear();
                                         canvas.sync_page(notebook.current_page_mut());
-                                        autosave.mark_dirty(&notebook, &mut manifest);
+                                        persist_pages(&changed, &notebook, &mut manifest, &mut autosave);
                                         update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
                                         window.request_redraw();
                                     }

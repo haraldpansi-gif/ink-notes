@@ -21,6 +21,9 @@ pub enum HistoryAction {
         before: Vec<Stroke>,
         after: Vec<Stroke>,
     },
+    /// Platz geschaffen: Inhalt mehrerer Seiten wurde verschoben. Rückgängig macht das das
+    /// Notizbuch (`Notebook::undo`), nicht die einzelne Seite.
+    SpaceShift(Box<crate::document::SpaceShift>),
     /// Teilradierer: Striche wurden durch ihre übrig gebliebenen Stücke ersetzt.
     SplitStrokes {
         removed: Vec<Stroke>,
@@ -139,6 +142,10 @@ impl HistoryStack {
                 self.redo_stack
                     .push(HistoryAction::ModifyStrokes { before, after });
             }
+            // Betrifft mehrere Seiten: Das Notizbuch macht es rückgängig, hier nur umbuchen
+            HistoryAction::SpaceShift(shift) => {
+                self.redo_stack.push(HistoryAction::SpaceShift(shift));
+            }
             HistoryAction::SplitStrokes { removed, added, at } => {
                 strokes.retain(|s| !added.iter().any(|a| a.id == s.id));
                 strokes.extend(removed.iter().cloned());
@@ -189,6 +196,9 @@ impl HistoryStack {
                 }
                 self.undo_stack
                     .push(HistoryAction::ModifyStrokes { before, after });
+            }
+            HistoryAction::SpaceShift(shift) => {
+                self.undo_stack.push(HistoryAction::SpaceShift(shift));
             }
             HistoryAction::SplitStrokes { removed, added, at } => {
                 strokes.retain(|s| !removed.iter().any(|r| r.id == s.id));

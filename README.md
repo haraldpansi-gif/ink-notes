@@ -25,6 +25,7 @@ Getestet wird vor allem unter Zorin OS 18 / Ubuntu 24.04 (Wayland und X11).
 - **Tasten am Stift** im ☰-Menü belegen: Radieren (Standard), Auswählen, Textmarker, Stift oder nichts – gilt, solange die Taste gedrückt ist. Jede Taste erscheint dort nach dem ersten Drücken.
 - **Radierer** in drei Modi: ganze Striche, nur den überstrichenen Teil (Teilstrich) oder nur Textmarker. Die Stiftrückseite radiert ebenfalls.
 - **Virtuelles Lineal** (`L`): verschieben, am Griff drehen (rastet bei 15° ein); Striche entlang einer Kante werden gerade.
+- **Platz schaffen** (↕ in der Werkzeugleiste): aufs Blatt tippen und nach unten ziehen – alles darunter rutscht mit, auch auf den folgenden Seiten. Was über ein Seitenende rutschen würde, beginnt auf der nächsten Seite; fehlende Seiten werden angehängt. Nach oben ziehen schließt leeren Platz. Ein Schritt für Rückgängig.
 
 ### Formerkennung
 - **Formen-Werkzeug** (`S`/`F`) oder **Halten** am Strichende (über 400 ms stillhalten): Die Skizze wird durch eine saubere Form ersetzt.
