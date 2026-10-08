@@ -24,6 +24,7 @@ use ink_notes::document::{Notebook, PageBackground};
 use ink_notes::export::{self, export_notebook_to_pdf, ExportStrategy};
 use ink_notes::geometry::{self, RecognizedShape};
 use ink_notes::image_layer::TextureSource;
+use ink_notes::library::Library;
 use ink_notes::pdf_doc::PdfRenderService;
 use ink_notes::platform::{self, DisplayBackend};
 use ink_notes::selection::{
@@ -33,6 +34,36 @@ use ink_notes::settings::{SidebarSide, UiSettings};
 use ink_notes::storage::{self, NotebookManifest};
 use ink_notes::ui::{self, ActiveTool, UiAction, UiState};
 use ink_notes::updater::UpdaterController;
+
+/// Liest Notizbücher und Ordner für den Dokumenten-Manager neu ein.
+fn refresh_notebooks(base_dir: &Path, ui_state: &mut UiState) {
+    ui_state.available_notebooks = storage::list_notebooks(base_dir);
+    ui_state.library = Library::load(base_dir);
+}
+
+/// Ändert die Ordner (`library.json`) und liest sie neu ein; Fehler erscheinen als Meldung.
+/// Gibt bei Erfolg das Ergebnis von `change` zurück.
+fn change_library<T>(
+    base_dir: &Path,
+    ui_state: &mut UiState,
+    change: impl FnOnce(&mut Library) -> Result<T, String>,
+) -> Option<T> {
+    let mut library = Library::load(base_dir);
+    let result = change(&mut library).and_then(|value| {
+        library
+            .save(base_dir)
+            .map(|()| value)
+            .map_err(|e| format!("Ordner nicht gespeichert: {e}"))
+    });
+    ui_state.library = Library::load(base_dir);
+    match result {
+        Ok(value) => Some(value),
+        Err(message) => {
+            ui_state.set_export_message(message);
+            None
+        }
+    }
+}
 
 /// Aktualisiert den Fenstertitel als minimales On-Screen-Display (OSD) inklusive Autosave-Status.
 /// Speichert die UI-Einstellungen; ein Fehler wird gemeldet, bricht aber nichts ab.
@@ -1027,10 +1058,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "[Storage] Erstelle neues Notizbuch in: {}",
             storage_dir.display()
         );
-        (
-            Notebook::new(),
-            NotebookManifest::new(&initial_id, &initial_title),
-        )
+        let notebook = Notebook::new();
+        let mut manifest = NotebookManifest::new(&initial_id, &initial_title);
+        // Ganz neu (z. B. erster Start): sofort speichern, sonst steht es bis zur ersten
+        // Änderung ohne Manifest als „beschädigt“ in der Notizbuchliste. Ein vorhandener
+        // Ordner ohne Manifest bleibt unangetastet.
+        if !storage_dir.exists() {
+            if let Err(err) = storage::save_notebook(&storage_dir, &notebook, &mut manifest) {
+                eprintln!("[Storage] Neues Notizbuch nicht gespeichert: {err}");
+            }
+        }
+        (notebook, manifest)
     };
 
     // 2. Asynchronen Autosave-Controller mit 1.5s Debounce starten
@@ -1078,8 +1116,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ui_state.current_notebook_id = manifest.id.clone();
     ui_state.document_title = manifest.title.clone();
     ui_state.available_notebooks = available_notebooks;
+    ui_state.library = Library::load(&storage_base_dir);
     if let Some(warning) = startup_warning {
-        ui_state.available_notebooks = storage::list_notebooks(&storage_base_dir);
+        refresh_notebooks(&storage_base_dir, &mut ui_state);
         ui_state.set_export_message(warning);
     }
     let mut selection_state = SelectionState::new();
@@ -2969,8 +3008,60 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     window.request_redraw();
                                 }
 
+                                UiAction::CreateFolder { parent, name } => {
+                                    if let Some(path) = change_library(&storage_base_dir, &mut ui_state, |library| {
+                                        library.create_folder(&parent, &name)
+                                    }) {
+                                        ui_state.set_export_message(format!(
+                                            "Ordner „{}“ angelegt",
+                                            ink_notes::library::folder_name(&path)
+                                        ));
+                                    }
+                                    window.request_redraw();
+                                }
+                                UiAction::RenameFolder { path, new_name } => {
+                                    if let Some(new_path) = change_library(&storage_base_dir, &mut ui_state, |library| {
+                                        library.rename_folder(&path, &new_name)
+                                    }) {
+                                        // Der gezeigte Ordner kann darin liegen
+                                        let shown = &ui_state.notebook_folder;
+                                        if shown == &path || shown.starts_with(&format!("{path}/")) {
+                                            ui_state.notebook_folder = format!("{new_path}{}", &shown[path.len()..]);
+                                        }
+                                    }
+                                    window.request_redraw();
+                                }
+                                UiAction::DeleteFolder(path) => {
+                                    if change_library(&storage_base_dir, &mut ui_state, |library| {
+                                        library.delete_folder(&path);
+                                        Ok(())
+                                    })
+                                    .is_some()
+                                    {
+                                        ui_state.set_export_message(format!(
+                                            "Ordner „{}“ gelöscht, sein Inhalt liegt eine Ebene höher",
+                                            ink_notes::library::folder_name(&path)
+                                        ));
+                                    }
+                                    window.request_redraw();
+                                }
+                                UiAction::MoveNotebook { id, folder } => {
+                                    if change_library(&storage_base_dir, &mut ui_state, |library| {
+                                        library.move_notebook(&id, &folder)
+                                    })
+                                    .is_some()
+                                    {
+                                        let target = if folder.is_empty() {
+                                            "die oberste Ebene".to_string()
+                                        } else {
+                                            format!("„{}“", ink_notes::library::folder_name(&folder))
+                                        };
+                                        ui_state.set_export_message(format!("Verschoben in {target}"));
+                                    }
+                                    window.request_redraw();
+                                }
                                 UiAction::RefreshNotebooks => {
-                                    ui_state.available_notebooks = storage::list_notebooks(&storage_base_dir);
+                                    refresh_notebooks(&storage_base_dir, &mut ui_state);
                                     window.request_redraw();
                                 }
                                 UiAction::OpenNotebook(id) => {
@@ -3006,7 +3097,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 selection_state.clear();
                                                 ui_state.current_notebook_id = manifest.id.clone();
                                                 ui_state.document_title = manifest.title.clone();
-                                                ui_state.available_notebooks = storage::list_notebooks(&storage_base_dir);
+                                                refresh_notebooks(&storage_base_dir, &mut ui_state);
                                                 ui_state.is_document_menu_open = false;
                                                 canvas.sync_page(notebook.current_page_mut());
                                                 update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
@@ -3023,6 +3114,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     }
                                 }
                                 UiAction::ImportPdf(path) => {
+                                    // Neben das gerade geöffnete Notizbuch
+                                    let folder = ui_state.library.folder_of(&manifest.id).to_string();
                                     let title = path
                                         .file_stem()
                                         .map(|s| s.to_string_lossy().into_owned())
@@ -3032,6 +3125,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         .and_then(|bytes| storage::create_notebook_from_pdf(&storage_base_dir, &title, bytes));
                                     match result {
                                         Ok((new_nb, new_manifest, new_dir)) => {
+                                            let id = new_manifest.id.clone();
+                                            change_library(&storage_base_dir, &mut ui_state, |library| {
+                                                library.move_notebook(&id, &folder)
+                                            });
                                             let _ = autosave.flush();
                                             _notebook_lock = storage::NotebookLock::acquire(&new_dir).ok();
                                             autosave.set_read_only(_notebook_lock.is_none());
@@ -3042,7 +3139,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             selection_state.clear();
                                             ui_state.current_notebook_id = manifest.id.clone();
                                             ui_state.document_title = manifest.title.clone();
-                                            ui_state.available_notebooks = storage::list_notebooks(&storage_base_dir);
+                                            refresh_notebooks(&storage_base_dir, &mut ui_state);
                                             canvas.reset_view();
                                             canvas.sync_page(notebook.current_page_mut());
                                             update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
@@ -3059,10 +3156,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     }
                                     window.request_redraw();
                                 }
-                                UiAction::CreateNotebook(title) => {
+                                UiAction::CreateNotebook { title, folder } => {
                                     let _ = autosave.flush();
                                     match storage::create_new_notebook(&storage_base_dir, &title) {
                                         Ok((new_nb, new_manifest, new_dir)) => {
+                                            let id = new_manifest.id.clone();
+                                            change_library(&storage_base_dir, &mut ui_state, |library| {
+                                                library.move_notebook(&id, &folder)
+                                            });
                                             _notebook_lock = storage::NotebookLock::acquire(&new_dir).ok();
                                             autosave.set_read_only(_notebook_lock.is_none());
                                             autosave.switch_notebook_dir(new_dir.clone());
@@ -3072,7 +3173,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             selection_state.clear();
                                             ui_state.current_notebook_id = manifest.id.clone();
                                             ui_state.document_title = manifest.title.clone();
-                                            ui_state.available_notebooks = storage::list_notebooks(&storage_base_dir);
+                                            refresh_notebooks(&storage_base_dir, &mut ui_state);
                                             ui_state.is_document_menu_open = false;
                                             canvas.sync_page(notebook.current_page_mut());
                                             update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
@@ -3091,7 +3192,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         match storage::rename_notebook(&target_dir, &mut manifest, &new_title) {
                                             Ok(()) => {
                                                 ui_state.document_title = manifest.title.clone();
-                                                ui_state.available_notebooks = storage::list_notebooks(&storage_base_dir);
+                                                refresh_notebooks(&storage_base_dir, &mut ui_state);
                                                 manifest.sync_from_notebook(&notebook);
                                                 autosave.mark_manifest_dirty(&manifest);
                                                 update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
@@ -3108,7 +3209,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         if let Ok(content) = std::fs::read_to_string(&manifest_path) {
                                             if let Ok(mut other_manifest) = serde_json::from_str::<NotebookManifest>(&content) {
                                                 let _ = storage::rename_notebook(&target_dir, &mut other_manifest, &new_title);
-                                                ui_state.available_notebooks = storage::list_notebooks(&storage_base_dir);
+                                                refresh_notebooks(&storage_base_dir, &mut ui_state);
                                                 ui_state.set_export_message(format!("Umbenannt in '{}'", new_title));
                                                 window.request_redraw();
                                             }
@@ -3133,7 +3234,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     match storage::delete_notebook(&target_dir, &storage_base_dir) {
                                         Ok(trash_path) => {
                                             ui_state.last_deleted_notebook = Some((trash_path, deleted_title));
-                                            ui_state.available_notebooks = storage::list_notebooks(&storage_base_dir);
+                                            refresh_notebooks(&storage_base_dir, &mut ui_state);
                                             if is_current {
                                                 if let Some(first) = ui_state
                                                     .available_notebooks
@@ -3171,7 +3272,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                     selection_state.clear();
                                                     ui_state.current_notebook_id = manifest.id.clone();
                                                     ui_state.document_title = manifest.title.clone();
-                                                    ui_state.available_notebooks = storage::list_notebooks(&storage_base_dir);
+                                                    refresh_notebooks(&storage_base_dir, &mut ui_state);
                                                     canvas.sync_page(notebook.current_page_mut());
                                                     update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
                                                     ui_state.set_export_message("Standard-Notizbuch erstellt".to_string());
@@ -3191,7 +3292,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     if let Some((trash_path, _title)) = ui_state.last_deleted_notebook.take() {
                                         match storage::restore_notebook_from_trash(&storage_base_dir, &trash_path) {
                                             Ok(_restored_dir) => {
-                                                ui_state.available_notebooks = storage::list_notebooks(&storage_base_dir);
+                                                refresh_notebooks(&storage_base_dir, &mut ui_state);
                                                 ui_state.set_export_message("Notizbuch wiederhergestellt".to_string());
                                                 window.request_redraw();
                                             }
@@ -3206,7 +3307,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     let target_dir = storage_base_dir.join(&id);
                                     match storage::restore_manifest_from_backup(&target_dir) {
                                         Ok(()) => {
-                                            ui_state.available_notebooks = storage::list_notebooks(&storage_base_dir);
+                                            refresh_notebooks(&storage_base_dir, &mut ui_state);
                                             ui_state.set_export_message("Manifest aus Backup wiederhergestellt".to_string());
                                             window.request_redraw();
                                         }

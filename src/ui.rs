@@ -228,7 +228,26 @@ pub enum UiAction {
     RotateSelected,
     // Dokumenten- & Notizbuch-Verwaltung
     OpenNotebook(String),
-    CreateNotebook(String),
+    /// Neues Notizbuch im Ordner `folder` anlegen und öffnen
+    CreateNotebook {
+        title: String,
+        folder: String,
+    },
+    /// Ordnerverwaltung (siehe `library.rs`)
+    CreateFolder {
+        parent: String,
+        name: String,
+    },
+    RenameFolder {
+        path: String,
+        new_name: String,
+    },
+    /// Ordner löschen; Inhalt rückt eine Ebene nach oben
+    DeleteFolder(String),
+    MoveNotebook {
+        id: String,
+        folder: String,
+    },
     RenameNotebook {
         id: String,
         new_title: String,
@@ -306,6 +325,14 @@ pub struct UiState {
     pub available_notebooks: Vec<NotebookSummary>,
     pub new_notebook_title_input: String,
     pub renaming_notebook_id: Option<String>,
+    /// Ordner der Notizbücher und der gerade angezeigte Ordner im Dokumenten-Manager
+    pub library: crate::library::Library,
+    pub notebook_folder: String,
+    /// Ordner, der gerade umbenannt wird, bzw. dessen Löschen bestätigt werden soll
+    pub renaming_folder: Option<String>,
+    pub confirm_delete_folder: Option<String>,
+    /// Notizbuch, für das gerade ein Zielordner gewählt wird
+    pub moving_notebook_id: Option<String>,
     pub renaming_title_input: String,
     pub document_modal_rect: Option<egui::Rect>,
     /// Gitea Release- & Update-Manager
@@ -408,6 +435,11 @@ impl Default for UiState {
             available_notebooks: Vec::new(),
             new_notebook_title_input: String::new(),
             renaming_notebook_id: None,
+            library: crate::library::Library::default(),
+            notebook_folder: String::new(),
+            renaming_folder: None,
+            confirm_delete_folder: None,
+            moving_notebook_id: None,
             renaming_title_input: String::new(),
             document_modal_rect: None,
             is_update_dialog_open: false,
@@ -1670,6 +1702,216 @@ fn pressure_curve_editor(ui: &mut egui::Ui, state: &mut UiState) -> Option<Press
     save.then_some(state.pressure_curve)
 }
 
+/// Pfad des gezeigten Ordners im Dokumenten-Manager: „📚 Alle › 3. Semester › Mathe“, jeder
+/// Teil antippbar.
+fn folder_breadcrumbs(ui: &mut egui::Ui, state: &mut UiState, folder: &str) {
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = 4.0;
+        let mut target = None;
+        if ui
+            .selectable_label(folder.is_empty(), egui::RichText::new("📚 Alle").size(13.0))
+            .clicked()
+        {
+            target = Some(String::new());
+        }
+        let mut path = String::new();
+        for name in folder.split('/').filter(|n| !n.is_empty()) {
+            ui.label(egui::RichText::new("›").color(egui::Color32::from_gray(140)));
+            if !path.is_empty() {
+                path.push('/');
+            }
+            path.push_str(name);
+            if ui
+                .selectable_label(path == folder, egui::RichText::new(name).size(13.0))
+                .clicked()
+            {
+                target = Some(path.clone());
+            }
+        }
+        if let Some(target) = target {
+            state.notebook_folder = target;
+            state.renaming_folder = None;
+            state.confirm_delete_folder = None;
+        }
+    });
+}
+
+/// Zeile eines Unterordners: antippen öffnet ihn; umbenennen und löschen (mit Rückfrage).
+fn folder_row(ui: &mut egui::Ui, state: &mut UiState, path: &str, actions: &mut Vec<UiAction>) {
+    let name = crate::library::folder_name(path);
+    if state.renaming_folder.as_deref() == Some(path) {
+        ui.horizontal(|ui| {
+            let edit = ui.add(
+                egui::TextEdit::singleline(&mut state.renaming_title_input)
+                    .margin(egui::vec2(8.0, 8.0))
+                    .desired_width(260.0),
+            );
+            if ui.button("✔").clicked()
+                || (edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)))
+            {
+                actions.push(UiAction::RenameFolder {
+                    path: path.to_string(),
+                    new_name: state.renaming_title_input.trim().to_string(),
+                });
+                state.renaming_folder = None;
+            }
+            if ui.button("🗙").clicked() {
+                state.renaming_folder = None;
+            }
+        });
+        return;
+    }
+    if state.confirm_delete_folder.as_deref() == Some(path) {
+        egui::Frame::none()
+            .fill(egui::Color32::from_rgba_unmultiplied(170, 50, 45, 40))
+            .rounding(egui::Rounding::same(8.0))
+            .inner_margin(egui::Margin::symmetric(10.0, 8.0))
+            .show(ui, |ui| {
+                ui.vertical(|ui| {
+                    ui.add(
+                        egui::Label::new(format!(
+                    "Ordner „{name}“ löschen? Seine Notizbücher und Unterordner rücken eine \
+                     Ebene nach oben, gelöscht wird kein Notizbuch."
+                ))
+                        .wrap(true),
+                    );
+                    ui.horizontal(|ui| {
+                        if ui
+                            .button(
+                                egui::RichText::new("Ordner löschen").color(egui::Color32::WHITE),
+                            )
+                            .clicked()
+                        {
+                            actions.push(UiAction::DeleteFolder(path.to_string()));
+                            state.confirm_delete_folder = None;
+                        }
+                        if ui.button("Abbrechen").clicked() {
+                            state.confirm_delete_folder = None;
+                        }
+                    });
+                });
+            });
+        return;
+    }
+
+    let ids = state.available_notebooks.iter().map(|s| s.id.as_str());
+    let count = state.library.count_within(path, ids);
+    let mut open = false;
+    egui::Frame::none()
+        .fill(egui::Color32::from_rgba_unmultiplied(255, 255, 255, 8))
+        .stroke(egui::Stroke::new(
+            1.0_f32,
+            egui::Color32::from_rgba_unmultiplied(255, 255, 255, 16),
+        ))
+        .rounding(egui::Rounding::same(8.0))
+        .inner_margin(egui::Margin::symmetric(10.0, 8.0))
+        .show(ui, |ui| {
+            // Erst die Knöpfe (rechts), der Name füllt den Rest und öffnet den Ordner
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .button(
+                        egui::RichText::new("🗑")
+                            .size(16.0)
+                            .color(egui::Color32::from_rgb(255, 120, 120)),
+                    )
+                    .on_hover_text("Ordner löschen (die Notizbücher bleiben erhalten)")
+                    .clicked()
+                {
+                    state.confirm_delete_folder = Some(path.to_string());
+                }
+                if ui
+                    .button(egui::RichText::new("✏").size(16.0))
+                    .on_hover_text("Ordner umbenennen")
+                    .clicked()
+                {
+                    state.renaming_folder = Some(path.to_string());
+                    state.renaming_title_input = name.to_string();
+                }
+                let title_area = ui
+                    .with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                        ui.vertical(|ui| {
+                            ui.set_min_width(ui.available_width());
+                            ui.label(
+                                egui::RichText::new(format!("📁 {name}"))
+                                    .strong()
+                                    .size(13.0)
+                                    .color(egui::Color32::WHITE),
+                            );
+                            ui.label(
+                                egui::RichText::new(match count {
+                                    1 => "1 Notizbuch".to_string(),
+                                    n => format!("{n} Notizbücher"),
+                                })
+                                .size(11.0)
+                                .color(egui::Color32::from_gray(160)),
+                            );
+                        })
+                    })
+                    .inner;
+                open = title_area
+                    .response
+                    .interact(egui::Sense::click())
+                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                    .clicked();
+            });
+        });
+    if open {
+        state.notebook_folder = path.to_string();
+    }
+}
+
+/// Zielordner für das Verschieben eines Notizbuchs: oberste Ebene und alle Ordner als Baum.
+fn move_target_list(
+    ui: &mut egui::Ui,
+    state: &mut UiState,
+    notebook_id: &str,
+    actions: &mut Vec<UiAction>,
+) {
+    let title = state
+        .available_notebooks
+        .iter()
+        .find(|s| s.id == notebook_id)
+        .map_or(notebook_id, |s| s.title.as_str())
+        .to_string();
+    let current = state.library.folder_of(notebook_id).to_string();
+    ui.label(egui::RichText::new(format!("„{title}“ verschieben nach:")).strong());
+    ui.add_space(4.0);
+    let mut targets = vec![(String::new(), "📚 Oberste Ebene".to_string(), 0)];
+    for path in state.library.all_folders() {
+        let depth = path.matches('/').count() + 1;
+        targets.push((
+            path.to_string(),
+            format!("📁 {}", crate::library::folder_name(path)),
+            depth,
+        ));
+    }
+    egui::ScrollArea::vertical()
+        .max_height(300.0)
+        .show(ui, |ui| {
+            for (path, label, depth) in targets {
+                ui.horizontal(|ui| {
+                    ui.add_space(depth as f32 * 18.0);
+                    let here = path == current;
+                    if ui
+                        .add_enabled(!here, egui::Button::new(label))
+                        .on_disabled_hover_text("Liegt bereits hier")
+                        .clicked()
+                    {
+                        actions.push(UiAction::MoveNotebook {
+                            id: notebook_id.to_string(),
+                            folder: path.clone(),
+                        });
+                        state.moving_notebook_id = None;
+                    }
+                });
+            }
+        });
+    ui.add_space(6.0);
+    if ui.button("Abbrechen").clicked() {
+        state.moving_notebook_id = None;
+    }
+}
+
 /// „Seite löschen“ mit Rückfrage im ☰-Menü und „Gelöschte Seite wiederherstellen“.
 fn delete_page_buttons(
     ui: &mut egui::Ui,
@@ -2288,6 +2530,14 @@ pub fn render_ui(
                                     state.close_overlays();
                                     state.is_document_menu_open = open;
                                     if open {
+                                        // Im Ordner des geöffneten Notizbuchs beginnen
+                                        state.notebook_folder = state
+                                            .library
+                                            .folder_of(&state.current_notebook_id)
+                                            .to_string();
+                                        state.renaming_folder = None;
+                                        state.confirm_delete_folder = None;
+                                        state.moving_notebook_id = None;
                                         actions.push(UiAction::RefreshNotebooks);
                                     }
                                 }
@@ -3505,51 +3755,89 @@ pub fn render_ui(
                     state.is_document_menu_open = false;
                 }
 
-                // Neues Dokument anlegen
-                ui.label(
-                    egui::RichText::new("NEUES NOTIZBUCH ERSTELLEN")
-                        .size(10.5)
-                        .strong()
-                        .color(egui::Color32::from_gray(160)),
-                );
-                ui.add_space(4.0);
+                // Gezeigter Ordner (gibt es ihn nicht mehr, die oberste Ebene)
+                if !state.notebook_folder.is_empty()
+                    && !state.library.folders.contains(&state.notebook_folder)
+                {
+                    state.notebook_folder.clear();
+                }
+                let folder = state.notebook_folder.clone();
+                folder_breadcrumbs(ui, state, &folder);
+                ui.add_space(6.0);
+
+                // Neues Notizbuch oder neuer Ordner hier
                 ui.horizontal(|ui| {
                     let text_edit = ui.add(
                         egui::TextEdit::singleline(&mut state.new_notebook_title_input)
-                            .hint_text("Titel des neuen Notizbuchs …")
+                            .hint_text("Name …")
                             .margin(egui::vec2(8.0, 8.0))
-                            .desired_width(270.0),
+                            .desired_width(190.0),
                     );
-                    let create_btn = ui.button(egui::RichText::new("➕ Erstellen").strong());
-                    let submit = create_btn.clicked()
-                        || (text_edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)));
-
-                    if submit {
-                        let title = state.new_notebook_title_input.trim();
-                        if !title.is_empty() {
-                            actions.push(UiAction::CreateNotebook(title.to_string()));
+                    let create_btn = ui
+                        .button(egui::RichText::new("➕ Notizbuch").strong())
+                        .on_hover_text("Neues Notizbuch in diesem Ordner anlegen und öffnen");
+                    let folder_btn = ui
+                        .button(egui::RichText::new("📁 Ordner").strong())
+                        .on_hover_text("Neuen Ordner hier anlegen (z. B. Semester oder Fach)");
+                    let title = state.new_notebook_title_input.trim().to_string();
+                    if !title.is_empty() {
+                        if create_btn.clicked()
+                            || (text_edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)))
+                        {
+                            actions.push(UiAction::CreateNotebook {
+                                title,
+                                folder: folder.clone(),
+                            });
+                            state.new_notebook_title_input.clear();
+                        } else if folder_btn.clicked() {
+                            actions.push(UiAction::CreateFolder {
+                                parent: folder.clone(),
+                                name: title,
+                            });
                             state.new_notebook_title_input.clear();
                         }
                     }
                 });
 
-                ui.add_space(12.0);
-                ui.separator();
                 ui.add_space(8.0);
+                ui.separator();
+                ui.add_space(6.0);
 
-                // Liste vorhandener Dokumente
-                ui.label(
-                    egui::RichText::new("VORHANDENE DOKUMENTE")
-                        .size(10.5)
-                        .strong()
-                        .color(egui::Color32::from_gray(160)),
-                );
-                ui.add_space(4.0);
+                // Zielordner für „Verschieben“ wählen
+                if let Some(moving) = state.moving_notebook_id.clone() {
+                    move_target_list(ui, state, &moving, &mut actions);
+                    return;
+                }
 
-                egui::ScrollArea::vertical().max_height(260.0).show(ui, |ui| {
-                    for summary in &state.available_notebooks {
+                let summaries: Vec<NotebookSummary> = state
+                    .available_notebooks
+                    .iter()
+                    .filter(|s| state.library.folder_of(&s.id) == folder)
+                    .cloned()
+                    .collect();
+                let subfolders: Vec<String> = state
+                    .library
+                    .subfolders(&folder)
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect();
+
+                egui::ScrollArea::vertical().max_height(340.0).show(ui, |ui| {
+                    for path in &subfolders {
+                        ui.push_id(path, |ui| {
+                            ui.horizontal(|ui| folder_row(ui, state, path, &mut actions))
+                        });
+                        ui.add_space(4.0);
+                    }
+                    if subfolders.is_empty() && summaries.is_empty() {
+                        ui.label(
+                            egui::RichText::new("Dieser Ordner ist leer.")
+                                .color(egui::Color32::from_gray(150)),
+                        );
+                    }
+                    for summary in &summaries {
                         let is_current = summary.id == state.current_notebook_id;
-                        ui.horizontal(|ui| {
+                        ui.push_id(&summary.id, |ui| ui.horizontal(|ui| {
                             ui.spacing_mut().item_spacing = egui::vec2(6.0, 0.0);
 
                             if state.renaming_notebook_id.as_deref() == Some(&summary.id) {
@@ -3596,39 +3884,9 @@ pub fn render_ui(
                                     .rounding(egui::Rounding::same(8.0))
                                     .inner_margin(egui::Margin::symmetric(10.0, 8.0))
                                     .show(ui, |ui| {
-                                        ui.horizontal(|ui| {
-                                            let title_area = ui.vertical(|ui| {
-                                                ui.horizontal(|ui| {
-                                                    ui.label(
-                                                        egui::RichText::new(&summary.title)
-                                                            .strong()
-                                                            .size(13.0)
-                                                            .color(egui::Color32::WHITE),
-                                                    );
-                                                    if summary.status == crate::storage::NotebookStatus::Damaged {
-                                                        ui.colored_label(egui::Color32::from_rgb(255, 100, 100), "⚠ Beschädigt");
-                                                    } else if is_current {
-                                                        ui.colored_label(egui::Color32::from_rgb(46, 204, 113), "⚫ Aktiv");
-                                                    }
-                                                });
-                                                let subtext = if let Some(ref err) = summary.error {
-                                                    format!("Fehler: {err}")
-                                                } else {
-                                                    format!("{} Seite(n)", summary.page_count)
-                                                };
-                                                ui.label(
-                                                    egui::RichText::new(subtext)
-                                                        .size(11.0)
-                                                        .color(egui::Color32::from_gray(160)),
-                                                );
-                                            });
-                                            open_clicked = title_area
-                                                .response
-                                                .interact(egui::Sense::click())
-                                                .on_hover_cursor(egui::CursorIcon::PointingHand)
-                                                .clicked();
-
-                                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                        // Erst die Knöpfe (rechts), der Titel füllt den Rest: Die ganze
+                                        // Titelfläche öffnet das Notizbuch, ohne die Knöpfe zu überdecken
+                                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                                 if summary.status == crate::storage::NotebookStatus::Damaged {
                                                     if ui
                                                         .button(egui::RichText::new("🔄 Backup").size(13.0).color(egui::Color32::from_rgb(100, 200, 255)))
@@ -3654,6 +3912,14 @@ pub fn render_ui(
                                                         actions.push(UiAction::DeleteNotebook(summary.id.clone()));
                                                     }
 
+                                                    if ui
+                                                        .button(egui::RichText::new("📂").size(16.0))
+                                                        .on_hover_text("In einen anderen Ordner verschieben")
+                                                        .clicked()
+                                                    {
+                                                        state.moving_notebook_id = Some(summary.id.clone());
+                                                    }
+
                                                     if ui.button(egui::RichText::new("✏").size(16.0))
                                                         .on_hover_text("Titel umbenennen")
                                                         .clicked()
@@ -3662,7 +3928,42 @@ pub fn render_ui(
                                                         state.renaming_title_input = summary.title.clone();
                                                     }
                                                 }
-                                            });
+
+                                            let title_area = ui
+                                                .with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                                                    ui.vertical(|ui| {
+                                                        ui.set_min_width(ui.available_width());
+                                                ui.horizontal_wrapped(|ui| {
+                                                    ui.label(
+                                                        egui::RichText::new(&summary.title)
+                                                            .strong()
+                                                            .size(13.0)
+                                                            .color(egui::Color32::WHITE),
+                                                    );
+                                                    if summary.status == crate::storage::NotebookStatus::Damaged {
+                                                        ui.colored_label(egui::Color32::from_rgb(255, 100, 100), "⚠ Beschädigt");
+                                                    } else if is_current {
+                                                        ui.colored_label(egui::Color32::from_rgb(46, 204, 113), "⚫ Aktiv");
+                                                    }
+                                                });
+                                                let subtext = if let Some(ref err) = summary.error {
+                                                    format!("Fehler: {err}")
+                                                } else {
+                                                    format!("{} Seite(n)", summary.page_count)
+                                                };
+                                                ui.label(
+                                                    egui::RichText::new(subtext)
+                                                        .size(11.0)
+                                                        .color(egui::Color32::from_gray(160)),
+                                                );
+                                                    })
+                                                })
+                                                .inner;
+                                            open_clicked = title_area
+                                                .response
+                                                .interact(egui::Sense::click())
+                                                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                                                .clicked();
                                         });
                                     });
 
@@ -3674,7 +3975,7 @@ pub fn render_ui(
                                     state.is_document_menu_open = false;
                                 }
                             }
-                        });
+                        }));
                         ui.add_space(4.0);
                     }
                 });

@@ -9,6 +9,7 @@ Dieses Dokument beschreibt, wo und wie ink-notes Notizbücher speichert, und die
 ```text
 ~/.local/share/ink-notes/              ($XDG_DATA_HOME/ink-notes)
 ├── notebooks/
+│   ├── library.json                   Ordner der Notizbücher (siehe unten)
 │   ├── <notizbuch-id>/
 │   │   ├── manifest.json              Metadaten und Seitenreihenfolge
 │   │   ├── manifest.json.bak          Kopie des vorherigen Manifests
@@ -28,6 +29,21 @@ Dieses Dokument beschreibt, wo und wie ink-notes Notizbücher speichert, und die
 - **Notizbuch-IDs** werden aus dem Titel und dem Zeitpunkt gebildet (z. B. `mathematik_1775460000`); das erste Notizbuch heißt `default`.
 - **Assets** sind nach dem SHA-256-Hash ihres Inhalts benannt; dasselbe Bild wird nur einmal gespeichert. Bilder werden als PNG oder (unverändert) JPEG abgelegt, PDFs unverändert.
 - Alle Dateien werden mit Rechten `0600`, Ordner mit `0700` angelegt.
+
+### Ordner (`library.json`)
+Ordner wie „3. Semester › Mathe“ sind rein logisch: Die Notizbücher bleiben in ihren Verzeichnissen, `library.json` hält nur fest, welcher Ordner welches Notizbuch enthält. Umbenennen, Verschieben und Löschen von Ordnern ändern deshalb nie eine Notizbuch-Datei.
+
+```json
+{
+  "folders": ["3. Semester", "3. Semester/Mathe", "4. Semester"],
+  "notebooks": { "analysis_1775460000": "3. Semester/Mathe" }
+}
+```
+
+- Ordner sind Pfade mit `/` als Trenner; Namen enthalten selbst kein `/` und höchstens 80 Zeichen.
+- Notizbücher ohne Eintrag liegen auf der obersten Ebene.
+- Wird ein Ordner gelöscht, rücken seine Notizbücher und Unterordner eine Ebene nach oben.
+- Fehlt die Datei oder ist sie unlesbar, liegen alle Notizbücher auf der obersten Ebene; fehlende übergeordnete Ordner werden beim Laden ergänzt.
 
 ---
 
