@@ -10,10 +10,13 @@ use std::f32::consts::PI;
 
 /// Standard-Minimal-Grenzfrequenz in Hz (reduziert Jitter bei niedrigen Geschwindigkeiten)
 pub const DEFAULT_FC_MIN: f32 = 4.5;
-/// Standard-Geschwindigkeitskoeffizient (reduziert Latenz bei schnellen Bewegungen)
-pub const DEFAULT_BETA: f32 = 0.05;
-/// Standard-Grenzfrequenz für die Ableitung in Hz
-pub const DEFAULT_D_CUTOFF: f32 = 1.0;
+/// Standard-Geschwindigkeitskoeffizient (Hz je Seiteneinheit/s): Bei 400 Einheiten/s
+/// (4 cm/s, zügige Handschrift) liegt die Grenzfrequenz bei rund 65 Hz, kleine Schleifen
+/// werden kaum noch verkleinert
+pub const DEFAULT_BETA: f32 = 0.15;
+/// Standard-Grenzfrequenz für die Geschwindigkeitsschätzung in Hz (reagiert nach wenigen
+/// Millisekunden auf schnellere Bewegung)
+pub const DEFAULT_D_CUTOFF: f32 = 8.0;
 
 /// Berechnet den Glättungsfaktor alpha = 1 / (1 + tau / dt) = 2*pi*fc*dt / (2*pi*fc*dt + 1).
 ///
@@ -157,13 +160,18 @@ pub struct FilteredPoint {
 }
 
 /// Adaptiver 1€-Filter für 2D-Position (x, y) und Stylus-Druck p ∈ [0.0, 1.0].
+///
+/// Die Position wird mit der Geschwindigkeit in der Ebene gefiltert (nicht je Achse):
+/// Auf einer Kreisbahn ist eine Achse an den Umkehrpunkten in Ruhe, eine Filterung je
+/// Achse würde dort stark glätten und Schleifen zusammenziehen.
 #[derive(Debug, Clone)]
 pub struct OneEuroFilter {
     pub fc_min: f32,
     pub beta: f32,
     pub d_cutoff: f32,
-    x_filter: OneEuroFilter1D,
-    y_filter: OneEuroFilter1D,
+    pos_prev: Option<glam::Vec2>,
+    speed_prev: f32,
+    t_prev: Option<f64>,
     p_filter: OneEuroFilter1D,
     last_output: Option<(f32, f32, f32)>,
 }
@@ -175,8 +183,9 @@ impl OneEuroFilter {
             fc_min,
             beta,
             d_cutoff,
-            x_filter: OneEuroFilter1D::new(fc_min, beta, d_cutoff),
-            y_filter: OneEuroFilter1D::new(fc_min, beta, d_cutoff),
+            pos_prev: None,
+            speed_prev: 0.0,
+            t_prev: None,
             p_filter: OneEuroFilter1D::new(fc_min, beta, d_cutoff),
             last_output: None,
         }
@@ -184,8 +193,9 @@ impl OneEuroFilter {
 
     /// Setzt den Filter vollständig zurück (z. B. bei neuem Stroke).
     pub fn reset(&mut self) {
-        self.x_filter.reset();
-        self.y_filter.reset();
+        self.pos_prev = None;
+        self.speed_prev = 0.0;
+        self.t_prev = None;
         self.p_filter.reset();
         self.last_output = None;
     }
@@ -202,12 +212,57 @@ impl OneEuroFilter {
         // Druck immer auf [0.0, 1.0] klemmen
         let p_in = pressure.clamp(0.0, 1.0);
 
-        let x_out = self.x_filter.filter(x, t);
-        let y_out = self.y_filter.filter(y, t);
+        let pos = self.filter_position(glam::Vec2::new(x, y), t);
+        let (x_out, y_out) = (pos.x, pos.y);
         let p_out = self.p_filter.filter(p_in, t).clamp(0.0, 1.0);
 
         let out = (x_out, y_out, p_out);
         self.last_output = Some(out);
+        out
+    }
+
+    /// 1€-Filter der Position mit der Geschwindigkeit in der Ebene.
+    fn filter_position(&mut self, x: glam::Vec2, t: f64) -> glam::Vec2 {
+        let (Some(prev), Some(prev_t)) = (self.pos_prev, self.t_prev) else {
+            self.pos_prev = Some(x);
+            self.speed_prev = 0.0;
+            self.t_prev = Some(t);
+            return x;
+        };
+        let raw_dt = t - prev_t;
+        // Lange Pause: neu beginnen statt über die Pause hinweg zu glätten
+        if raw_dt > 1.0 {
+            self.pos_prev = Some(x);
+            self.speed_prev = 0.0;
+            self.t_prev = Some(t);
+            return x;
+        }
+        let dt = if raw_dt <= 0.0 || !raw_dt.is_finite() {
+            1e-4_f32
+        } else {
+            raw_dt as f32
+        };
+        self.t_prev = Some(t);
+
+        let mut speed = (x - prev).length() / dt;
+        if !speed.is_finite() {
+            speed = 0.0;
+        }
+        let a_d = smoothing_factor(dt, self.d_cutoff);
+        let speed_hat = a_d * speed + (1.0 - a_d) * self.speed_prev;
+
+        let fc = (self.fc_min + self.beta * speed_hat).max(self.fc_min);
+        let a = smoothing_factor(dt, fc);
+        let mut out = prev + (x - prev) * a;
+        if !out.is_finite() {
+            out = prev;
+        }
+        self.pos_prev = Some(out);
+        self.speed_prev = if speed_hat.is_finite() {
+            speed_hat
+        } else {
+            0.0
+        };
         out
     }
 
@@ -280,13 +335,33 @@ mod tests {
     }
 
     #[test]
+    fn test_small_loops_do_not_shrink() {
+        // Kreis mit 0,8 mm Radius in 0,1 s: die Filterung in der Ebene folgt ihm
+        let mut filter = OneEuroFilter::default();
+        let (r, period, hz) = (8.0_f32, 0.1_f64, 200.0);
+        let mut radii = Vec::new();
+        for i in 0..=(period * hz) as usize * 2 {
+            let t = i as f64 / hz;
+            let a = std::f32::consts::TAU * (t / period) as f32;
+            let p = glam::Vec2::new(500.0 + r * a.sin(), 500.0 - r * a.cos());
+            let (out, _) = filter.filter_point(p, 0.5, t);
+            if t > period {
+                radii.push((out - glam::Vec2::new(500.0, 500.0)).length());
+            }
+        }
+        let mean = radii.iter().sum::<f32>() / radii.len() as f32;
+        assert!(mean > r * 0.9, "Schleife geschrumpft: {mean}");
+    }
+
+    #[test]
     fn test_high_frequency_jitter() {
         let mut filter = OneEuroFilter::default();
 
         let base_x = 100.0_f32;
         let base_y = 50.0_f32;
         let base_p = 0.5_f32;
-        let jitter_amplitude = 2.0_f32;
+        // Realistisches Digitizer-Rauschen (±0,05 mm) bei ruhendem Stift
+        let jitter_amplitude = 0.5_f32;
 
         let num_samples = 120;
         let dt = 1.0 / 120.0; // 120 Hz Abtastrate
@@ -331,9 +406,10 @@ mod tests {
             .sum::<f32>()
             / count;
 
-        // Der 1€-Filter muss das hochfrequente Jitter massiv dämpfen
+        // Der 1€-Filter muss das hochfrequente Jitter deutlich dämpfen (der fertige Strich
+        // wird zusätzlich symmetrisch geglättet)
         assert!(
-            filtered_variance < raw_variance * 0.05,
+            filtered_variance < raw_variance * 0.2,
             "Gefilterte Varianz ({filtered_variance}) muss deutlich kleiner sein als Raw-Varianz ({raw_variance})"
         );
     }

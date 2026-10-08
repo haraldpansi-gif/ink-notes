@@ -17,6 +17,10 @@ pub const RDP_TOLERANCE_UNITS: f32 = 0.75;
 
 /// Schwellenwert für Ecken-Erkennung (Richtungsänderung > 65 Grad).
 pub const CORNER_ANGLE_THRESHOLD_DEG: f32 = 65.0;
+/// Ecken nur zwischen Abschnitten, die nach der Ausdünnung mindestens so lang sind (0,6 mm).
+/// Kleine Schleifen („o“, „a“, „e“) bestehen aus kurzen Abschnitten mit großem Knickwinkel;
+/// würden sie als Ecken getrennt, würden sie zu spitzen Zacken statt Rundungen.
+pub const CORNER_MIN_SEGMENT_UNITS: f32 = 6.0;
 
 /// GPU-Vertex für Triangle-Strips (Memory-Layout kompatibel mit GPU-Buffern).
 #[repr(C)]
@@ -357,6 +361,34 @@ pub fn smooth_pressure(samples: &[StylusSample]) -> Vec<StylusSample> {
     smoothed
 }
 
+/// Glättet die Positionen mit dem Fenster [0.25, 0.5, 0.25] gegen Digitizer-Rauschen.
+/// Symmetrisch (ohne Verzögerung), daher bleiben auch kleine Schleifen rund. Anfang, Ende
+/// und Punkte mit scharfem Knick (über [`CORNER_ANGLE_THRESHOLD_DEG`]) bleiben unverändert,
+/// damit Ecken spitz bleiben.
+pub fn smooth_positions(samples: &[StylusSample]) -> Vec<StylusSample> {
+    if samples.len() < 3 {
+        return samples.to_vec();
+    }
+    let cos_limit = CORNER_ANGLE_THRESHOLD_DEG.to_radians().cos();
+    let mut smoothed = samples.to_vec();
+    for i in 1..samples.len() - 1 {
+        let (a, b, c) = (
+            samples[i - 1].position,
+            samples[i].position,
+            samples[i + 1].position,
+        );
+        let (d_in, d_out) = (b - a, c - b);
+        if d_in.length_squared() > 1e-8 && d_out.length_squared() > 1e-8 {
+            let cos = d_in.normalize().dot(d_out.normalize());
+            if cos < cos_limit {
+                continue;
+            }
+        }
+        smoothed[i].position = 0.25 * a + 0.5 * b + 0.25 * c;
+    }
+    smoothed
+}
+
 /// Rekursives RDP-Markieren zur Ausdünnung kollinearer Zwischenpunkte.
 fn rdp_mark(positions: &[glam::Vec2], start: usize, end: usize, epsilon: f32, keep: &mut [bool]) {
     if end <= start + 1 {
@@ -402,7 +434,8 @@ pub fn rdp_filter_samples(samples: &[StylusSample], epsilon: f32) -> Vec<StylusS
         .collect()
 }
 
-/// Berechnet die Richtungsänderung zwischen benachbarten Segmenten und findet Ecken mit Winkel > `threshold_deg`.
+/// Berechnet die Richtungsänderung zwischen benachbarten Segmenten und findet Ecken mit Winkel > `threshold_deg`
+/// (nur zwischen Segmenten von mindestens [`CORNER_MIN_SEGMENT_UNITS`] Länge).
 pub fn detect_corners(samples: &[StylusSample], threshold_deg: f32) -> Vec<usize> {
     if samples.len() < 3 {
         return Vec::new();
@@ -415,7 +448,7 @@ pub fn detect_corners(samples: &[StylusSample], threshold_deg: f32) -> Vec<usize
         let l_in = v_in.length();
         let l_out = v_out.length();
 
-        if l_in > 1e-4 && l_out > 1e-4 {
+        if l_in >= CORNER_MIN_SEGMENT_UNITS && l_out >= CORNER_MIN_SEGMENT_UNITS {
             let d_in = v_in / l_in;
             let d_out = v_out / l_out;
             let dot = d_in.dot(d_out).clamp(-1.0, 1.0);
@@ -626,7 +659,7 @@ pub fn generate_finalized_triangle_strip(
 
 /// Finalisiert einen Strich nach dem Zwei-Stufen-Modell:
 /// 1. Ecken-Erkennung (Corner Preservation bei Richtungsänderung > 65°)
-/// 2. Druckglättung über gewichtetes 3-Punkt-Fenster [0.25, 0.5, 0.25]
+/// 2. Druck- und Positionsglättung über gewichtetes 3-Punkt-Fenster [0.25, 0.5, 0.25]
 /// 3. Ramer-Douglas-Peucker (RDP) Dezimierung (Toleranz ca. 0.05 bis 0.1 mm)
 /// 4. Generierung der finalen Triangle-Strips mit runden Kappen an Start und Ende.
 pub fn finalize_stroke(raw_samples: &[StylusSample]) -> Stroke {
@@ -649,8 +682,8 @@ pub fn finalize_stroke_with_config(
         return Stroke::new(stroke_id, Vec::new(), Vec::new(), color);
     }
 
-    // 1. Druckglättung über 3-Punkt-Fenster [0.25, 0.5, 0.25]
-    let smoothed = smooth_pressure(raw_samples);
+    // 1. Druck- und Positionsglättung über 3-Punkt-Fenster [0.25, 0.5, 0.25]
+    let smoothed = smooth_positions(&smooth_pressure(raw_samples));
 
     // 2. RDP-Dezimierung (ca. 0.075 mm = 0.75 Einheiten)
     let decimated = rdp_filter_samples(&smoothed, RDP_TOLERANCE_UNITS);
@@ -864,6 +897,31 @@ mod tests {
         let corner_pt = stroke.points[corner_idx];
         assert!((corner_pt.position.x - 100.0).abs() < 1e-3);
         assert!((corner_pt.position.y - 0.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn test_small_loops_stay_round() {
+        // Kleines „o“ (Radius 0,8 mm) in 0,1 s mit 200 Hz, mit Vorschub wie im Wort
+        let (r, period, hz) = (8.0_f32, 0.1_f64, 200.0);
+        let center = |t: f64| glam::Vec2::new(500.0 + t as f32 * 40.0, 500.0);
+        let raw: Vec<StylusSample> = (0..=((period * hz) as usize))
+            .map(|i| {
+                let t = i as f64 / hz;
+                let a = std::f32::consts::TAU * (t / period) as f32;
+                StylusSample {
+                    position: center(t) + glam::Vec2::new(r * a.sin(), -r * a.cos()),
+                    pressure: 0.6,
+                    timestamp: t,
+                }
+            })
+            .collect();
+        let stroke =
+            finalize_stroke_with_config(1, &raw, [0.0; 4], &SplineConfig::from_width_units(5.0));
+        for p in &stroke.points {
+            let d = (p.position - center(p.timestamp)).length();
+            assert!((d - r).abs() < 0.6, "Schleife verformt: Abstand {d}");
+        }
+        assert!(detect_corners(&stroke.points, CORNER_ANGLE_THRESHOLD_DEG).is_empty());
     }
 
     #[test]

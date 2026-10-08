@@ -210,6 +210,9 @@ pub struct CanvasState {
     pub live_vertex_capacity: usize,
     pub live_vertex_count: u32,
     pub live_samples: Vec<StylusSample>,
+    /// Ungefilterte Eingabepunkte des Live-Strichs (nach dem Lineal): Grundlage des fertigen
+    /// Strichs, damit kleine Schleifen nicht durch die Filterverzögerung schrumpfen
+    live_raw_samples: Vec<StylusSample>,
     pub live_control_points: Vec<ControlPoint>,
     pub live_vertices: Vec<InkVertex>,
     pub filter: OneEuroFilter,
@@ -523,6 +526,7 @@ impl CanvasState {
             live_vertex_capacity: Self::INITIAL_LIVE_CAPACITY,
             live_vertex_count: 0,
             live_samples: Vec::with_capacity(256),
+            live_raw_samples: Vec::with_capacity(256),
             live_control_points: Vec::with_capacity(256),
             live_vertices: Vec::with_capacity(1024),
             filter: OneEuroFilter::default(),
@@ -1051,6 +1055,8 @@ impl CanvasState {
             .ruler
             .and_then(|r| r.edge_lock(glam::Vec2::new(page_x, page_y), half_width));
         let (page_x, page_y) = self.constrain_to_ruler(page_x, page_y);
+        self.live_raw_samples.clear();
+        self.push_raw_sample(page_x, page_y, pressure, timestamp);
 
         // 1. Zwingend durch den 1€-Filter leiten
         let (fx, fy, fp) = self.filter.filter(page_x, page_y, pressure, timestamp);
@@ -1076,6 +1082,7 @@ impl CanvasState {
 
         // 1. Zwingend durch den 1€-Filter leiten
         let (page_x, page_y) = self.constrain_to_ruler(page_x, page_y);
+        self.push_raw_sample(page_x, page_y, pressure, timestamp);
         let (fx, fy, fp) = self.filter.filter(page_x, page_y, pressure, timestamp);
         let new_pt = ControlPoint::new(fx, fy, fp);
 
@@ -1098,6 +1105,25 @@ impl CanvasState {
         self.update_live_mesh();
     }
 
+    /// Merkt sich einen ungefilterten Eingabepunkt (Punkte näher als 0,03 mm am vorigen
+    /// entfallen).
+    fn push_raw_sample(&mut self, x: f32, y: f32, pressure: f32, timestamp: f64) {
+        let position = glam::Vec2::new(x, y);
+        if !position.is_finite() || !pressure.is_finite() {
+            return;
+        }
+        if let Some(last) = self.live_raw_samples.last() {
+            if (position - last.position).length_squared() < 0.09 {
+                return;
+            }
+        }
+        self.live_raw_samples.push(StylusSample {
+            position,
+            pressure: pressure.clamp(0.0, 1.0),
+            timestamp,
+        });
+    }
+
     /// Projiziert einen Punkt auf die Linealkante, falls der Live-Strich dort eingerastet ist.
     fn constrain_to_ruler(&self, x: f32, y: f32) -> (f32, f32) {
         match self.ruler_lock {
@@ -1114,6 +1140,7 @@ impl CanvasState {
     /// Bricht den aktuellen Live-Strich ab und setzt Puffer sowie 1€-Filter sauber zurück.
     pub fn cancel_stroke(&mut self) {
         self.live_samples.clear();
+        self.live_raw_samples.clear();
         self.live_control_points.clear();
         self.live_vertices.clear();
         self.live_vertex_count = 0;
@@ -1131,10 +1158,16 @@ impl CanvasState {
             return None;
         }
 
-        // Post-Stroke Finalisierung (Corner Preservation, Druckglättung, RDP, runde Kappen)
+        // Post-Stroke Finalisierung (Glättung, RDP, Ecken, runde Kappen) aus den ungefilterten
+        // Punkten: Der 1€-Filter dient nur der Anzeige während des Schreibens
+        let source = if self.live_raw_samples.is_empty() {
+            &self.live_samples
+        } else {
+            &self.live_raw_samples
+        };
         let stroke = spline::finalize_stroke_with_config(
             stroke_id,
-            &self.live_samples,
+            source,
             self.current_ink_color,
             &self.spline_config,
         );
@@ -1144,6 +1177,7 @@ impl CanvasState {
 
         // Temporären GPU-Live-Buffer vollständig leeren
         self.live_samples.clear();
+        self.live_raw_samples.clear();
         self.live_control_points.clear();
         self.live_vertices.clear();
         self.live_vertex_count = 0;
