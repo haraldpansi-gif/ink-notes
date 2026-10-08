@@ -87,13 +87,7 @@ impl PenPreset {
     /// Begrenzt Werte aus einer (evtl. von Hand bearbeiteten) Einstellungsdatei; Stifte sind
     /// immer deckend.
     pub fn sanitized(&self, fallback: PenPreset) -> Self {
-        let mut color = fallback.color;
-        if self.color.iter().all(|c| c.is_finite()) {
-            for (out, c) in color.iter_mut().zip(self.color).take(3) {
-                *out = c.clamp(0.0, 1.0);
-            }
-        }
-        color[3] = 1.0;
+        let color = sanitized_color(self.color, [0.0, 0.0, 0.0, 1.0]);
         let width_mm = if self.width_mm.is_finite() {
             self.width_mm
                 .clamp(*Self::WIDTH_RANGE.start(), *Self::WIDTH_RANGE.end())
@@ -127,6 +121,35 @@ pub const DEFAULT_PEN_PRESETS: [PenPreset; PEN_PRESET_COUNT] = [
     },
 ];
 
+/// Farben des Textmarkers in der Werkzeugleiste (halbtransparent).
+pub const DEFAULT_HIGHLIGHTER_COLORS: [[f32; 4]; 4] = [
+    [1.0, 0.95, 0.1, 0.35],
+    [0.2, 0.9, 0.3, 0.35],
+    [0.25, 0.7, 1.0, 0.35],
+    [1.0, 0.3, 0.65, 0.35],
+];
+
+/// Farben des Text-Werkzeugs in der Werkzeugleiste.
+pub const DEFAULT_TEXT_COLORS: [[f32; 4]; 5] = [
+    [0.12, 0.12, 0.14, 1.0],
+    [0.15, 0.35, 0.85, 1.0],
+    [0.85, 0.20, 0.20, 1.0],
+    [0.18, 0.65, 0.35, 1.0],
+    [0.45, 0.45, 0.48, 1.0],
+];
+
+/// Begrenzt eine Farbe aus der Einstellungsdatei auf 0–1; die Deckkraft kommt immer aus
+/// `fallback` (Stift und Text deckend, Textmarker halbtransparent).
+fn sanitized_color(color: [f32; 4], fallback: [f32; 4]) -> [f32; 4] {
+    let mut out = fallback;
+    if color.iter().all(|c| c.is_finite()) {
+        for (o, c) in out.iter_mut().zip(color).take(3) {
+            *o = c.clamp(0.0, 1.0);
+        }
+    }
+    out
+}
+
 /// Benutzereinstellungen der Oberfläche.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -145,6 +168,11 @@ pub struct UiSettings {
     /// Stifte der Werkzeugleiste und der gewählte davon
     pub pen_presets: [PenPreset; PEN_PRESET_COUNT],
     pub active_pen: usize,
+    /// Eigene Farben von Textmarker und Text-Werkzeug und die gewählte davon
+    pub highlighter_colors: [[f32; 4]; 4],
+    pub active_highlighter: usize,
+    pub text_colors: [[f32; 4]; 5],
+    pub active_text_color: usize,
 }
 
 impl Default for UiSettings {
@@ -158,6 +186,10 @@ impl Default for UiSettings {
             continuous_scroll: true,
             pen_presets: DEFAULT_PEN_PRESETS,
             active_pen: 0,
+            highlighter_colors: DEFAULT_HIGHLIGHTER_COLORS,
+            active_highlighter: 0,
+            text_colors: DEFAULT_TEXT_COLORS,
+            active_text_color: 0,
         }
     }
 }
@@ -189,6 +221,22 @@ impl UiSettings {
             *preset = preset.sanitized(fallback);
         }
         settings.active_pen = settings.active_pen.min(PEN_PRESET_COUNT - 1);
+        for (color, fallback) in settings
+            .highlighter_colors
+            .iter_mut()
+            .zip(DEFAULT_HIGHLIGHTER_COLORS)
+        {
+            *color = sanitized_color(*color, fallback);
+        }
+        settings.active_highlighter = settings
+            .active_highlighter
+            .min(settings.highlighter_colors.len() - 1);
+        for (color, fallback) in settings.text_colors.iter_mut().zip(DEFAULT_TEXT_COLORS) {
+            *color = sanitized_color(*color, fallback);
+        }
+        settings.active_text_color = settings
+            .active_text_color
+            .min(settings.text_colors.len() - 1);
         settings
     }
 
@@ -225,6 +273,10 @@ mod tests {
                 width_mm: 1.5,
             }; PEN_PRESET_COUNT],
             active_pen: 2,
+            highlighter_colors: [[0.9, 0.5, 0.1, 0.35]; 4],
+            active_highlighter: 3,
+            text_colors: [[0.3, 0.1, 0.6, 1.0]; 5],
+            active_text_color: 4,
         };
         settings.save_to(&path).unwrap();
         assert_eq!(UiSettings::load_from(&path), settings);
@@ -280,6 +332,20 @@ mod tests {
         assert_eq!(settings.pen_presets[0].color, [1.0, 0.0, 0.5, 1.0]);
         assert_eq!(settings.pen_presets[0].width_mm, 5.0);
         assert_eq!(settings.pen_presets[1].width_mm, 0.15);
+
+        // Eigene Farben: Textmarker bleibt halbtransparent, Text deckend
+        std::fs::write(
+            &path,
+            br#"{"highlighter_colors": [[0.1, 0.2, 0.3, 1.0], [0.1, 0.2, 0.3, 1.0],
+                [0.1, 0.2, 0.3, 1.0], [0.1, 0.2, 0.3, 1.0]], "active_highlighter": 7,
+                "text_colors": [[5.0, 0.2, 0.3, 0.1], [0.1, 0.2, 0.3, 1.0], [0.1, 0.2, 0.3, 1.0],
+                [0.1, 0.2, 0.3, 1.0], [0.1, 0.2, 0.3, 1.0]]}"#,
+        )
+        .unwrap();
+        let settings = UiSettings::load_from(&path);
+        assert_eq!(settings.highlighter_colors[0], [0.1, 0.2, 0.3, 0.35]);
+        assert_eq!(settings.active_highlighter, 3);
+        assert_eq!(settings.text_colors[0], [1.0, 0.2, 0.3, 1.0]);
     }
 
     #[test]

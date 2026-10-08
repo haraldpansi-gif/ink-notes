@@ -316,13 +316,20 @@ impl CanvasState {
             )
             .await?;
 
-        // 4. Geringe Bildverzögerung (Mailbox, sonst Fifo) & Frame-Latency 1
+        // 4. Geringe Bildverzögerung (Mailbox, sonst Fifo) & Frame-Latency 1.
+        //    Gezeichnet wird ohne sRGB-Umrechnung (siehe `render_format`); bietet die Fläche
+        //    nur sRGB-Formate an, wird eine Ansicht ohne sRGB verwendet.
         let surface_format = surface_caps
             .formats
             .iter()
             .copied()
-            .find(|f| f.is_srgb())
+            .find(|f| !f.is_srgb())
             .unwrap_or(surface_caps.formats[0]);
+        let view_formats = if surface_format.is_srgb() {
+            vec![surface_format.remove_srgb_suffix()]
+        } else {
+            vec![]
+        };
 
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
@@ -331,14 +338,14 @@ impl CanvasState {
             height: size.height.max(1),
             present_mode,
             alpha_mode: surface_caps.alpha_modes[0],
-            view_formats: vec![],
+            view_formats,
             desired_maximum_frame_latency: 1, // Minimiert Eingabelatenz auf 1 Frame
         };
         surface.configure(&device, &config);
 
         // Kantenglättung der Zeichenfläche (4× Multisampling), falls das Format es erlaubt
         let msaa_samples = if adapter
-            .get_texture_format_features(config.format)
+            .get_texture_format_features(render_format(&config))
             .flags
             .sample_count_supported(MSAA_SAMPLES)
         {
@@ -414,7 +421,7 @@ impl CanvasState {
                 module: &shader,
                 entry_point: "fs_ink",
                 targets: &[Some(wgpu::ColorTargetState {
-                    format: config.format,
+                    format: render_format(&config),
                     blend: Some(wgpu::BlendState::ALPHA_BLENDING),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
@@ -450,7 +457,7 @@ impl CanvasState {
                     module: &shader,
                     entry_point: "fs_none",
                     targets: &[Some(wgpu::ColorTargetState {
-                        format: config.format,
+                        format: render_format(&config),
                         blend: None,
                         write_mask: wgpu::ColorWrites::empty(),
                     })],
@@ -477,7 +484,7 @@ impl CanvasState {
                 module: &shader,
                 entry_point: "fs_main",
                 targets: &[Some(wgpu::ColorTargetState {
-                    format: config.format,
+                    format: render_format(&config),
                     blend: Some(wgpu::BlendState::ALPHA_BLENDING),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
@@ -537,7 +544,7 @@ impl CanvasState {
                 module: &shader,
                 entry_point: "fs_pattern",
                 targets: &[Some(wgpu::ColorTargetState {
-                    format: config.format,
+                    format: render_format(&config),
                     blend: Some(wgpu::BlendState::ALPHA_BLENDING),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
@@ -570,12 +577,12 @@ impl CanvasState {
             &device,
             &shader,
             &bind_group_layout,
-            config.format,
+            render_format(&config),
             msaa_samples,
         );
 
         // 8. egui Renderer für das schwebende UI initialisieren
-        let egui_renderer = egui_wgpu::Renderer::new(&device, config.format, None, 1);
+        let egui_renderer = egui_wgpu::Renderer::new(&device, render_format(&config), None, 1);
 
         Ok(Self {
             surface,
@@ -1340,9 +1347,10 @@ impl CanvasState {
         }
 
         let output = self.surface.get_current_texture()?;
-        let view = output
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
+        let view = output.texture.create_view(&wgpu::TextureViewDescriptor {
+            format: Some(render_format(&self.config)),
+            ..Default::default()
+        });
 
         let mut encoder = self
             .device
@@ -1509,6 +1517,14 @@ impl CanvasState {
     }
 }
 
+/// Format, in das gezeichnet wird: ohne sRGB-Umrechnung. Die Farben werden also in sRGB
+/// gemischt – wie im PDF-Export, damit halbtransparente Tinte (Textmarker) am Bildschirm
+/// genauso aussieht. Tintenfarben sind sRGB-Werte, Papier- und Musterfarben rechnet der
+/// Shader aus linearen Werten um.
+fn render_format(config: &wgpu::SurfaceConfiguration) -> wgpu::TextureFormat {
+    config.format.remove_srgb_suffix()
+}
+
 /// Multisampling der Zeichenfläche gegen gezackte Strichkanten.
 const MSAA_SAMPLES: u32 = 4;
 
@@ -1530,7 +1546,7 @@ fn create_msaa_view(
                 mip_level_count: 1,
                 sample_count: samples,
                 dimension: wgpu::TextureDimension::D2,
-                format: config.format,
+                format: render_format(config),
                 usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
                 view_formats: &[],
             })

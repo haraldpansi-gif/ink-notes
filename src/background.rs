@@ -71,7 +71,8 @@ pub const LINED_SPACING: f32 = 75.0;
 /// Papierfarbe der Anzeige. Betrifft nur die Darstellung am Bildschirm; gespeicherte
 /// Strichfarben und der PDF-Export bleiben unverändert (weißes Papier).
 ///
-/// Alle Farben sind linear (die Oberfläche ist sRGB, die Umrechnung macht die GPU).
+/// Papier- und Musterfarben sind linear (der Shader rechnet sie in sRGB um); Tintenfarben
+/// dagegen sind sRGB-Werte wie im Export.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum PaperTheme {
@@ -138,7 +139,24 @@ impl PaperTheme {
             PaperTheme::DarkGray => (0.004, 0.004, 0.005),
             PaperTheme::Black => (0.03, 0.03, 0.035),
         };
-        wgpu::Color { r, g, b, a: 1.0 }
+        // Linear angegeben; gezeichnet wird ohne sRGB-Umrechnung
+        let srgb = |c: f64| f64::from(linear_to_srgb(c as f32));
+        wgpu::Color {
+            r: srgb(r),
+            g: srgb(g),
+            b: srgb(b),
+            a: 1.0,
+        }
+    }
+}
+
+/// Linearer Farbanteil (Papier, Muster) als sRGB-Wert (Tinte, Export).
+pub fn linear_to_srgb(c: f32) -> f32 {
+    let c = c.clamp(0.0, 1.0);
+    if c <= 0.003_130_8 {
+        c * 12.92
+    } else {
+        1.055 * c.powf(1.0 / 2.4) - 0.055
     }
 }
 

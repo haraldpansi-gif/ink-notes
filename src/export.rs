@@ -445,8 +445,10 @@ fn render_background_layer(
 ) {
     let background = page.background;
     let (Mm(page_width_mm), Mm(page_height_mm)) = pdf_page_mm(page);
-    // Exportiert wird immer auf weißem Papier
-    let [r, g, b, _] = pattern.color(crate::background::PaperTheme::White);
+    // Exportiert wird immer auf weißem Papier; die Musterfarbe ist linear, PDF erwartet sRGB
+    let [r, g, b, _] = pattern
+        .color(crate::background::PaperTheme::White)
+        .map(crate::background::linear_to_srgb);
     let grid_color = Color::Rgb(Rgb::new(r, g, b, None));
     layer.set_outline_color(grid_color.clone());
     layer.set_outline_thickness(0.4); // Feine 0.15 mm Haarlinie (ca. 0.4 pt)

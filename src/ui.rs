@@ -19,7 +19,8 @@ use crate::document::{
 use crate::file_picker::{FilePicker, PickerKind};
 use crate::ruler::{Ruler, RulerHit};
 use crate::settings::{
-    PenPreset, PressureCurve, SidebarSide, DEFAULT_PEN_PRESETS, PEN_PRESET_COUNT,
+    PenPreset, PressureCurve, SidebarSide, DEFAULT_HIGHLIGHTER_COLORS, DEFAULT_PEN_PRESETS,
+    DEFAULT_TEXT_COLORS, PEN_PRESET_COUNT,
 };
 use crate::storage::NotebookSummary;
 use crate::text::{TextEditing, TextFont, TEXT_SIZES_PT};
@@ -266,6 +267,18 @@ pub struct UiState {
     /// `pen_stroke_width_mm` gehören immer zum gewählten Stift
     pub pen_presets: [PenPreset; PEN_PRESET_COUNT],
     pub active_pen: usize,
+    /// Eigene Farben des Textmarkers in der Werkzeugleiste und die gewählte;
+    /// `highlighter_color` gehört immer zur gewählten
+    pub highlighter_colors: [[f32; 4]; 4],
+    pub active_highlighter: usize,
+    /// Eigene Farben des Text-Werkzeugs und die zuletzt angetippte (ein geöffnetes Textfeld
+    /// kann eine andere Farbe haben)
+    pub text_colors: [[f32; 4]; 5],
+    pub active_text_color: usize,
+    /// Popover „Textfarbe“ ist offen
+    pub is_text_color_menu_open: bool,
+    /// Farbwähler in den Farb-Popovern aufgeklappt
+    pub show_color_picker: bool,
     /// Rückfrage „Seite löschen?“ im ☰-Menü ist offen
     pub confirm_delete_page: bool,
     /// Seitenzahl der zuletzt gelöschten Seite, solange sie wiederhergestellt werden kann
@@ -349,6 +362,12 @@ impl Default for UiState {
             last_deleted_notebook: None,
             pen_presets: DEFAULT_PEN_PRESETS,
             active_pen: 0,
+            highlighter_colors: DEFAULT_HIGHLIGHTER_COLORS,
+            active_highlighter: 0,
+            text_colors: DEFAULT_TEXT_COLORS,
+            active_text_color: 0,
+            is_text_color_menu_open: false,
+            show_color_picker: false,
             confirm_delete_page: false,
             restorable_page: None,
             shutdown_error: None,
@@ -391,6 +410,7 @@ impl UiState {
     /// sich nie mehrere überlagern.
     pub fn close_overlays(&mut self) {
         self.confirm_delete_page = false;
+        self.is_text_color_menu_open = false;
         self.is_pen_menu_open = false;
         self.is_highlighter_menu_open = false;
         self.is_more_menu_open = false;
@@ -500,9 +520,36 @@ impl UiState {
         self.pen_stroke_width_mm = preset.width_mm;
     }
 
+    /// Wählt die eigene Textmarker-Farbe `index`.
+    pub fn select_highlighter_color(&mut self, index: usize) {
+        self.active_highlighter = index.min(self.highlighter_colors.len() - 1);
+        self.highlighter_color = self.highlighter_colors[self.active_highlighter];
+    }
+
+    /// Setzt die Textfarbe (auch für ein gerade bearbeitetes Textfeld).
+    pub fn set_text_color(&mut self, color: [f32; 4]) {
+        self.text_color = color;
+        if let Some(edit) = &mut self.text_edit {
+            edit.color = color;
+            edit.focus = true;
+        }
+    }
+
+    /// Übernimmt geänderte Farbe oder Stärke des Stifts in die Vorlage des gewählten Stifts
+    /// und die Textmarker-Farbe in die gewählte eigene Farbe; `true`, wenn sich etwas
+    /// geändert hat (dann speichern).
+    pub fn sync_tool_colors(&mut self) -> bool {
+        let index = self
+            .active_highlighter
+            .min(self.highlighter_colors.len() - 1);
+        let highlighter_changed = self.highlighter_colors[index] != self.highlighter_color;
+        self.highlighter_colors[index] = self.highlighter_color;
+        self.sync_pen_preset() | highlighter_changed
+    }
+
     /// Übernimmt geänderte Farbe oder Stärke des Stifts in die Vorlage des gewählten Stifts;
     /// `true`, wenn sie sich geändert hat (dann speichern).
-    pub fn sync_pen_preset(&mut self) -> bool {
+    fn sync_pen_preset(&mut self) -> bool {
         let current = PenPreset {
             color: self.pen_color,
             width_mm: self.pen_stroke_width_mm,
@@ -930,6 +977,67 @@ fn autosave_status_style(status: AutosaveStatus) -> (egui::Color32, &'static str
 }
 
 /// Zeichnet einen runden Farbauswahl-Knopf (Color Swatch) mit anpassbarem Durchmesser.
+/// Farbwahl in den Popovern: Vorgaben als Farbpunkte, dahinter 🎨 für einen frei
+/// wählbaren Farbton (aufklappbar). Die Deckkraft von `color` bleibt erhalten (Textmarker
+/// halbtransparent). `true`, wenn sich die Farbe geändert hat.
+fn color_editor(
+    ui: &mut egui::Ui,
+    presets: &[ColorPreset],
+    color: &mut [f32; 4],
+    picker_open: &mut bool,
+) -> bool {
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing = egui::vec2(8.0, 0.0);
+        for &(preset, label) in presets {
+            let is_sel = preset[..3]
+                .iter()
+                .zip(&color[..3])
+                .all(|(a, b)| (a - b).abs() < 0.01);
+            if color_circle_swatch(ui, preset, is_sel, label, 30.0).clicked() {
+                *color = [preset[0], preset[1], preset[2], color[3]];
+                changed = true;
+            }
+        }
+        if ui
+            .add(egui::SelectableLabel::new(
+                *picker_open,
+                egui::RichText::new("🎨").size(18.0),
+            ))
+            .on_hover_text("Eigene Farbe wählen")
+            .clicked()
+        {
+            *picker_open = !*picker_open;
+        }
+    });
+    if *picker_open {
+        ui.add_space(6.0);
+        let [r, g, b] = [0, 1, 2].map(|i| (color[i].clamp(0.0, 1.0) * 255.0).round() as u8);
+        let mut picked = egui::Color32::from_rgb(r, g, b);
+        let picked_changed = ui
+            .scope(|ui| {
+                ui.spacing_mut().slider_width = 170.0;
+                egui::color_picker::color_picker_color32(
+                    ui,
+                    &mut picked,
+                    egui::color_picker::Alpha::Opaque,
+                )
+            })
+            .inner;
+        if picked_changed {
+            let [r, g, b, _] = picked.to_array();
+            *color = [
+                r as f32 / 255.0,
+                g as f32 / 255.0,
+                b as f32 / 255.0,
+                color[3],
+            ];
+            changed = true;
+        }
+    }
+    changed
+}
+
 /// Stift der Werkzeugleiste: ein Strich in Farbe und (angedeuteter) Stärke auf einem
 /// Stück Papier, damit auch schwarze Tinte auf der dunklen Leiste sichtbar ist.
 fn pen_preset_swatch(
@@ -1195,7 +1303,7 @@ fn text_edit_overlay(ctx: &egui::Context, state: &mut UiState) {
     let height_px = font_size * ctx.pixels_per_point() * edit.text.font.height_per_em();
     let rounding = height_px.round().max(1.0) / height_px;
     let width = (edit.text.wrap_width.max(edit.text.size) * sx * view.scale * rounding).max(8.0);
-    let color = linear_color32(if adapt {
+    let color = color32_from(if adapt {
         adapt_ink_color(edit.color)
     } else {
         edit.color
@@ -2001,6 +2109,7 @@ pub fn render_ui(
 
     let mut pen_btn_rect = None;
     let mut high_btn_rect = None;
+    let mut text_color_btn_rect = None;
     let mut more_btn_rect = None;
     let mut page_btn_rect = None;
 
@@ -2208,26 +2317,11 @@ pub fn render_ui(
 
                                 // --- Stifte bzw. Farben des aktiven Werkzeugs ---
                                 let pens = matches!(state.active_tool, ActiveTool::Pen | ActiveTool::Shape);
-                                let palette: Option<(&[ColorPreset], [f32; 4])> =
-                                    match state.active_tool {
-                                        ActiveTool::Pen | ActiveTool::Shape => None,
-                                        ActiveTool::Select => {
-                                            Some((&PEN_COLOR_PRESETS[..], state.pen_color))
-                                        }
-                                        ActiveTool::Highlighter => Some((
-                                            &HIGHLIGHTER_COLOR_PRESETS[..],
-                                            state.highlighter_color,
-                                        )),
-                                        ActiveTool::Text => {
-                                            Some((&PEN_COLOR_PRESETS[..], state.text_color))
-                                        }
-                                        ActiveTool::Eraser => None,
-                                    };
                                 // Fester Platz für die längste Palette, damit die Knöpfe darunter
                                 // beim Werkzeugwechsel nicht springen
                                 sidebar_divider(ui, btn);
                                 let swatch = UiState::sidebar_swatch_size(btn);
-                                let mut shown = palette.map_or(0, |(presets, _)| presets.len());
+                                let mut shown = 0;
                                 if pens {
                                     shown = PEN_PRESET_COUNT;
                                     for i in 0..PEN_PRESET_COUNT {
@@ -2267,29 +2361,74 @@ pub fn render_ui(
                                         }
                                     }
                                 }
-                                if let Some((presets, current)) = palette {
-                                    for &(color, label) in presets {
-                                        let is_sel = (current[0] - color[0]).abs() < 0.05
-                                            && (current[1] - color[1]).abs() < 0.05
-                                            && (current[2] - color[2]).abs() < 0.05;
-                                        if color_circle_swatch(ui, color, is_sel, label, swatch)
-                                            .clicked()
-                                        {
-                                            match state.active_tool {
-                                                ActiveTool::Highlighter => {
-                                                    state.highlighter_color = color
-                                                }
-                                                ActiveTool::Text => {
-                                                    state.text_color = color;
-                                                    if let Some(edit) = &mut state.text_edit {
-                                                        edit.color = color;
-                                                        edit.focus = true;
-                                                    }
-                                                }
-                                                // Auswahl umfärben, der Stift bleibt
-                                                _ => {}
+                                // Eigene Farben von Textmarker und Text: antippen wählt, erneut
+                                // tippen passt die Farbe an. Die Auswahl wird in die Farben der
+                                // Stifte umgefärbt.
+                                let tool = state.active_tool;
+                                let slots: Option<Vec<[f32; 4]>> = match tool {
+                                    ActiveTool::Highlighter => Some(state.highlighter_colors.to_vec()),
+                                    ActiveTool::Text => Some(state.text_colors.to_vec()),
+                                    ActiveTool::Select => {
+                                        Some(state.pen_presets.iter().map(|p| p.color).collect())
+                                    }
+                                    _ => None,
+                                };
+                                if let Some(colors) = slots {
+                                    shown = colors.len();
+                                    for (i, color) in colors.into_iter().enumerate() {
+                                        let selected = match tool {
+                                            ActiveTool::Highlighter => i == state.active_highlighter,
+                                            ActiveTool::Text => {
+                                                i == state.active_text_color
+                                                    && state.text_color == color
                                             }
-                                            actions.push(UiAction::SetColor(color));
+                                            _ => false,
+                                        };
+                                        let tooltip = match tool {
+                                            ActiveTool::Select => {
+                                                format!("Auswahl in der Farbe von Stift {} umfärben", i + 1)
+                                            }
+                                            _ if selected => format!(
+                                                "Farbe {} – erneut tippen, um sie anzupassen",
+                                                i + 1
+                                            ),
+                                            _ => format!("Farbe {}", i + 1),
+                                        };
+                                        let response =
+                                            color_circle_swatch(ui, color, selected, &tooltip, swatch);
+                                        if selected {
+                                            // Das Farb-Popover erscheint neben der gewählten Farbe
+                                            match tool {
+                                                ActiveTool::Highlighter => high_btn_rect = Some(response.rect),
+                                                _ => text_color_btn_rect = Some(response.rect),
+                                            }
+                                        }
+                                        if !response.clicked() {
+                                            continue;
+                                        }
+                                        match tool {
+                                            ActiveTool::Highlighter if selected => {
+                                                let open = !state.is_highlighter_menu_open;
+                                                state.close_overlays();
+                                                state.is_highlighter_menu_open = open;
+                                            }
+                                            ActiveTool::Highlighter => {
+                                                state.close_overlays();
+                                                state.select_highlighter_color(i);
+                                                actions.push(UiAction::SetColor(color));
+                                            }
+                                            ActiveTool::Text if selected => {
+                                                let open = !state.is_text_color_menu_open;
+                                                state.close_overlays();
+                                                state.is_text_color_menu_open = open;
+                                            }
+                                            ActiveTool::Text => {
+                                                state.close_overlays();
+                                                state.active_text_color = i;
+                                                state.set_text_color(color);
+                                                actions.push(UiAction::SetColor(color));
+                                            }
+                                            _ => actions.push(UiAction::SetColor(color)),
                                         }
                                     }
                                 }
@@ -2565,36 +2704,14 @@ pub fn render_ui(
                                 .color(egui::Color32::from_gray(160)),
                         );
                         ui.add_space(3.0);
-                        ui.horizontal(|ui| {
-                            ui.spacing_mut().item_spacing = egui::vec2(8.0, 0.0);
-                            for (color, label) in PEN_COLOR_PRESETS {
-                                let is_sel = (state.pen_color[0] - color[0]).abs() < 0.05
-                                    && (state.pen_color[1] - color[1]).abs() < 0.05
-                                    && (state.pen_color[2] - color[2]).abs() < 0.05;
-                                if color_circle_swatch(ui, color, is_sel, label, 30.0).clicked() {
-                                    state.pen_color = color;
-                                    actions.push(UiAction::SetColor(color));
-                                }
-                            }
-
-                            // RGBA-Colorpicker
-                            let mut egui_color = egui::Rgba::from_rgba_premultiplied(
-                                state.pen_color[0],
-                                state.pen_color[1],
-                                state.pen_color[2],
-                                state.pen_color[3],
-                            );
-                            if egui::color_picker::color_edit_button_rgba(
-                                ui,
-                                &mut egui_color,
-                                egui::color_picker::Alpha::Opaque,
-                            )
-                            .changed()
-                            {
-                                state.pen_color = egui_color.to_array();
-                                actions.push(UiAction::SetColor(state.pen_color));
-                            }
-                        });
+                        if color_editor(
+                            ui,
+                            &PEN_COLOR_PRESETS,
+                            &mut state.pen_color,
+                            &mut state.show_color_picker,
+                        ) {
+                            actions.push(UiAction::SetColor(state.pen_color));
+                        }
 
                         ui.add_space(10.0);
 
@@ -2662,10 +2779,13 @@ pub fn render_ui(
 
                         ui.horizontal(|ui| {
                             ui.label(
-                                egui::RichText::new("Textmarker-Konfiguration")
-                                    .strong()
-                                    .color(egui::Color32::WHITE)
-                                    .size(12.5),
+                                egui::RichText::new(format!(
+                                    "Textmarker – Farbe {}",
+                                    state.active_highlighter + 1
+                                ))
+                                .strong()
+                                .color(egui::Color32::WHITE)
+                                .size(12.5),
                             );
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
@@ -2681,41 +2801,20 @@ pub fn render_ui(
 
                         // Zeile 1: Farbauswahl
                         ui.label(
-                            egui::RichText::new("MARKER-FARBE")
+                            egui::RichText::new("FARBE")
                                 .size(10.5)
                                 .strong()
                                 .color(egui::Color32::from_gray(160)),
                         );
                         ui.add_space(3.0);
-                        ui.horizontal(|ui| {
-                            ui.spacing_mut().item_spacing = egui::vec2(8.0, 0.0);
-                            for (color, label) in HIGHLIGHTER_COLOR_PRESETS {
-                                let is_sel = (state.highlighter_color[0] - color[0]).abs() < 0.05
-                                    && (state.highlighter_color[1] - color[1]).abs() < 0.05
-                                    && (state.highlighter_color[2] - color[2]).abs() < 0.05;
-                                if color_circle_swatch(ui, color, is_sel, label, 30.0).clicked() {
-                                    state.highlighter_color = color;
-                                    actions.push(UiAction::SetColor(color));
-                                }
-                            }
-
-                            let mut egui_color = egui::Rgba::from_rgba_premultiplied(
-                                state.highlighter_color[0],
-                                state.highlighter_color[1],
-                                state.highlighter_color[2],
-                                state.highlighter_color[3],
-                            );
-                            if egui::color_picker::color_edit_button_rgba(
-                                ui,
-                                &mut egui_color,
-                                egui::color_picker::Alpha::OnlyBlend,
-                            )
-                            .changed()
-                            {
-                                state.highlighter_color = egui_color.to_array();
-                                actions.push(UiAction::SetColor(state.highlighter_color));
-                            }
-                        });
+                        if color_editor(
+                            ui,
+                            &HIGHLIGHTER_COLOR_PRESETS,
+                            &mut state.highlighter_color,
+                            &mut state.show_color_picker,
+                        ) {
+                            actions.push(UiAction::SetColor(state.highlighter_color));
+                        }
 
                         ui.add_space(10.0);
 
@@ -2778,6 +2877,59 @@ pub fn render_ui(
                 });
 
             popover_rect = Some(pop_response.inner);
+        }
+    } else if state.is_text_color_menu_open {
+        if let Some(btn_rect) = text_color_btn_rect {
+            let (popover_pos, pivot) =
+                popover_placement(state.sidebar_side, area_response.inner, btn_rect);
+            let pop_response = egui::Area::new(egui::Id::new("text_color_popover"))
+                .fixed_pos(popover_pos)
+                .pivot(pivot)
+                .constrain(true)
+                .order(egui::Order::Foreground)
+                .show(ctx, |ui| {
+                    let frame = popover_frame().show(ui, |ui| {
+                        ui.set_width(320.0);
+                        touch_friendly_spacing(ui);
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "Textfarbe {}",
+                                    state.active_text_color + 1
+                                ))
+                                .strong()
+                                .color(egui::Color32::WHITE)
+                                .size(12.5),
+                            );
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if close_button(ui).clicked() {
+                                        state.is_text_color_menu_open = false;
+                                    }
+                                },
+                            );
+                        });
+                        ui.add_space(8.0);
+                        let slot = state.active_text_color.min(state.text_colors.len() - 1);
+                        let mut color = state.text_colors[slot];
+                        if color_editor(
+                            ui,
+                            &PEN_COLOR_PRESETS,
+                            &mut color,
+                            &mut state.show_color_picker,
+                        ) {
+                            state.text_colors[slot] = color;
+                            state.set_text_color(color);
+                            actions.push(UiAction::SetColor(color));
+                        }
+                    });
+                    frame.response.rect
+                });
+            popover_rect = Some(pop_response.inner);
+        } else {
+            // Die Farbe ist nicht mehr zu sehen (anderes Werkzeug)
+            state.is_text_color_menu_open = false;
         }
     }
 
@@ -3223,6 +3375,7 @@ pub fn render_ui(
     // Automatisches Schließen der Popover bei Klick außerhalb von Leiste und Popover
     if (state.is_pen_menu_open
         || state.is_highlighter_menu_open
+        || state.is_text_color_menu_open
         || state.is_more_menu_open
         || state.show_page_jump_popup)
         && ctx.input(|i| i.pointer.any_pressed())
@@ -3233,6 +3386,7 @@ pub fn render_ui(
             if !in_toolbar && !in_popover {
                 state.is_pen_menu_open = false;
                 state.is_highlighter_menu_open = false;
+                state.is_text_color_menu_open = false;
                 state.is_more_menu_open = false;
                 state.show_page_jump_popup = false;
             }
@@ -4540,6 +4694,44 @@ mod tests {
         // Ausblenden
         state.toggle_ruler();
         assert!(state.ruler.is_none());
+    }
+
+    #[test]
+    fn test_custom_colors_remember_changes() {
+        let mut state = UiState::new();
+        assert!(!state.sync_tool_colors(), "Ausgangszustand ist gespeichert");
+
+        // Stift 2 wählen und umfärben: der Stift merkt sich die Farbe
+        state.select_pen(1);
+        state.pen_color = [0.5, 0.1, 0.6, 1.0];
+        assert!(state.sync_tool_colors());
+        assert_eq!(state.pen_presets[1].color, [0.5, 0.1, 0.6, 1.0]);
+        state.select_pen(0);
+        state.select_pen(1);
+        assert_eq!(state.pen_color, [0.5, 0.1, 0.6, 1.0]);
+
+        // Textmarker-Farbe 3 anpassen
+        state.select_highlighter_color(2);
+        state.highlighter_color = [0.9, 0.5, 0.1, 0.35];
+        assert!(state.sync_tool_colors());
+        assert_eq!(state.highlighter_colors[2], [0.9, 0.5, 0.1, 0.35]);
+        assert_eq!(state.highlighter_colors[0], DEFAULT_HIGHLIGHTER_COLORS[0]);
+        assert!(!state.sync_tool_colors());
+
+        // Textfarbe gilt auch für das gerade bearbeitete Feld
+        state.text_edit = Some(TextEditing::new_at(
+            1,
+            glam::Vec2::new(100.0, 100.0),
+            PAGE_WIDTH,
+            50.0,
+            TextFont::Sans,
+            [0.0, 0.0, 0.0, 1.0],
+        ));
+        state.set_text_color([0.2, 0.6, 0.3, 1.0]);
+        assert_eq!(
+            state.text_edit.as_ref().unwrap().color,
+            [0.2, 0.6, 0.3, 1.0]
+        );
     }
 
     #[test]

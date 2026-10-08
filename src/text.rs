@@ -348,7 +348,7 @@ const MAX_TEXTURE_SIDE: f32 = 4096.0;
 const MAX_TEXTURE_PIXELS: f32 = 16.0 * 1024.0 * 1024.0;
 
 /// Rastert ein Textfeld mit `px_per_unit` Pixeln je Seiteneinheit (begrenzt auf eine
-/// handhabbare Texturgröße). `color` ist linear wie die Tinte; die Pixel sind sRGB.
+/// handhabbare Texturgröße). `color` ist sRGB wie die Tinte, ebenso die Pixel.
 pub fn rasterize(text: &TextBox, color: [f32; 4], px_per_unit: f32) -> RgbaImage {
     let layout = text.layout();
     let size = glam::Vec2::new(text.wrap_width.max(text.size), layout.height());
@@ -383,7 +383,7 @@ pub fn rasterize(text: &TextBox, color: [f32; 4], px_per_unit: f32) -> RgbaImage
         }
     }
 
-    let rgb = [0, 1, 2].map(|i| egui::ecolor::gamma_u8_from_linear_f32(color[i]));
+    let rgb = [0, 1, 2].map(|i| (color[i].clamp(0.0, 1.0) * 255.0).round() as u8);
     let alpha = color[3].clamp(0.0, 1.0);
     let mut pixels = Vec::with_capacity(coverage.len() * 4);
     for c in coverage {
@@ -476,8 +476,8 @@ mod tests {
         assert_eq!(image.height as f32, text.layout().height().ceil());
         let opaque = image.pixels.chunks(4).filter(|p| p[3] > 200).count();
         assert!(opaque > 100, "{opaque}");
-        // Farbe ist sRGB-kodiert
-        assert!(image.pixels.chunks(4).all(|p| p[0] > 230 && p[1] < 130));
+        // Die Farbe ist schon sRGB und wird unverändert übernommen
+        assert!(image.pixels.chunks(4).all(|p| p[..3] == [217, 51, 51]));
     }
 
     #[test]

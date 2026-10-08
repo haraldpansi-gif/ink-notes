@@ -1060,6 +1060,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ui_state.continuous_scroll = ui_settings.continuous_scroll;
     ui_state.pen_presets = ui_settings.pen_presets;
     ui_state.select_pen(ui_settings.active_pen);
+    ui_state.highlighter_colors = ui_settings.highlighter_colors;
+    ui_state.select_highlighter_color(ui_settings.active_highlighter);
+    ui_state.text_colors = ui_settings.text_colors;
+    ui_state.active_text_color = ui_settings.active_text_color;
+    ui_state.text_color = ui_settings.text_colors[ui_settings.active_text_color];
     ui_state.current_notebook_id = manifest.id.clone();
     ui_state.document_title = manifest.title.clone();
     ui_state.available_notebooks = available_notebooks;
@@ -1071,8 +1076,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Zuletzt gelöschte Seite (Notizbuch-Kennung, Index, Seite) zum Wiederherstellen in dieser
     // Sitzung
     let mut last_deleted_page: Option<(String, usize, ink_notes::document::Page)> = None;
-    // Stifte geändert, aber noch nicht gespeichert
-    let mut pen_presets_dirty = false;
     let mut clipboard = ClipboardBridge::new();
     // PDF-Seiten werden im Hintergrund gerendert und wecken danach den Event-Loop
     let mut pdf_renderer = {
@@ -3263,16 +3266,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         }
 
-                        // Stifte: geänderte Farbe oder Stärke gehört zum gewählten Stift. Gespeichert
-                        // wird erst nach dem Loslassen (nicht bei jedem Schritt eines Schiebereglers).
-                        if ui_state.sync_pen_preset() || ui_settings.active_pen != ui_state.active_pen {
-                            pen_presets_dirty = true;
-                            ui_settings.active_pen = ui_state.active_pen;
-                        }
-                        if pen_presets_dirty && !egui_ctx.is_using_pointer() {
-                            pen_presets_dirty = false;
-                            ui_settings.pen_presets = ui_state.pen_presets;
-                            save_ui_settings(&ui_settings, ui_settings_path.as_deref(), &mut ui_state);
+                        // Stifte und eigene Farben: geänderte Farbe oder Stärke gehört zum gewählten
+                        // Stift bzw. zur gewählten Farbe. Gespeichert wird erst nach dem Loslassen
+                        // (nicht bei jedem Schritt eines Schiebereglers oder Farbwählers).
+                        ui_state.sync_tool_colors();
+                        if !egui_ctx.is_using_pointer() {
+                            let mut updated = ui_settings.clone();
+                            updated.pen_presets = ui_state.pen_presets;
+                            updated.active_pen = ui_state.active_pen;
+                            updated.highlighter_colors = ui_state.highlighter_colors;
+                            updated.active_highlighter = ui_state.active_highlighter;
+                            updated.text_colors = ui_state.text_colors;
+                            updated.active_text_color = ui_state.active_text_color;
+                            if updated != ui_settings {
+                                ui_settings = updated;
+                                save_ui_settings(&ui_settings, ui_settings_path.as_deref(), &mut ui_state);
+                            }
                         }
 
                         // Textbearbeitung beenden: Esc, anderes Werkzeug oder andere Seite

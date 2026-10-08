@@ -30,22 +30,33 @@ fn vs_main(in: VertexInput) -> VertexOutput {
     return out;
 }
 
-@fragment
-fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    return in.color;
+// Linearer Farbwert (Papier, Muster) -> sRGB: Gezeichnet wird ohne sRGB-Umrechnung der GPU
+// (siehe `render_format` in canvas.rs), gemischt wird also wie im PDF in sRGB
+fn linear_to_srgb(c: vec3<f32>) -> vec3<f32> {
+    let low = c * 12.92;
+    let high = 1.055 * pow(c, vec3<f32>(1.0 / 2.4)) - vec3<f32>(0.055);
+    return select(high, low, c <= vec3<f32>(0.0031308));
 }
 
-// Striche: bei dunklem Papier wird die HSL-Helligkeit dunkler Farben gespiegelt
-// (L -> 1 - L, Farbton und Sättigung bleiben). Entspricht `background::adapt_ink_color`.
+// Papier: Farbe linear
+@fragment
+fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+    return vec4<f32>(linear_to_srgb(clamp(in.color.rgb, vec3<f32>(0.0), vec3<f32>(1.0))), in.color.a);
+}
+
+// Striche: Tintenfarben sind sRGB-Werte wie im Export und in der Oberfläche. Bei dunklem
+// Papier wird die HSL-Helligkeit dunkler Farben gespiegelt (L -> 1 - L, Farbton und
+// Sättigung bleiben). Entspricht `background::adapt_ink_color`.
 @fragment
 fn fs_ink(in: VertexOutput) -> @location(0) vec4<f32> {
-    if (camera.ink_params.x < 0.5) {
-        return in.color;
+    var rgb = clamp(in.color.rgb, vec3<f32>(0.0), vec3<f32>(1.0));
+    if (camera.ink_params.x >= 0.5) {
+        let max_c = max(max(rgb.r, rgb.g), rgb.b);
+        let min_c = min(min(rgb.r, rgb.g), rgb.b);
+        let lift = max(1.0 - max_c - min_c, 0.0);
+        rgb = min(rgb + vec3<f32>(lift), vec3<f32>(1.0));
     }
-    let max_c = max(max(in.color.r, in.color.g), in.color.b);
-    let min_c = min(min(in.color.r, in.color.g), in.color.b);
-    let lift = max(1.0 - max_c - min_c, 0.0);
-    return vec4<f32>(in.color.rgb + vec3<f32>(lift), in.color.a);
+    return vec4<f32>(rgb, in.color.a);
 }
 
 // Bildschirmfüllendes Dreieck ohne Farbe (setzt den Stencil-Puffer zurück)
@@ -61,7 +72,8 @@ fn fs_none() -> @location(0) vec4<f32> {
     return vec4<f32>(0.0);
 }
 
-// Eingefügte Bilder: texturierte Vierecke unter der Tinte
+// Eingefügte Bilder: texturierte Vierecke unter der Tinte (Texturen enthalten sRGB-Werte
+// und werden unverändert übernommen)
 struct ImageVertexInput {
     @location(0) position: vec2<f32>,
     @location(1) uv: vec2<f32>,
@@ -169,5 +181,6 @@ fn fs_pattern(in: PatternOutput) -> @location(0) vec4<f32> {
             coverage = clamp(radius_px + 0.5 - d, 0.0, 1.0);
         }
     }
-    return vec4<f32>(in.color.rgb, in.color.a * coverage * fade);
+    let rgb = linear_to_srgb(clamp(in.color.rgb, vec3<f32>(0.0), vec3<f32>(1.0)));
+    return vec4<f32>(rgb, in.color.a * coverage * fade);
 }

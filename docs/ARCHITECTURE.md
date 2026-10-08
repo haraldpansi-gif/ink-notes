@@ -115,7 +115,7 @@ Jeder Strich ist ein eigener Draw-Call mit eigener Nummer im Stencil-Puffer: Ein
 - **Textfelder** werden mit `ab_glyph` gerastert, in einer Auflösung, die dem Zoom folgt (in Vierteln einer Zweierpotenz, höchstens 8 Pixel je Einheit). Der Texturschlüssel enthält einen Hash von Inhalt, Schrift und Farbe; jede Änderung erzeugt eine neue Textur.
 
 ### 4.2 Papier- und Musterfarben
-Papierfarbe (`PaperTheme`) und Musterfarbe (`PatternColor`) stehen in `background.rs`. Alle Farben sind linear; die Fensterfläche ist sRGB, die Umrechnung übernimmt die GPU. Auf dunklem Papier kann der Shader dunkle Tinte aufhellen (`ink_params` in `CameraUniforms`), gespeichert werden immer die Originalfarben.
+Papierfarbe (`PaperTheme`) und Musterfarbe (`PatternColor`) stehen in `background.rs`; sie sind linear angegeben und werden im Shader nach sRGB umgerechnet. Tintenfarben (Striche, Text) sind sRGB-Werte – dieselben Zahlen landen im PDF und in den Farbpunkten der Oberfläche. Gezeichnet wird ohne sRGB-Umrechnung der GPU (`render_format`), Texturen sind `Rgba8Unorm`: So wird halbtransparente Tinte wie im PDF in sRGB gemischt und sieht am Bildschirm genauso aus wie im Export. Auf dunklem Papier kann der Shader dunkle Tinte aufhellen (`ink_params` in `CameraUniforms`), gespeichert werden immer die Originalfarben.
 
 ---
 
