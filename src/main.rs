@@ -289,6 +289,13 @@ fn start_pdf_export(
     });
 }
 
+/// Halten am Strichende (Form einrasten): So weit darf der Stift dabei zittern, in physischen
+/// Pixeln. Echte Stifte zittern im Stillstand um einige Pixel; mit 3 px begann die Wartezeit
+/// ständig neu, und Halten rastete nur mit der Maus ein (Issue #27).
+fn hold_tolerance(window: &Window) -> f32 {
+    6.0 * window.scale_factor() as f32
+}
+
 /// Achsenkreuz aus der eingerasteten Geraden `shape` und dem vorigen Strich der aktuellen
 /// Seite, falls sich beide kreuzen (Issue #20); mit der Id des vorigen Strichs
 fn axis_cross_with_previous(
@@ -1683,7 +1690,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         } else if is_stylus_drawing && is_drawing {
                                             let dx = sx - stroke_hold_anchor_pos.0;
                                             let dy = sy - stroke_hold_anchor_pos.1;
-                                            if (dx * dx + dy * dy).sqrt() > 3.0 {
+                                            if (dx * dx + dy * dy).sqrt() > hold_tolerance(&window) {
                                                 stroke_last_motion_time = Instant::now();
                                                 stroke_hold_anchor_pos = (sx, sy);
                                             }
@@ -1873,14 +1880,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
 
-                // Draw-and-Hold Überprüfung: Stift regungslos für > 400 ms gehalten (< 3 px Distanz)
+                // Draw-and-Hold Überprüfung: Stift regungslos für > 400 ms gehalten (siehe hold_tolerance)
                 if is_drawing && !stroke_already_snapped {
                     let elapsed = stroke_last_motion_time.elapsed();
                     let dx = cursor_screen_pos.0 - stroke_hold_anchor_pos.0;
                     let dy = cursor_screen_pos.1 - stroke_hold_anchor_pos.1;
                     let dist = (dx * dx + dy * dy).sqrt();
 
-                    if elapsed >= Duration::from_millis(400) && dist < 3.0 && canvas.live_samples.len() >= 4 {
+                    if elapsed >= Duration::from_millis(400) && dist < hold_tolerance(&window) && canvas.live_samples.len() >= 4 {
                         if let Some(shape) = geometry::detect_shape(&canvas.live_samples) {
                             stroke_already_snapped = true;
                             stroke_snapped_shape = Some(shape.clone());
@@ -2662,7 +2669,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 // Draw-and-Hold Bewegungsmessung: Bei Bewegung > 3 px Timer zurücksetzen
                                 let dx = sx - stroke_hold_anchor_pos.0;
                                 let dy = sy - stroke_hold_anchor_pos.1;
-                                if (dx * dx + dy * dy).sqrt() > 3.0 {
+                                if (dx * dx + dy * dy).sqrt() > hold_tolerance(&window) {
                                     stroke_last_motion_time = Instant::now();
                                     stroke_hold_anchor_pos = (sx, sy);
                                 }
@@ -2899,7 +2906,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                                         let dx = tx - stroke_hold_anchor_pos.0;
                                         let dy = ty - stroke_hold_anchor_pos.1;
-                                        if (dx * dx + dy * dy).sqrt() > 3.0 {
+                                        if (dx * dx + dy * dy).sqrt() > hold_tolerance(&window) {
                                             stroke_last_motion_time = Instant::now();
                                             stroke_hold_anchor_pos = (tx, ty);
                                         }
