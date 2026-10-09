@@ -1499,6 +1499,77 @@ pub fn detect_axis_cross(points: &[Vec2]) -> Option<RecognizedShape> {
     })
 }
 
+/// Achsenkreuz aus zwei Strichen: eine waagerechte und eine senkrechte Gerade (je höchstens
+/// 25° schief, Reihenfolge egal), die sich kreuzen und auf beiden Seiten des Schnittpunkts
+/// deutlich weiterlaufen. Ergebnis wie bei `detect_axis_cross`.
+pub fn axis_cross_from_lines(a: (Vec2, Vec2), b: (Vec2, Vec2)) -> Option<RecognizedShape> {
+    let max_slope = 25.0_f32.to_radians().tan();
+    let is_horizontal = |(p, q): (Vec2, Vec2)| (q.y - p.y).abs() <= (q.x - p.x).abs() * max_slope;
+    let is_vertical = |(p, q): (Vec2, Vec2)| (q.x - p.x).abs() <= (q.y - p.y).abs() * max_slope;
+    let (horizontal, vertical) = if is_horizontal(a) && is_vertical(b) {
+        (a, b)
+    } else if is_vertical(a) && is_horizontal(b) {
+        (b, a)
+    } else {
+        return None;
+    };
+
+    let (x_min, x_max) = (
+        horizontal.0.x.min(horizontal.1.x),
+        horizontal.0.x.max(horizontal.1.x),
+    );
+    let (y_min, y_max) = (
+        vertical.0.y.min(vertical.1.y),
+        vertical.0.y.max(vertical.1.y),
+    );
+    let origin = Vec2::new(
+        (vertical.0.x + vertical.1.x) * 0.5,
+        (horizontal.0.y + horizontal.1.y) * 0.5,
+    );
+
+    // Vier Arme: jeder mindestens ein Fünftel seiner Achse, die Achsen nicht winzig
+    let (width, height) = (x_max - x_min, y_max - y_min);
+    let arm_ok = |arm: f32, axis: f32| arm >= axis * 0.2;
+    if width < 30.0
+        || height < 30.0
+        || !(arm_ok(origin.x - x_min, width)
+            && arm_ok(x_max - origin.x, width)
+            && arm_ok(origin.y - y_min, height)
+            && arm_ok(y_max - origin.y, height))
+    {
+        return None;
+    }
+
+    // x nach rechts, y nach oben (auf dem Blatt: kleineres y)
+    Some(RecognizedShape::CoordinateSystem {
+        origin,
+        x_axis_end: Vec2::new(x_max, origin.y),
+        y_axis_end: Vec2::new(origin.x, y_min),
+        with_arrows: true,
+        negative_ends: Some([Vec2::new(x_min, origin.y), Vec2::new(origin.x, y_max)]),
+    })
+}
+
+/// Gerade, die ein Strich darstellt: eine als Gerade eingerastete Form oder ein freihändiger
+/// Strich, den die Formerkennung als Gerade erkennt. Bilder, Textfelder und Textmarker zählen
+/// nicht.
+pub fn stroke_as_line(stroke: &Stroke) -> Option<(Vec2, Vec2)> {
+    if stroke.image.is_some()
+        || stroke.text.is_some()
+        || stroke.tool == crate::document::StrokeTool::Highlighter
+    {
+        return None;
+    }
+    let shape = match &stroke.shape {
+        Some(shape) => shape.clone(),
+        None => detect_shape(&stroke.points)?,
+    };
+    match shape {
+        RecognizedShape::Line { start, end } => Some((start, end)),
+        _ => None,
+    }
+}
+
 /// Führt die automatische Erkennung für einen Strich aus.
 pub fn detect_shape(points: &[StylusSample]) -> Option<RecognizedShape> {
     if points.len() < 2 {
@@ -2672,6 +2743,45 @@ mod tests {
             Some(RecognizedShape::Octahedron { .. }) => "Oktaeder",
             None => "nichts",
         }
+    }
+
+    #[test]
+    fn test_axis_cross_from_two_lines() {
+        let horizontal = (Vec2::new(100.0, 305.0), Vec2::new(400.0, 300.0));
+        let vertical = (Vec2::new(252.0, 450.0), Vec2::new(248.0, 150.0));
+        for (a, b) in [(horizontal, vertical), (vertical, horizontal)] {
+            let Some(RecognizedShape::CoordinateSystem {
+                origin,
+                x_axis_end,
+                y_axis_end,
+                with_arrows: true,
+                negative_ends: Some([x_start, y_start]),
+            }) = axis_cross_from_lines(a, b)
+            else {
+                panic!("kein Achsenkreuz");
+            };
+            assert_eq!(origin, Vec2::new(250.0, 302.5));
+            assert_eq!(x_axis_end, Vec2::new(400.0, 302.5));
+            assert_eq!(x_start, Vec2::new(100.0, 302.5));
+            assert_eq!(y_axis_end, Vec2::new(250.0, 150.0));
+            assert_eq!(y_start, Vec2::new(250.0, 450.0));
+        }
+    }
+
+    #[test]
+    fn test_no_axis_cross_from_lines_that_do_not_cross() {
+        let horizontal = (Vec2::new(100.0, 300.0), Vec2::new(400.0, 300.0));
+        // Senkrechte endet über der Waagerechten (L oder T statt Kreuz)
+        let above = (Vec2::new(250.0, 100.0), Vec2::new(250.0, 290.0));
+        assert!(axis_cross_from_lines(horizontal, above).is_none());
+        // Senkrechte schneidet ganz am Rand
+        let at_edge = (Vec2::new(110.0, 150.0), Vec2::new(110.0, 450.0));
+        assert!(axis_cross_from_lines(horizontal, at_edge).is_none());
+        // Zwei Waagerechte oder eine schräge Linie
+        let parallel = (Vec2::new(100.0, 350.0), Vec2::new(400.0, 350.0));
+        assert!(axis_cross_from_lines(horizontal, parallel).is_none());
+        let diagonal = (Vec2::new(150.0, 150.0), Vec2::new(350.0, 450.0));
+        assert!(axis_cross_from_lines(horizontal, diagonal).is_none());
     }
 
     #[test]

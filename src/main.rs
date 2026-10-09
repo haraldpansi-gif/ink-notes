@@ -287,6 +287,23 @@ fn start_pdf_export(
     });
 }
 
+/// Achsenkreuz aus der eingerasteten Geraden `shape` und dem vorigen Strich der aktuellen
+/// Seite, falls sich beide kreuzen (Issue #20); mit der Id des vorigen Strichs
+fn axis_cross_with_previous(
+    notebook: &Notebook,
+    shape: &RecognizedShape,
+) -> Option<(u64, RecognizedShape)> {
+    let RecognizedShape::Line { start, end } = shape else {
+        return None;
+    };
+    let previous = notebook.current_page().strokes.last()?;
+    let line = geometry::stroke_as_line(previous)?;
+    Some((
+        previous.id,
+        geometry::axis_cross_from_lines(line, (*start, *end))?,
+    ))
+}
+
 /// Finalisiert einen Strich (mit Spline-Tessellierung, Ecken-Erkennung & RDP oder Auto-Snap)
 /// und fügt ihn in die aktuelle Seite des Notizbuchs ein.
 fn commit_stroke_to_notebook(
@@ -298,6 +315,27 @@ fn commit_stroke_to_notebook(
     window: &Window,
     snapped_shape: Option<RecognizedShape>,
 ) {
+    // Zweite Gerade über Kreuz mit dem vorigen Strich: beide werden zum Achsenkreuz; der
+    // vorige Strich wird ersetzt, ein Rückgängig stellt ihn wieder her
+    if let Some(shape) = &snapped_shape {
+        if let Some((previous_id, cross)) = axis_cross_with_previous(notebook, shape) {
+            let stroke_width = ui_state.pen_stroke_width_mm * ink_notes::document::UNITS_PER_MM;
+            canvas.cancel_stroke();
+            let stroke = geometry::shape_to_stroke(
+                cross,
+                previous_id,
+                canvas.current_ink_color,
+                stroke_width,
+            );
+            let page = notebook.current_page_mut();
+            page.replace_stroke(previous_id, stroke);
+            canvas.sync_page(page);
+            autosave.mark_dirty(notebook, manifest);
+            window.request_redraw();
+            return;
+        }
+    }
+
     let new_id = notebook.next_stroke_id();
     let stroke_opt = if let Some(shape) = snapped_shape {
         let stroke_width = ui_state.pen_stroke_width_mm * ink_notes::document::UNITS_PER_MM;
@@ -1824,6 +1862,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         if let Some(shape) = geometry::detect_shape(&canvas.live_samples) {
                             stroke_already_snapped = true;
                             stroke_snapped_shape = Some(shape.clone());
+                            // Kreuzt die Gerade den vorigen Strich, zeigt die Vorschau schon das
+                            // Achsenkreuz (übernommen wird es beim Absetzen)
+                            let shape = axis_cross_with_previous(&notebook, &shape)
+                                .map_or(shape, |(_, cross)| cross);
                             let width_units = ui_state.pen_stroke_width_mm * ink_notes::document::UNITS_PER_MM;
                             let (samples, vertices) = geometry::shape_to_mesh(&shape, width_units, canvas.current_ink_color);
                             canvas.set_live_shape_mesh(samples, vertices);
