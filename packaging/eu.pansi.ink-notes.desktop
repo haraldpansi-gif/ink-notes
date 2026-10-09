@@ -9,7 +9,7 @@ Terminal=false
 Type=Application
 Categories=Office;Graphics;Utility;
 Keywords=Note;Notiz;Pen;Stift;Ink;Inking;Stylus;Drawing;Zeichnen;PDF;Vector;Text;Annotation;
-StartupWMClass=ink-notes
+StartupWMClass=eu.pansi.ink-notes
 MimeType=application/x-inknotes;
 Actions=NewWindow;
 

@@ -37,6 +37,23 @@ use ink_notes::storage::{self, NotebookManifest};
 use ink_notes::ui::{self, ActiveTool, UiAction, UiState};
 use ink_notes::updater::UpdaterController;
 
+/// Kennung der App (Name der .desktop-Datei und des Symbols).
+const APP_ID: &str = "eu.pansi.ink-notes";
+
+/// Fenstersymbol aus dem eingebauten App-Symbol, auf 64 × 64 Pixel verkleinert: In voller
+/// Größe (256 × 256) überschreitet es die Größe einer einzelnen X11-Anfrage und fehlt dann.
+fn app_icon() -> Option<winit::window::Icon> {
+    const SIZE: u32 = 64;
+    let image = image::load_from_memory(include_bytes!("../assets/ink-notes.png")).ok()?;
+    let small = image::imageops::resize(
+        &image.into_rgba8(),
+        SIZE,
+        SIZE,
+        image::imageops::FilterType::Triangle,
+    );
+    winit::window::Icon::from_rgba(small.into_raw(), SIZE, SIZE).ok()
+}
+
 /// Platz schaffen: Druck auf das Blatt (physische Pixel) setzt die Ansatzhöhe auf der
 /// aktuellen Seite. `false` neben dem Blatt oder auf einer PDF-Seite.
 fn space_press(
@@ -1099,12 +1116,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         DisplayBackend::Automatic => {}
     }
     let event_loop = event_loop_builder.build()?;
-    let window = Arc::new(
-        WindowBuilder::new()
-            .with_title("ink-notes (Latenzoptimiertes Linux-Inking)")
-            .with_inner_size(winit::dpi::LogicalSize::new(1280.0, 850.0))
-            .build(&event_loop)?,
-    );
+    // App-Kennung wie die .desktop-Datei (eu.pansi.ink-notes): Daran ordnen Dock und Taskleiste
+    // das Fenster dem App-Symbol zu (Wayland: app_id, X11: WM_CLASS). Das Fenstersymbol selbst
+    // nutzt nur X11.
+    let builder = WindowBuilder::new()
+        .with_title("ink-notes")
+        .with_inner_size(winit::dpi::LogicalSize::new(1280.0, 850.0))
+        .with_window_icon(app_icon());
+    let builder =
+        winit::platform::wayland::WindowBuilderExtWayland::with_name(builder, APP_ID, "ink-notes");
+    let builder =
+        winit::platform::x11::WindowBuilderExtX11::with_name(builder, APP_ID, "ink-notes");
+    let window = Arc::new(builder.build(&event_loop)?);
 
     let mut canvas = match pollster::block_on(CanvasState::new(window.clone())) {
         Ok(canvas) => canvas,
