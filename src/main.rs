@@ -12,6 +12,7 @@ use winit::{
     event_loop::{ControlFlow, EventLoopBuilder},
     keyboard::{Key, ModifiersState, NamedKey},
     platform::{wayland::EventLoopBuilderExtWayland, x11::EventLoopBuilderExtX11},
+    raw_window_handle::{HasDisplayHandle, RawDisplayHandle},
     window::{Window, WindowBuilder},
 };
 
@@ -25,6 +26,7 @@ use ink_notes::export::{self, export_notebook_to_pdf, ExportStrategy};
 use ink_notes::geometry::{self, RecognizedShape};
 use ink_notes::image_layer::TextureSource;
 use ink_notes::library::Library;
+use ink_notes::osk::{self, KeyboardRequester};
 use ink_notes::pdf_doc::PdfRenderService;
 use ink_notes::platform::{self, DisplayBackend};
 use ink_notes::selection::{
@@ -1148,6 +1150,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
+    // Bildschirmtastatur (nur Wayland): eigenes text-input-Objekt, siehe osk.rs
+    let mut keyboard_requester = match window.display_handle().map(|handle| handle.as_raw()) {
+        // Safety: `window` lebt bis zum Ende von main, die Event-Schleife besitzt beide
+        Ok(RawDisplayHandle::Wayland(handle)) => {
+            Some(unsafe { KeyboardRequester::new(handle.display.as_ptr()) })
+        }
+        _ => None,
+    };
+    let mut ime_was_active = false;
+    let mut ime_composing = false;
+
     // 1. Notizbuch aus Storage laden oder initialisieren (Session-Wiederherstellung)
     let storage_base_dir = storage::default_storage_dir();
     let _ = storage::cleanup_trash(
@@ -1307,6 +1320,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut pinch_prev_distance: Option<f32> = None;
     // Berührungen, die auf der UI begonnen haben, gehören bis zum Abheben egui
     let mut ui_touch_ids: std::collections::HashSet<u64> = std::collections::HashSet::new();
+    // Alle aufliegenden Finger (auch auf der UI), unabhängig von der Gestenauswertung
+    let mut touches_down: std::collections::HashSet<u64> = std::collections::HashSet::new();
     let mut pinch_prev_center: Option<(f32, f32)> = None;
     let mut is_pinch_gesturing = false;
     let mut is_touch_drawing = false;
@@ -1869,7 +1884,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             Event::WindowEvent { event, window_id } if window_id == window.id() => {
                 // 1. Window-Event zuerst an egui übergeben
-                let egui_response = egui_winit_state.on_window_event(&window, &event);
+                if let WindowEvent::Touch(touch) = &event {
+                    match touch.phase {
+                        TouchPhase::Started => {
+                            touches_down.insert(touch.id);
+                        }
+                        TouchPhase::Ended | TouchPhase::Cancelled => {
+                            touches_down.remove(&touch.id);
+                        }
+                        TouchPhase::Moved => {}
+                    }
+                }
+                // Beim Antippen blendet GNOME den Mauszeiger aus und meldet CursorLeft, während der
+                // Finger noch aufliegt. egui-winit verwirft dabei die Zeigerposition und meldet das
+                // Abheben nicht mehr, der Tipp ginge verloren – daher erfährt egui davon nichts.
+                let egui_response = if matches!(event, WindowEvent::CursorLeft { .. })
+                    && !touches_down.is_empty()
+                {
+                    egui_winit::EventResponse {
+                        repaint: true,
+                        consumed: false,
+                    }
+                } else {
+                    egui_winit_state.on_window_event(&window, &event)
+                };
                 if egui_response.repaint {
                     window.request_redraw();
                 }
@@ -2938,7 +2976,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
 
                         // 1. egui Eingabe erfassen und Frame starten
-                        let raw_input = egui_winit_state.take_egui_input(&window);
+                        let mut raw_input = egui_winit_state.take_egui_input(&window);
+                        osk::plain_ime_commits_to_text(&mut raw_input.events, &mut ime_composing);
+                        if let Some(requester) = keyboard_requester.as_mut() {
+                            raw_input.events.extend(requester.take_deletions());
+                        }
                         egui_ctx.begin_frame(raw_input);
 
                         // 2. Auswahl-Overlay rendern (Bounding Box, Griffe, Lasso)
@@ -3702,7 +3744,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                         // 4. egui Frame beenden & Primitives tessellieren
                         let full_output = egui_ctx.end_frame();
+                        let ime_active = full_output.platform_output.ime.is_some();
                         egui_winit_state.handle_platform_output(&window, full_output.platform_output);
+                        if let Some(requester) = keyboard_requester.as_mut() {
+                            let pressed = egui_ctx.input(|i| i.pointer.any_pressed());
+                            if osk::should_request(ime_was_active, ime_active, pressed) {
+                                requester.request();
+                            }
+                        }
+                        ime_was_active = ime_active;
 
                         // egui braucht Folge-Frames, z. B. um neu angeordnete Bereiche zu vermessen
                         // (die Werkzeugleiste wird erst im 2.–3. Frame korrekt zentriert)

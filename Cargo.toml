@@ -51,6 +51,11 @@ hayro-svg = "0.8"
 # Text-Werkzeug: Schriftmetriken und Rasterung (Schriften aus egui)
 ab_glyph = "0.2"
 
+# Bildschirmtastatur unter Wayland anfordern (eigenes text-input-Objekt, siehe src/osk.rs)
+wayland-client = "0.31"
+wayland-backend = { version = "0.3", features = ["client_system"] }
+wayland-protocols = { version = "0.31", features = ["client", "unstable"] }
+
 [profile.dev]
 opt-level = 1 # Erhöht Rendering-Performance auch im Debug-Modus
 
