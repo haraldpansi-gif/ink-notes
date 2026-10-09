@@ -7,6 +7,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::assets::is_supported_image_path;
+use crate::{t, tn};
 
 /// Ein Eintrag der Dateiliste.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -61,8 +62,8 @@ impl FilePicker {
             .map(Path::to_path_buf)
             .or_else(|| {
                 let preferred = match kind {
-                    PickerKind::Image => "🖼 Bilder",
-                    PickerKind::Pdf => "⬇ Downloads",
+                    PickerKind::Image => tn!("🖼 Bilder"),
+                    PickerKind::Pdf => tn!("⬇ Downloads"),
                 };
                 let all = shortcuts();
                 all.iter()
@@ -90,9 +91,10 @@ impl FilePicker {
                 self.error = None;
             }
             Err(err) => {
-                self.error = Some(format!(
-                    "'{}' kann nicht geöffnet werden: {err}",
-                    dir.display()
+                self.error = Some(t!(
+                    "'{dir}' kann nicht geöffnet werden: {err}",
+                    dir = dir.display(),
+                    err = err
                 ));
             }
         }
@@ -131,7 +133,8 @@ pub fn list_dir(dir: &Path, kind: PickerKind) -> std::io::Result<Vec<PickerEntry
 }
 
 /// Schnellzugriffe: Bilder, Downloads, Schreibtisch und Home-Ordner (soweit vorhanden),
-/// mit den Namen aus `~/.config/user-dirs.dirs` (z. B. „Bilder“ statt „Pictures“).
+/// mit den Ordnern aus `~/.config/user-dirs.dirs` (z. B. „Bilder“ statt „Pictures“). Die
+/// Bezeichnungen sind deutsch, angezeigt werden sie mit `i18n::tr`.
 pub fn shortcuts() -> Vec<(&'static str, PathBuf)> {
     let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
         return Vec::new();
@@ -146,15 +149,15 @@ pub fn shortcuts() -> Vec<(&'static str, PathBuf)> {
     };
     let mut list = Vec::new();
     if let Some(p) = xdg("XDG_PICTURES_DIR", &["Bilder", "Pictures"]) {
-        list.push(("🖼 Bilder", p));
+        list.push((tn!("🖼 Bilder"), p));
     }
     if let Some(p) = xdg("XDG_DOWNLOAD_DIR", &["Downloads"]) {
-        list.push(("⬇ Downloads", p));
+        list.push((tn!("⬇ Downloads"), p));
     }
     if let Some(p) = xdg("XDG_DESKTOP_DIR", &["Schreibtisch", "Desktop"]) {
-        list.push(("🖥 Schreibtisch", p));
+        list.push((tn!("🖥 Schreibtisch"), p));
     }
-    list.push(("🏠 Persönlicher Ordner", home));
+    list.push((tn!("🏠 Persönlicher Ordner"), home));
     list
 }
 

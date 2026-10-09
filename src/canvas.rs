@@ -18,6 +18,7 @@ use crate::background::{
 use crate::document::{Page, PageBackground, PageViewport, Stroke, StylusSample};
 use crate::filter::OneEuroFilter;
 use crate::spline::{self, ControlPoint, SplineConfig};
+use crate::tn;
 use crate::viewport::PageStack;
 
 /// 2D-Vertex für Inking-Meshes mit Positions- und Farbattributen (Multi-Color).
@@ -93,12 +94,13 @@ pub fn spline_vertices_to_ndc(
 }
 
 /// Verwaltet den GPU-Zustand, Surface, Pipelines und Buffer für das Inking.
-/// Meldung, wenn kein Grafikadapter das Fenster darstellen kann.
-pub const NO_USABLE_GPU_MESSAGE: &str = "Keine nutzbare Grafikschnittstelle gefunden.\n\
+/// Meldung, wenn kein Grafikadapter das Fenster darstellen kann (deutsch, anzeigen mit
+/// `i18n::tr`).
+pub const NO_USABLE_GPU_MESSAGE: &str = tn!("Keine nutzbare Grafikschnittstelle gefunden.\n\
      Häufigste Ursache: Der Benutzer darf nicht auf die Grafikkarte zugreifen (/dev/dri).\n\
      Prüfen mit `ls -l /dev/dri` und `groups`; ggf. `sudo usermod -aG render,video $USER`\n\
      und neu anmelden. Alternativ einen Software-Renderer installieren (Paket mesa-vulkan-drivers)\n\
-     oder die Schnittstelle festlegen, z. B. `WGPU_BACKEND=vulkan ink-notes`.";
+     oder die Schnittstelle festlegen, z. B. `WGPU_BACKEND=vulkan ink-notes`.");
 
 /// Wählt den Darstellungsmodus: Mailbox (geringste Latenz), sonst Fifo, sonst den ersten
 /// angebotenen. `None`, wenn keiner angeboten wird. `INK_FORCE_FIFO` erzwingt Fifo.
@@ -305,7 +307,8 @@ impl CanvasState {
                 ),
             }
         }
-        let (adapter, surface_caps, present_mode) = chosen.ok_or(NO_USABLE_GPU_MESSAGE)?;
+        let (adapter, surface_caps, present_mode) =
+            chosen.ok_or(crate::i18n::tr(NO_USABLE_GPU_MESSAGE))?;
 
         // 3. Device & Queue erstellen
         let (device, queue) = adapter
@@ -733,7 +736,7 @@ impl CanvasState {
                         if !self.presentation_warned {
                             eprintln!(
                                 "[Grafik] Fenster kann derzeit nicht dargestellt werden (keine Darstellungsmodi). {}",
-                                NO_USABLE_GPU_MESSAGE
+                                crate::i18n::tr(NO_USABLE_GPU_MESSAGE)
                             );
                             self.presentation_warned = true;
                         }

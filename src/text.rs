@@ -10,6 +10,8 @@
 
 use std::sync::OnceLock;
 
+use crate::t;
+
 use ab_glyph::{Font, FontRef, GlyphId, PxScale};
 use serde::{Deserialize, Serialize};
 
@@ -29,8 +31,8 @@ pub enum TextFont {
 impl TextFont {
     pub fn label(self) -> &'static str {
         match self {
-            TextFont::Sans => "Normal",
-            TextFont::Mono => "Code",
+            TextFont::Sans => t!("Normal"),
+            TextFont::Mono => t!("Code"),
         }
     }
 

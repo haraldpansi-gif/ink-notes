@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::canvas::InkVertex;
 use crate::document::PageBackground;
+use crate::t;
 
 /// Farbe von Karos, Linien und Punkten (wird gespeichert und gilt auch für den Export).
 /// `Light` ist die zurückhaltende Standardfarbe des jeweiligen Papiers.
@@ -29,11 +30,11 @@ impl PatternColor {
 
     pub fn label(self) -> &'static str {
         match self {
-            PatternColor::Light => "Hell",
-            PatternColor::Medium => "Mittel",
-            PatternColor::Strong => "Kräftig",
-            PatternColor::Blue => "Blau",
-            PatternColor::Green => "Grün",
+            PatternColor::Light => t!("Hell"),
+            PatternColor::Medium => t!("Mittel"),
+            PatternColor::Strong => t!("Kräftig"),
+            PatternColor::Blue => t!("Blau"),
+            PatternColor::Green => t!("Grün"),
         }
     }
 
@@ -96,10 +97,10 @@ impl PaperTheme {
 
     pub fn label(self) -> &'static str {
         match self {
-            PaperTheme::White => "Weiß",
-            PaperTheme::Cream => "Creme",
-            PaperTheme::DarkGray => "Dunkelgrau",
-            PaperTheme::Black => "Schwarz",
+            PaperTheme::White => t!("Weiß"),
+            PaperTheme::Cream => t!("Creme"),
+            PaperTheme::DarkGray => t!("Dunkelgrau"),
+            PaperTheme::Black => t!("Schwarz"),
         }
     }
 

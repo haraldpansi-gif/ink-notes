@@ -24,6 +24,7 @@ use ink_notes::canvas::CanvasState;
 use ink_notes::document::{Notebook, PageBackground};
 use ink_notes::export::{self, export_notebook_to_pdf, ExportStrategy};
 use ink_notes::geometry::{self, RecognizedShape};
+use ink_notes::i18n::{self, Language};
 use ink_notes::image_layer::TextureSource;
 use ink_notes::library::Library;
 use ink_notes::osk::{self, KeyboardRequester};
@@ -36,6 +37,7 @@ use ink_notes::settings::{
     SidebarSide, StylusAction, StylusButton, UiSettings, MAX_STYLUS_BUTTONS,
 };
 use ink_notes::storage::{self, NotebookManifest};
+use ink_notes::t;
 use ink_notes::ui::{self, ActiveTool, UiAction, UiState};
 use ink_notes::updater::UpdaterController;
 
@@ -70,7 +72,7 @@ fn space_press(
     let index = notebook.current_page_index;
     if notebook.space_run(index).is_none() {
         ui_state.set_export_message(
-            "Auf Seiten mit importiertem PDF lässt sich kein Platz schaffen".to_string(),
+            t!("Auf Seiten mit importiertem PDF lässt sich kein Platz schaffen").to_string(),
         );
         return false;
     }
@@ -118,9 +120,9 @@ fn space_release(
         canvas.sync_page(notebook.current_page_mut());
         let mm = (dy / ink_notes::document::UNITS_PER_MM).abs().round();
         ui_state.set_export_message(if dy > 0.0 {
-            format!("{mm} mm Platz geschaffen (Rückgängig mit Strg+Z)")
+            t!("{mm} mm Platz geschaffen (Rückgängig mit Strg+Z)", mm = mm)
         } else {
-            format!("{mm} mm Platz geschlossen (Rückgängig mit Strg+Z)")
+            t!("{mm} mm Platz geschlossen (Rückgängig mit Strg+Z)", mm = mm)
         });
     }
 }
@@ -183,7 +185,7 @@ fn change_library<T>(
         library
             .save(base_dir)
             .map(|()| value)
-            .map_err(|e| format!("Ordner nicht gespeichert: {e}"))
+            .map_err(|e| t!("Ordner nicht gespeichert: {e}", e = e))
     });
     ui_state.library = Library::load(base_dir);
     match result {
@@ -204,7 +206,7 @@ fn save_ui_settings(settings: &UiSettings, path: Option<&std::path::Path>, ui_st
                 "[Einstellungen] Konnte '{}' nicht speichern: {err}",
                 path.display()
             );
-            ui_state.set_export_message(format!("Einstellung nicht gespeichert: {err}"));
+            ui_state.set_export_message(t!("Einstellung nicht gespeichert: {err}", err = err));
         }
     }
 }
@@ -218,10 +220,10 @@ fn update_window_title(
 ) {
     let page = notebook.current_page();
     let bg_name = match page.background {
-        PageBackground::Blank => "Blanko",
-        PageBackground::Grid5mm => "Kariert (5mm)",
-        PageBackground::Lined => "Liniert (7.5mm)",
-        PageBackground::DotGrid => "Punktraster (5mm)",
+        PageBackground::Blank => t!("Blanko"),
+        PageBackground::Grid5mm => t!("Kariert (5mm)"),
+        PageBackground::Lined => t!("Liniert (7.5mm)"),
+        PageBackground::DotGrid => t!("Punktraster (5mm)"),
     };
 
     let page_title = page
@@ -229,14 +231,14 @@ fn update_window_title(
         .as_deref()
         .map(|t| format!(" – {t}"))
         .unwrap_or_default();
-    let title = format!(
-        "ink-notes | [{}] {}{} | [{}] | {} | Hintergrund: {} | [Ctrl+Z] Undo [Ctrl+Y] Redo [E] Radierer [Ctrl+E/S] PDF-Export",
-        manifest.title,
-        notebook.osd_text(),
-        page_title,
-        status.display_text(),
-        tool.name(),
-        bg_name
+    let title = t!(
+        "ink-notes | [{notebook}] {page}{page_title} | [{status}] | {tool} | Hintergrund: {background} | [Ctrl+Z] Undo [Ctrl+Y] Redo [E] Radierer [Ctrl+E/S] PDF-Export",
+        notebook = manifest.title,
+        page = notebook.osd_text(),
+        page_title = page_title,
+        status = status.display_text(),
+        tool = tool.name(),
+        background = bg_name
     );
     window.set_title(&title);
 }
@@ -580,9 +582,10 @@ fn insert_image_on_page(
     autosave.mark_dirty(notebook, manifest);
     selection_state.select_single(id);
     ui_state.active_tool = ActiveTool::Select;
-    ui_state.set_export_message(format!(
-        "Bild eingefügt ({} × {} px)",
-        imported.width, imported.height
+    ui_state.set_export_message(t!(
+        "Bild eingefügt ({width} × {height} px)",
+        width = imported.width,
+        height = imported.height
     ));
 }
 
@@ -812,7 +815,7 @@ fn insert_text_on_page(
     autosave.mark_dirty(notebook, manifest);
     selection_state.select_single(id);
     ui_state.active_tool = ActiveTool::Select;
-    ui_state.set_export_message("Text eingefügt – mit dem Text-Werkzeug (T) änderbar");
+    ui_state.set_export_message(t!("Text eingefügt – mit dem Text-Werkzeug (T) änderbar"));
 }
 
 /// Beendet eine laufende Textbearbeitung: übernimmt das Feld (neu, geändert oder – wenn
@@ -911,7 +914,7 @@ fn texture_for(
             let Some((Ok(path), page, max_pixels)) = ink_notes::pdf_doc::parse_page_key(key)
                 .map(|(asset, page, px)| (assets.path_of(asset), page, px))
             else {
-                return TextureSource::Failed(format!("Ungültiger PDF-Verweis '{key}'"));
+                return TextureSource::Failed(t!("Ungültiger PDF-Verweis '{key}'", key = key));
             };
             match pdf_renderer.take(key, path, page, max_pixels) {
                 Some(result) => result,
@@ -940,9 +943,12 @@ fn page_view(canvas: &CanvasState, scale_factor: f32) -> ui::PageView {
 
 fn copy_message(count: usize, as_image: bool) -> String {
     if as_image {
-        format!("{count} Objekt(e) kopiert – auch als Bild für andere Programme")
+        t!(
+            "{count} Objekt(e) kopiert – auch als Bild für andere Programme",
+            count = count
+        )
     } else {
-        format!("{count} Objekt(e) kopiert")
+        t!("{count} Objekt(e) kopiert", count = count)
     }
 }
 
@@ -965,7 +971,15 @@ fn start_page_export(
         ui::PageExportKind::PngTransparent => ("_transparent", "png"),
         ui::PageExportKind::Svg => ("", "svg"),
     };
-    let path = export::resolve_export_path(&format!("{title}_Seite_{number}{suffix}"), ext);
+    let path = export::resolve_export_path(
+        &t!(
+            "{title}_Seite_{number}{suffix}",
+            title = title,
+            number = number,
+            suffix = suffix
+        ),
+        ext,
+    );
     std::thread::spawn(move || {
         let assets = AssetStore::new(&storage_dir);
         let bytes = match kind {
@@ -1037,7 +1051,9 @@ fn paste(
                         ui_state,
                     );
                 }
-                Err(err) => ui_state.set_export_message(format!("Bild nicht eingefügt: {err}")),
+                Err(err) => {
+                    ui_state.set_export_message(t!("Bild nicht eingefügt: {err}", err = err))
+                }
             }
             return;
         }
@@ -1091,9 +1107,9 @@ fn paste(
         canvas.sync_page(notebook.current_page_mut());
         manifest.next_stroke_id = notebook.next_stroke_id;
         autosave.mark_dirty(notebook, manifest);
-        ui_state.set_export_message(format!("{} Objekt(e) eingefügt", new_ids.len()));
+        ui_state.set_export_message(t!("{count} Objekt(e) eingefügt", count = new_ids.len()));
     } else {
-        ui_state.set_export_message("Die Zwischenablage ist leer".to_string());
+        ui_state.set_export_message(t!("Die Zwischenablage ist leer").to_string());
     }
 }
 
@@ -1111,7 +1127,7 @@ fn insert_image_file(
     ui_state: &mut UiState,
 ) {
     if notebook.current_page().is_readonly() {
-        ui_state.set_export_message("Seite ist schreibgeschützt".to_string());
+        ui_state.set_export_message(t!("Seite ist schreibgeschützt").to_string());
         return;
     }
     let result = std::fs::read(path)
@@ -1132,16 +1148,26 @@ fn insert_image_file(
             selection_state,
             ui_state,
         ),
-        Err(err) => ui_state.set_export_message(format!(
-            "'{}' nicht eingefügt: {err}",
-            path.file_name()
+        Err(err) => ui_state.set_export_message(t!(
+            "'{name}' nicht eingefügt: {err}",
+            name = path
+                .file_name()
                 .map(|n| n.to_string_lossy())
-                .unwrap_or_default()
+                .unwrap_or_default(),
+            err = err
         )),
     }
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Gespeicherte UI-Einstellungen; zuerst, damit alle Texte in der gewählten Sprache sind
+    let ui_settings_path = UiSettings::default_path();
+    let mut ui_settings = ui_settings_path
+        .as_deref()
+        .map(UiSettings::load_from)
+        .unwrap_or_default();
+    i18n::set_language(ui_settings.language.unwrap_or_else(Language::system));
+
     // Anzeigesystem wählen: Unter WSL (WSLg) bricht Wayland ab, X11 (Xwayland) läuft stabil
     let mut event_loop_builder = EventLoopBuilder::new();
     match platform::display_backend_from_env() {
@@ -1214,7 +1240,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         (first.id.clone(), first.title.clone())
     } else {
-        ("default".to_string(), "Standard-Notizbuch".to_string())
+        ("default".to_string(), t!("Standard-Notizbuch").to_string())
     };
 
     let mut storage_dir = storage_base_dir.join(&initial_id);
@@ -1230,8 +1256,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "[Storage-Fehler] Konnte Notizbuch nicht laden ({err}). '{}' bleibt unverändert, erstelle neues Notizbuch.",
                     storage_dir.display()
                 );
-                startup_warning = Some(format!(
-                    "Notizbuch '{initial_title}' konnte nicht geladen werden – neues Notizbuch angelegt"
+                startup_warning = Some(t!(
+                    "Notizbuch '{title}' konnte nicht geladen werden – neues Notizbuch angelegt",
+                    title = initial_title
                 ));
                 let (nb, m, dir) = storage::create_new_notebook(&storage_base_dir, &initial_title)?;
                 storage_dir = dir;
@@ -1279,13 +1306,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     let mut ui_state = UiState::new();
-    // Gespeicherte UI-Einstellungen (Seite der Werkzeugleiste)
-    let ui_settings_path = UiSettings::default_path();
-    let mut ui_settings = ui_settings_path
-        .as_deref()
-        .map(UiSettings::load_from)
-        .unwrap_or_default();
     ui_state.sidebar_side = ui_settings.sidebar_side;
+    ui_state.language = ui_settings.language;
     ui_state.paper_theme = ui_settings.paper_theme;
     ui_state.adapt_ink_colors = ui_settings.adapt_ink_colors;
     ui_state.pattern_color = ui_settings.pattern_color;
@@ -1326,7 +1348,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Err(storage::StorageError::AlreadyLocked(msg)) => {
             eprintln!("[Storage-Lock] {msg}");
             autosave.set_read_only(true);
-            ui_state.set_export_message("⚠ In anderer Instanz geöffnet (Schreibschutz)");
+            ui_state.set_export_message(t!("⚠ In anderer Instanz geöffnet (Schreibschutz)"));
             None
         }
         Err(e) => {
@@ -1484,8 +1506,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 while let Ok(result) = export_rx.try_recv() {
                     match result {
-                        Ok(path) => ui_state.set_export_message(format!("Gespeichert: {}", path.display())),
-                        Err(err) => ui_state.set_export_message(format!("Export fehlgeschlagen: {err}")),
+                        Ok(path) => ui_state.set_export_message(t!("Gespeichert: {path}", path = path.display())),
+                        Err(err) => ui_state.set_export_message(t!("Export fehlgeschlagen: {err}", err = err)),
                     }
                     window.request_redraw();
                 }
@@ -1869,7 +1891,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             let width_units = ui_state.pen_stroke_width_mm * ink_notes::document::UNITS_PER_MM;
                             let (samples, vertices) = geometry::shape_to_mesh(&shape, width_units, canvas.current_ink_color);
                             canvas.set_live_shape_mesh(samples, vertices);
-                            ui_state.set_export_message(format!("{} eingerastet!", shape.name()));
+                            ui_state.set_export_message(t!("{shape} eingerastet!", shape = shape.name()));
                             window.request_redraw();
                         }
                     }
@@ -1993,7 +2015,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             );
                             update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
                         } else {
-                            ui_state.set_export_message("Nur Bilder (PNG, JPEG, GIF, WebP, BMP) und PDFs können eingefügt werden".to_string());
+                            ui_state.set_export_message(t!("Nur Bilder (PNG, JPEG, GIF, WebP, BMP) und PDFs können eingefügt werden").to_string());
                         }
                         window.request_redraw();
                     }
@@ -2176,7 +2198,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     if !removed.is_empty() {
                                         canvas.sync_page(notebook.current_page_mut());
                                         autosave.mark_dirty(&notebook, &mut manifest);
-                                        ui_state.set_export_message(format!("{} Objekt(e) gelöscht", removed.len()));
+                                        ui_state.set_export_message(t!("{count} Objekt(e) gelöscht", count = removed.len()));
                                         window.request_redraw();
                                     }
                                 }
@@ -2186,12 +2208,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             Key::Character(c) if c.eq_ignore_ascii_case("s") && ctrl => {
                                 match autosave.flush() {
                                     Ok(()) => {
-                                        ui_state.set_export_message("Gespeichert");
+                                        ui_state.set_export_message(t!("Gespeichert"));
                                     }
                                     Err(err) => {
-                                        ui_state.set_export_message(format!(
-                                            "Speicherfehler: {}",
-                                            err.messages.join(", ")
+                                        ui_state.set_export_message(t!(
+                                            "Speicherfehler: {messages}",
+                                            messages = err.messages.join(", ")
                                         ));
                                     }
                                 }
@@ -2208,7 +2230,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             // PDF-Export: Strg + E
                             Key::Character(c) if c.eq_ignore_ascii_case("e") && ctrl => {
                                 start_pdf_export(&notebook, &storage_dir, &manifest.title, ui_state.pattern_color, export_tx.clone(), window.clone());
-                                ui_state.set_export_message("PDF-Export läuft…");
+                                ui_state.set_export_message(t!("PDF-Export läuft…"));
                                 window.request_redraw();
                             }
 
@@ -2245,7 +2267,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     if selection_state.recolor_selected(notebook.current_page_mut(), color) {
                                         canvas.sync_page(notebook.current_page_mut());
                                         autosave.mark_dirty(&notebook, &mut manifest);
-                                        ui_state.set_export_message("Auswahl auf Schwarz umgefärbt".to_string());
+                                        ui_state.set_export_message(t!("Auswahl auf Schwarz umgefärbt").to_string());
                                         window.request_redraw();
                                     }
                                 } else {
@@ -2265,7 +2287,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     if selection_state.recolor_selected(notebook.current_page_mut(), color) {
                                         canvas.sync_page(notebook.current_page_mut());
                                         autosave.mark_dirty(&notebook, &mut manifest);
-                                        ui_state.set_export_message("Auswahl auf Blau umgefärbt".to_string());
+                                        ui_state.set_export_message(t!("Auswahl auf Blau umgefärbt").to_string());
                                         window.request_redraw();
                                     }
                                 } else {
@@ -2284,7 +2306,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     if selection_state.rotate_selected_90_deg(notebook.current_page_mut()) {
                                         canvas.sync_page(notebook.current_page_mut());
                                         autosave.mark_dirty(&notebook, &mut manifest);
-                                        ui_state.set_export_message("Auswahl um 90° gedreht".to_string());
+                                        ui_state.set_export_message(t!("Auswahl um 90° gedreht").to_string());
                                         window.request_redraw();
                                     }
                                 } else {
@@ -2531,7 +2553,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                     notebook.current_page_mut().replace_stroke(old_id, new_stroke);
                                                     canvas.sync_page(notebook.current_page_mut());
                                                     autosave.mark_dirty(&notebook, &mut manifest);
-                                                    ui_state.set_export_message(format!("{shape_name} ausgerichtet! (Undo mit Strg+Z)"));
+                                                    ui_state.set_export_message(t!("{shape_name} ausgerichtet! (Undo mit Strg+Z)", shape_name = shape_name));
                                                     window.request_redraw();
                                                     return;
                                                 }
@@ -3061,7 +3083,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         && selection_state.recolor_selected(notebook.current_page_mut(), color) {
                                             canvas.sync_page(notebook.current_page_mut());
                                             autosave.mark_dirty(&notebook, &mut manifest);
-                                            ui_state.set_export_message("Auswahl umgefärbt".to_string());
+                                            ui_state.set_export_message(t!("Auswahl umgefärbt").to_string());
                                         }
                                     match ui_state.active_tool {
                                         ActiveTool::Pen | ActiveTool::Shape => {
@@ -3096,7 +3118,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         if !removed.is_empty() {
                                             canvas.sync_page(notebook.current_page_mut());
                                             autosave.mark_dirty(&notebook, &mut manifest);
-                                            ui_state.set_export_message(format!("{} Objekt(e) gelöscht", removed.len()));
+                                            ui_state.set_export_message(t!("{count} Objekt(e) gelöscht", count = removed.len()));
                                             window.request_redraw();
                                         }
                                     }
@@ -3136,7 +3158,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         && selection_state.rotate_selected_90_deg(notebook.current_page_mut()) {
                                             canvas.sync_page(notebook.current_page_mut());
                                             autosave.mark_dirty(&notebook, &mut manifest);
-                                            ui_state.set_export_message("Auswahl um 90° gedreht".to_string());
+                                            ui_state.set_export_message(t!("Auswahl um 90° gedreht").to_string());
                                             window.request_redraw();
                                         }
                                 }
@@ -3208,7 +3230,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                                 UiAction::ExportPage(kind) => {
                                     start_page_export(kind, &notebook, &storage_dir, &manifest.title, ui_state.pattern_color, export_tx.clone(), window.clone());
-                                    ui_state.set_export_message("Seite wird exportiert …".to_string());
+                                    ui_state.set_export_message(t!("Seite wird exportiert …").to_string());
                                     window.request_redraw();
                                 }
                                 UiAction::SetPageTitle { page_id, title } => {
@@ -3238,7 +3260,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         &mut ui_state,
                                         &window,
                                     );
-                                    ui_state.set_export_message(format!("Seite {} eingefügt", index + 1));
+                                    ui_state.set_export_message(t!("Seite {number} eingefügt", number = index + 1));
                                 }
                                 UiAction::DeleteCurrentPage => {
                                     let index = notebook.current_page_index;
@@ -3250,9 +3272,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         manifest.sync_from_notebook(&notebook);
                                         autosave.mark_manifest_dirty(&manifest);
                                         last_deleted_page = Some((manifest.id.clone(), index, page));
-                                        ui_state.set_export_message(format!(
-                                            "Seite {} gelöscht – im Menü ☰ wiederherstellbar",
-                                            index + 1
+                                        ui_state.set_export_message(t!(
+                                            "Seite {number} gelöscht – im Menü ☰ wiederherstellbar",
+                                            number = index + 1
                                         ));
                                         update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
                                         window.request_redraw();
@@ -3268,7 +3290,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             // Die Seitendatei neu schreiben (sie kann inzwischen fehlen)
                                             autosave.mark_page_dirty(notebook.current_page(), &manifest);
                                             autosave.mark_manifest_dirty(&manifest);
-                                            ui_state.set_export_message(format!("Seite {} wiederhergestellt", index + 1));
+                                            ui_state.set_export_message(t!("Seite {number} wiederhergestellt", number = index + 1));
                                             update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
                                             window.request_redraw();
                                         } else {
@@ -3310,7 +3332,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                                 UiAction::ExportPdf => {
                                     start_pdf_export(&notebook, &storage_dir, &manifest.title, ui_state.pattern_color, export_tx.clone(), window.clone());
-                                    ui_state.set_export_message("PDF-Export läuft…");
+                                    ui_state.set_export_message(t!("PDF-Export läuft…"));
                                     window.request_redraw();
                                 }
 
@@ -3318,9 +3340,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     if let Some(path) = change_library(&storage_base_dir, &mut ui_state, |library| {
                                         library.create_folder(&parent, &name)
                                     }) {
-                                        ui_state.set_export_message(format!(
-                                            "Ordner „{}“ angelegt",
-                                            ink_notes::library::folder_name(&path)
+                                        ui_state.set_export_message(t!(
+                                            "Ordner „{name}“ angelegt",
+                                            name = ink_notes::library::folder_name(&path)
                                         ));
                                     }
                                     window.request_redraw();
@@ -3344,9 +3366,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     })
                                     .is_some()
                                     {
-                                        ui_state.set_export_message(format!(
-                                            "Ordner „{}“ gelöscht, sein Inhalt liegt eine Ebene höher",
-                                            ink_notes::library::folder_name(&path)
+                                        ui_state.set_export_message(t!(
+                                            "Ordner „{name}“ gelöscht, sein Inhalt liegt eine Ebene höher",
+                                            name = ink_notes::library::folder_name(&path)
                                         ));
                                     }
                                     window.request_redraw();
@@ -3361,13 +3383,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             ui_state.notebook_folder = format!("{new_path}{}", &shown[path.len()..]);
                                         }
                                         let target = if new_parent.is_empty() {
-                                            "die oberste Ebene".to_string()
+                                            t!("die oberste Ebene").to_string()
                                         } else {
                                             format!("„{}“", ink_notes::library::folder_name(&new_parent))
                                         };
-                                        ui_state.set_export_message(format!(
-                                            "Ordner „{}“ verschoben in {target}",
-                                            ink_notes::library::folder_name(&path)
+                                        ui_state.set_export_message(t!(
+                                            "Ordner „{name}“ verschoben in {target}",
+                                            name = ink_notes::library::folder_name(&path),
+                                            target = target
                                         ));
                                     }
                                     window.request_redraw();
@@ -3379,11 +3402,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     .is_some()
                                     {
                                         let target = if folder.is_empty() {
-                                            "die oberste Ebene".to_string()
+                                            t!("die oberste Ebene").to_string()
                                         } else {
                                             format!("„{}“", ink_notes::library::folder_name(&folder))
                                         };
-                                        ui_state.set_export_message(format!("Verschoben in {target}"));
+                                        ui_state.set_export_message(t!("Verschoben in {target}", target = target));
                                     }
                                     window.request_redraw();
                                 }
@@ -3409,7 +3432,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                         eprintln!("[Storage-Lock] {msg}");
                                                         _notebook_lock = None;
                                                         autosave.set_read_only(true);
-                                                        ui_state.set_export_message("⚠ In anderer Instanz geöffnet (Schreibschutz)");
+                                                        ui_state.set_export_message(t!("⚠ In anderer Instanz geöffnet (Schreibschutz)"));
                                                     }
                                                     Err(e) => {
                                                         eprintln!("[Storage-Lock] Konnte Lock nicht erwerben: {e}");
@@ -3429,13 +3452,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 canvas.sync_page(notebook.current_page_mut());
                                                 update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
                                                 if _notebook_lock.is_some() {
-                                                    ui_state.set_export_message(format!("Dokument '{}' geöffnet", manifest.title));
+                                                    ui_state.set_export_message(t!("Dokument '{title}' geöffnet", title = manifest.title));
                                                 }
                                                 window.request_redraw();
                                             }
                                             Err(err) => {
                                                 eprintln!("[Dokument-Fehler] Konnte Dokument '{id}' nicht laden: {err}");
-                                                ui_state.set_export_message(format!("Fehler beim Öffnen: {err}"));
+                                                ui_state.set_export_message(t!("Fehler beim Öffnen: {err}", err = err));
                                             }
                                         }
                                     }
@@ -3470,15 +3493,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             canvas.reset_view();
                                             canvas.sync_page(notebook.current_page_mut());
                                             update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
-                                            ui_state.set_export_message(format!(
-                                                "'{}' importiert ({} Seiten)",
-                                                manifest.title,
-                                                notebook.pages.len()
+                                            ui_state.set_export_message(t!(
+                                                "'{title}' importiert ({count} Seiten)",
+                                                title = manifest.title,
+                                                count = notebook.pages.len()
                                             ));
                                         }
                                         Err(err) => {
                                             eprintln!("[PDF-Import] '{}': {err}", path.display());
-                                            ui_state.set_export_message(format!("PDF nicht importiert: {err}"));
+                                            ui_state.set_export_message(t!("PDF nicht importiert: {err}", err = err));
                                         }
                                     }
                                     window.request_redraw();
@@ -3504,12 +3527,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             ui_state.is_document_menu_open = false;
                                             canvas.sync_page(notebook.current_page_mut());
                                             update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
-                                            ui_state.set_export_message(format!("Dokument '{}' erstellt", manifest.title));
+                                            ui_state.set_export_message(t!("Dokument '{title}' erstellt", title = manifest.title));
                                             window.request_redraw();
                                         }
                                         Err(err) => {
                                             eprintln!("[Dokument-Fehler] Konnte Dokument '{title}' nicht erstellen: {err}");
-                                            ui_state.set_export_message(format!("Fehler beim Erstellen: {err}"));
+                                            ui_state.set_export_message(t!("Fehler beim Erstellen: {err}", err = err));
                                         }
                                     }
                                 }
@@ -3523,12 +3546,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 manifest.sync_from_notebook(&notebook);
                                                 autosave.mark_manifest_dirty(&manifest);
                                                 update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
-                                                ui_state.set_export_message(format!("Umbenannt in '{}'", new_title));
+                                                ui_state.set_export_message(t!("Umbenannt in '{title}'", title = new_title));
                                                 window.request_redraw();
                                             }
                                             Err(err) => {
                                                 eprintln!("[Dokument-Fehler] Konnte Dokument '{id}' nicht umbenennen: {err}");
-                                                ui_state.set_export_message(format!("Fehler beim Umbenennen: {err}"));
+                                                ui_state.set_export_message(t!("Fehler beim Umbenennen: {err}", err = err));
                                             }
                                         }
                                     } else {
@@ -3537,7 +3560,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             if let Ok(mut other_manifest) = serde_json::from_str::<NotebookManifest>(&content) {
                                                 let _ = storage::rename_notebook(&target_dir, &mut other_manifest, &new_title);
                                                 refresh_notebooks(&storage_base_dir, &mut ui_state);
-                                                ui_state.set_export_message(format!("Umbenannt in '{}'", new_title));
+                                                ui_state.set_export_message(t!("Umbenannt in '{title}'", title = new_title));
                                                 window.request_redraw();
                                             }
                                         }
@@ -3583,13 +3606,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                             ui_state.document_title = manifest.title.clone();
                                                             canvas.sync_page(notebook.current_page_mut());
                                                             update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
-                                                            ui_state.set_export_message(format!("Gewechselt zu '{}'", manifest.title));
+                                                            ui_state.set_export_message(t!("Gewechselt zu '{title}'", title = manifest.title));
                                                         }
                                                         Err(err) => {
                                                             eprintln!("[Dokument-Fehler] Konnte Dokument '{}' nicht laden: {err}", first.id);
                                                         }
                                                     }
-                                                } else if let Ok((new_nb, new_manifest, new_dir)) = storage::create_new_notebook(&storage_base_dir, "Standard-Notizbuch") {
+                                                } else if let Ok((new_nb, new_manifest, new_dir)) = storage::create_new_notebook(&storage_base_dir, t!("Standard-Notizbuch")) {
                                                     _notebook_lock = storage::NotebookLock::acquire(&new_dir).ok();
                                                     autosave.set_read_only(_notebook_lock.is_none());
                                                     autosave.switch_notebook_dir(new_dir.clone());
@@ -3602,16 +3625,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                     refresh_notebooks(&storage_base_dir, &mut ui_state);
                                                     canvas.sync_page(notebook.current_page_mut());
                                                     update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
-                                                    ui_state.set_export_message("Standard-Notizbuch erstellt".to_string());
+                                                    ui_state.set_export_message(t!("Standard-Notizbuch erstellt").to_string());
                                                 }
                                             } else {
-                                                ui_state.set_export_message("Dokument in Papierkorb verschoben".to_string());
+                                                ui_state.set_export_message(t!("Dokument in Papierkorb verschoben").to_string());
                                             }
                                             window.request_redraw();
                                         }
                                         Err(err) => {
                                             eprintln!("[Dokument-Fehler] Konnte Dokument '{id}' nicht löschen: {err}");
-                                            ui_state.set_export_message(format!("Fehler beim Löschen: {err}"));
+                                            ui_state.set_export_message(t!("Fehler beim Löschen: {err}", err = err));
                                         }
                                     }
                                 }
@@ -3620,12 +3643,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         match storage::restore_notebook_from_trash(&storage_base_dir, &trash_path) {
                                             Ok(_restored_dir) => {
                                                 refresh_notebooks(&storage_base_dir, &mut ui_state);
-                                                ui_state.set_export_message("Notizbuch wiederhergestellt".to_string());
+                                                ui_state.set_export_message(t!("Notizbuch wiederhergestellt").to_string());
                                                 window.request_redraw();
                                             }
                                             Err(err) => {
                                                 eprintln!("[Dokument-Fehler] Konnte Notizbuch nicht wiederherstellen: {err}");
-                                                ui_state.set_export_message(format!("Fehler beim Wiederherstellen: {err}"));
+                                                ui_state.set_export_message(t!("Fehler beim Wiederherstellen: {err}", err = err));
                                             }
                                         }
                                     }
@@ -3635,18 +3658,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     match storage::restore_manifest_from_backup(&target_dir) {
                                         Ok(()) => {
                                             refresh_notebooks(&storage_base_dir, &mut ui_state);
-                                            ui_state.set_export_message("Manifest aus Backup wiederhergestellt".to_string());
+                                            ui_state.set_export_message(t!("Manifest aus Backup wiederhergestellt").to_string());
                                             window.request_redraw();
                                         }
                                         Err(err) => {
                                             eprintln!("[Dokument-Fehler] Konnte Backup für '{id}' nicht wiederherstellen: {err}");
-                                            ui_state.set_export_message(format!("Wiederherstellung fehlgeschlagen: {err}"));
+                                            ui_state.set_export_message(t!("Wiederherstellung fehlgeschlagen: {err}", err = err));
                                         }
                                     }
                                 }
                                 UiAction::OpenNotebookFolder(id) => {
                                     let target_dir = storage_base_dir.join(&id);
-                                    ui_state.set_export_message(format!("Ordner: {}", target_dir.display()));
+                                    ui_state.set_export_message(t!("Ordner: {path}", path = target_dir.display()));
                                     window.request_redraw();
                                 }
                                 UiAction::CheckForUpdates => {
@@ -3659,9 +3682,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                                 UiAction::InstallOrOpenUpdate(path) => {
                                     if let Err(err) = updater.install_or_open(&path) {
-                                        ui_state.set_export_message(format!("Update-Fehler: {err}"));
+                                        ui_state.set_export_message(t!("Update-Fehler: {err}", err = err));
                                     } else {
-                                        ui_state.set_export_message("Update gestartet / geöffnet");
+                                        ui_state.set_export_message(t!("Update gestartet / geöffnet"));
                                     }
                                     window.request_redraw();
                                 }
@@ -3671,7 +3694,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 UiAction::SaveUpdaterConfig { server_url, auth_token } => {
                                     updater.set_server_url(server_url);
                                     updater.set_auth_token(auth_token);
-                                    ui_state.set_export_message("Server-Einstellungen gespeichert");
+                                    ui_state.set_export_message(t!("Server-Einstellungen gespeichert"));
                                     window.request_redraw();
                                 }
                                 UiAction::UnlockCorruptedPage(page_id) => {
@@ -3709,7 +3732,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         Err(err) => {
                                             eprintln!("[Recovery-Fehler] Konnte Notfall-Export nicht schreiben: {err}");
                                             if let Some(ref mut se) = ui_state.shutdown_error {
-                                                se.messages.push(format!("Notfall-Export fehlgeschlagen: {err}"));
+                                                se.messages.push(t!("Notfall-Export fehlgeschlagen: {err}", err = err));
                                             }
                                             window.request_redraw();
                                         }
@@ -3718,6 +3741,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 UiAction::SetSidebarSide(side) => {
                                     ui_settings.sidebar_side = side;
                                     save_ui_settings(&ui_settings, ui_settings_path.as_deref(), &mut ui_state);
+                                    window.request_redraw();
+                                }
+                                UiAction::SetLanguage(language) => {
+                                    ui_settings.language = language;
+                                    i18n::set_language(language.unwrap_or_else(Language::system));
+                                    save_ui_settings(&ui_settings, ui_settings_path.as_deref(), &mut ui_state);
+                                    update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
                                     window.request_redraw();
                                 }
                                 UiAction::SetPaperTheme { theme, adapt_ink } => {

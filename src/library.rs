@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::storage::{self, StorageError};
+use crate::t;
 
 /// Oberste Ebene.
 pub const ROOT: &str = "";
@@ -62,14 +63,15 @@ fn is_within(path: &str, folder: &str) -> bool {
 pub fn validate_name(name: &str) -> Result<String, String> {
     let name = name.trim();
     if name.is_empty() {
-        return Err("Der Ordnername ist leer".to_string());
+        return Err(t!("Der Ordnername ist leer").to_string());
     }
     if name.contains('/') {
-        return Err("Ordnernamen dürfen kein „/“ enthalten".to_string());
+        return Err(t!("Ordnernamen dürfen kein „/“ enthalten").to_string());
     }
     if name.chars().count() > MAX_NAME_CHARS {
-        return Err(format!(
-            "Der Ordnername ist zu lang (höchstens {MAX_NAME_CHARS} Zeichen)"
+        return Err(t!(
+            "Der Ordnername ist zu lang (höchstens {max} Zeichen)",
+            max = MAX_NAME_CHARS
         ));
     }
     Ok(name.to_string())
@@ -161,11 +163,11 @@ impl Library {
     pub fn create_folder(&mut self, parent: &str, name: &str) -> Result<String, String> {
         let name = validate_name(name)?;
         if !parent.is_empty() && !self.folders.contains(parent) {
-            return Err("Der übergeordnete Ordner existiert nicht mehr".to_string());
+            return Err(t!("Der übergeordnete Ordner existiert nicht mehr").to_string());
         }
         let path = join(parent, &name);
         if !self.folders.insert(path.clone()) {
-            return Err(format!("Den Ordner „{name}“ gibt es hier schon"));
+            return Err(t!("Den Ordner „{name}“ gibt es hier schon", name = name));
         }
         Ok(path)
     }
@@ -175,14 +177,17 @@ impl Library {
     pub fn rename_folder(&mut self, path: &str, new_name: &str) -> Result<String, String> {
         let new_name = validate_name(new_name)?;
         if !self.folders.contains(path) {
-            return Err("Den Ordner gibt es nicht mehr".to_string());
+            return Err(t!("Den Ordner gibt es nicht mehr").to_string());
         }
         let new_path = join(parent_folder(path), &new_name);
         if new_path == path {
             return Ok(new_path);
         }
         if self.folders.contains(&new_path) {
-            return Err(format!("Den Ordner „{new_name}“ gibt es hier schon"));
+            return Err(t!(
+                "Den Ordner „{name}“ gibt es hier schon",
+                name = new_name
+            ));
         }
         self.move_contents(path, &new_path);
         Ok(new_path)
@@ -240,13 +245,13 @@ impl Library {
     /// gibt seinen neuen Pfad zurück. Nicht in sich selbst oder einen eigenen Unterordner.
     pub fn move_folder(&mut self, path: &str, new_parent: &str) -> Result<String, String> {
         if !self.folders.contains(path) {
-            return Err("Den Ordner gibt es nicht mehr".to_string());
+            return Err(t!("Den Ordner gibt es nicht mehr").to_string());
         }
         if !new_parent.is_empty() && !self.folders.contains(new_parent) {
-            return Err("Den Zielordner gibt es nicht mehr".to_string());
+            return Err(t!("Den Zielordner gibt es nicht mehr").to_string());
         }
         if is_within(new_parent, path) {
-            return Err("Ein Ordner kann nicht in sich selbst verschoben werden".to_string());
+            return Err(t!("Ein Ordner kann nicht in sich selbst verschoben werden").to_string());
         }
         let name = folder_name(path);
         let new_path = join(new_parent, name);
@@ -254,7 +259,10 @@ impl Library {
             return Ok(new_path);
         }
         if self.folders.contains(&new_path) {
-            return Err(format!("Im Zielordner gibt es schon einen Ordner „{name}“"));
+            return Err(t!(
+                "Im Zielordner gibt es schon einen Ordner „{name}“",
+                name = name
+            ));
         }
         self.move_contents(path, &new_path);
         Ok(new_path)
@@ -276,7 +284,7 @@ impl Library {
             return Ok(());
         }
         if !self.folders.contains(folder) {
-            return Err("Den Ordner gibt es nicht mehr".to_string());
+            return Err(t!("Den Ordner gibt es nicht mehr").to_string());
         }
         self.notebooks
             .insert(notebook_id.to_string(), folder.to_string());

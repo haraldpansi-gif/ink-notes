@@ -16,6 +16,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::document::{Notebook, Page, PersistState};
 use crate::storage::{self, NotebookManifest, PageData, StorageError};
+use crate::t;
 
 /// Abstraktion für die Zeitmessung (für deterministische Tests ohne Thread-Sleep).
 pub trait Clock: Send + Sync + 'static {
@@ -69,12 +70,11 @@ pub struct AutosaveError {
 
 impl fmt::Display for AutosaveError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "Autosave fehlgeschlagen für Seiten {:?}: {}",
-            self.failed_page_ids,
-            self.messages.join("; ")
-        )
+        f.write_str(&t!(
+            "Autosave fehlgeschlagen für Seiten {pages}: {messages}",
+            pages = format!("{:?}", self.failed_page_ids),
+            messages = self.messages.join("; ")
+        ))
     }
 }
 
@@ -96,10 +96,10 @@ pub enum AutosaveStatus {
 impl AutosaveStatus {
     pub fn display_text(&self) -> &'static str {
         match self {
-            AutosaveStatus::Saved => "Gespeichert",
-            AutosaveStatus::Pending => "Ungespeichert",
-            AutosaveStatus::Saving => "Speichert...",
-            AutosaveStatus::Error => "Speicherfehler!",
+            AutosaveStatus::Saved => t!("Gespeichert"),
+            AutosaveStatus::Pending => t!("Ungespeichert"),
+            AutosaveStatus::Saving => t!("Speichert..."),
+            AutosaveStatus::Error => t!("Speicherfehler!"),
         }
     }
 }
@@ -166,7 +166,7 @@ fn spawn_worker(
                             let _ = resp_tx.send(AutosaveResponse::PageSaved {
                                 page_id,
                                 result: Err((
-                                    "Worker panic beim Speichern der Seite".to_string(),
+                                    t!("Worker panic beim Speichern der Seite").to_string(),
                                     Box::new(page_data),
                                 )),
                             });
@@ -194,7 +194,7 @@ fn spawn_worker(
                         Err(_panic) => {
                             let _ = resp_tx.send(AutosaveResponse::ManifestSaved {
                                 result: Err((
-                                    "Worker panic beim Speichern des Manifests".to_string(),
+                                    t!("Worker panic beim Speichern des Manifests").to_string(),
                                     Box::new(manifest),
                                 )),
                             });
@@ -413,7 +413,8 @@ impl AutosaveController {
                     Err((err_msg, failed_page)) => {
                         eprintln!("[Autosave-Fehler] Seite {page_id} fehlgeschlagen: {err_msg}");
                         self.status = AutosaveStatus::Error;
-                        self.last_errors.push(format!("Seite {page_id}: {err_msg}"));
+                        self.last_errors
+                            .push(t!("Seite {id}: {msg}", id = page_id, msg = err_msg));
 
                         // Wieder einreihen, wenn nicht bereits eine neuere Version vorliegt
                         self.pending_pages.entry(page_id).or_insert(*failed_page);
@@ -431,7 +432,7 @@ impl AutosaveController {
                     if let Err((err_msg, failed_manifest)) = result {
                         eprintln!("[Autosave-Fehler] Manifest fehlgeschlagen: {err_msg}");
                         self.status = AutosaveStatus::Error;
-                        self.last_errors.push(format!("Manifest: {err_msg}"));
+                        self.last_errors.push(t!("Manifest: {msg}", msg = err_msg));
                         if self.pending_manifest.is_none() {
                             self.pending_manifest = Some(*failed_manifest);
                         }
@@ -567,7 +568,8 @@ impl AutosaveController {
                     }
                     Err((e, failed_page)) => {
                         self.status = AutosaveStatus::Error;
-                        self.last_errors.push(format!("Seite {page_id}: {e}"));
+                        self.last_errors
+                            .push(t!("Seite {id}: {msg}", id = page_id, msg = e));
                         self.pending_pages.insert(page_id, *failed_page);
                         let now = self.clock.now();
                         let retry = self.retries.entry(page_id).or_insert(PageRetry {
@@ -581,7 +583,7 @@ impl AutosaveController {
                 AutosaveResponse::ManifestSaved { result } => {
                     if let Err((e, failed_manifest)) = result {
                         self.status = AutosaveStatus::Error;
-                        self.last_errors.push(format!("Manifest: {e}"));
+                        self.last_errors.push(t!("Manifest: {msg}", msg = e));
                         self.pending_manifest = Some(*failed_manifest);
                     }
                 }

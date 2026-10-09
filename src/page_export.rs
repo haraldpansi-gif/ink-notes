@@ -15,6 +15,7 @@ use crate::assets::{AssetStore, RgbaImage};
 use crate::background::PatternColor;
 use crate::document::{Aabb, Notebook, Page, PageBackground, A4_WIDTH_MM, PAGE_WIDTH};
 use crate::export::{export_notebook_to_bytes, ExportStrategy};
+use crate::t;
 
 /// Auflösung des PNG-Exports einer Seite.
 pub const PAGE_PNG_DPI: f32 = 200.0;
@@ -50,8 +51,8 @@ fn content_only(page: &Page) -> Page {
 
 /// Rastert die erste Seite eines PDFs mit `dpi`; Farben ohne Vormultiplikation.
 fn rasterize(pdf_bytes: Vec<u8>, dpi: f32, transparent: bool) -> Result<RgbaImage, Box<dyn Error>> {
-    let pdf = Pdf::new(pdf_bytes).map_err(|e| format!("PDF nicht lesbar: {e:?}"))?;
-    let page = pdf.pages().first().ok_or("PDF ohne Seite")?;
+    let pdf = Pdf::new(pdf_bytes).map_err(|e| t!("PDF nicht lesbar: {e}", e = format!("{e:?}")))?;
+    let page = pdf.pages().first().ok_or(t!("PDF ohne Seite"))?;
     let scale = dpi / 72.0;
     let pixmap = hayro::render(
         page,
@@ -84,7 +85,7 @@ fn rasterize(pdf_bytes: Vec<u8>, dpi: f32, transparent: bool) -> Result<RgbaImag
 /// Kodiert ein Bild als PNG.
 pub fn encode_png(image: &RgbaImage) -> Result<Vec<u8>, Box<dyn Error>> {
     let buffer = image::RgbaImage::from_raw(image.width, image.height, image.pixels.clone())
-        .ok_or("Pixeldaten passen nicht zur Bildgröße")?;
+        .ok_or(t!("Pixeldaten passen nicht zur Bildgröße"))?;
     let mut out = Vec::new();
     image::DynamicImage::ImageRgba8(buffer)
         .write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)?;
@@ -118,8 +119,8 @@ pub fn page_svg(
     pattern: PatternColor,
 ) -> Result<String, Box<dyn Error>> {
     let pdf = Pdf::new(single_page_pdf(page, assets, pattern)?)
-        .map_err(|e| format!("PDF nicht lesbar: {e:?}"))?;
-    let pdf_page = pdf.pages().first().ok_or("PDF ohne Seite")?;
+        .map_err(|e| t!("PDF nicht lesbar: {e}", e = format!("{e:?}")))?;
+    let pdf_page = pdf.pages().first().ok_or(t!("PDF ohne Seite"))?;
     Ok(hayro_svg::convert(
         pdf_page,
         &hayro_svg::RenderCache::new(),

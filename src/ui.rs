@@ -24,6 +24,7 @@ use crate::settings::{
 };
 use crate::storage::NotebookSummary;
 use crate::text::{TextEditing, TextFont, TEXT_SIZES_PT};
+use crate::{t, tn};
 
 /// Aktives Werkzeug für das Zeichnen oder Bearbeiten.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,13 +43,13 @@ pub enum ActiveTool {
 impl ActiveTool {
     pub fn name(&self) -> &'static str {
         match self {
-            ActiveTool::Pen => "Stift (Pen)",
-            ActiveTool::Highlighter => "Textmarker (Highlighter)",
-            ActiveTool::Eraser => "Radierer (Eraser)",
-            ActiveTool::Shape => "Formen (Shape)",
-            ActiveTool::Select => "Auswahl / Lasso (Select)",
-            ActiveTool::Text => "Text (T)",
-            ActiveTool::Space => "Platz schaffen",
+            ActiveTool::Pen => t!("Stift (Pen)"),
+            ActiveTool::Highlighter => t!("Textmarker (Highlighter)"),
+            ActiveTool::Eraser => t!("Radierer (Eraser)"),
+            ActiveTool::Shape => t!("Formen (Shape)"),
+            ActiveTool::Select => t!("Auswahl / Lasso (Select)"),
+            ActiveTool::Text => t!("Text (T)"),
+            ActiveTool::Space => t!("Platz schaffen"),
         }
     }
 
@@ -76,20 +77,20 @@ pub type ColorPreset = ([f32; 4], &'static str);
 /// - Tafel-Grün: [0.18, 0.65, 0.35, 1.0]
 /// - Graphit-Grau: [0.45, 0.45, 0.48, 1.0]
 pub const PEN_COLOR_PRESETS: [([f32; 4], &str); 5] = [
-    ([0.12, 0.12, 0.14, 1.0], "Notiz-Schwarz"),
-    ([0.15, 0.35, 0.85, 1.0], "Universitäts-Blau"),
-    ([0.85, 0.20, 0.20, 1.0], "Korrektur-Rot"),
-    ([0.18, 0.65, 0.35, 1.0], "Tafel-Grün"),
-    ([0.45, 0.45, 0.48, 1.0], "Graphit-Grau"),
+    ([0.12, 0.12, 0.14, 1.0], tn!("Notiz-Schwarz")),
+    ([0.15, 0.35, 0.85, 1.0], tn!("Universitäts-Blau")),
+    ([0.85, 0.20, 0.20, 1.0], tn!("Korrektur-Rot")),
+    ([0.18, 0.65, 0.35, 1.0], tn!("Tafel-Grün")),
+    ([0.45, 0.45, 0.48, 1.0], tn!("Graphit-Grau")),
 ];
 
 /// Schnellauswahlfarben für den Textmarker (halbtransparent, Alpha 0.35):
 /// - Neon-Gelb, Hellgrün, Pastell-Cyan, Rosa
 pub const HIGHLIGHTER_COLOR_PRESETS: [([f32; 4], &str); 4] = [
-    ([1.0, 0.95, 0.1, 0.35], "Neon-Gelb"),
-    ([0.2, 0.9, 0.3, 0.35], "Hellgrün"),
-    ([0.25, 0.7, 1.0, 0.35], "Pastell-Cyan"),
-    ([1.0, 0.3, 0.65, 0.35], "Rosa"),
+    ([1.0, 0.95, 0.1, 0.35], tn!("Neon-Gelb")),
+    ([0.2, 0.9, 0.3, 0.35], tn!("Hellgrün")),
+    ([0.25, 0.7, 1.0, 0.35], tn!("Pastell-Cyan")),
+    ([1.0, 0.3, 0.65, 0.35], tn!("Rosa")),
 ];
 
 /// Dicken-Presets für feines Inking und präzise Notizen:
@@ -303,6 +304,8 @@ pub enum UiAction {
     UnlockCorruptedPage(u64),
     /// Werkzeugleiste an die andere Fensterseite verlegen (wird gespeichert)
     SetSidebarSide(SidebarSide),
+    /// Sprache der Oberfläche; `None` = Sprache des Systems
+    SetLanguage(Option<crate::i18n::Language>),
     /// Papierfarbe der Anzeige und Aufhellen dunkler Tinte (wird gespeichert)
     SetPaperTheme {
         theme: PaperTheme,
@@ -411,6 +414,8 @@ pub struct UiState {
     pub shutdown_error: Option<crate::autosave::AutosaveError>,
     /// Fensterseite der Werkzeugleiste
     pub sidebar_side: SidebarSide,
+    /// Gewählte Sprache der Oberfläche; `None` = Sprache des Systems
+    pub language: Option<crate::i18n::Language>,
     /// Öffnungszustand des ☰-Menüs
     pub is_more_menu_open: bool,
     /// Welche Striche der Radierer entfernt (gilt auch für Stiftrückseite und Seitentaste)
@@ -471,7 +476,7 @@ impl Default for UiState {
             popover_rect: None,
             is_document_menu_open: false,
             current_notebook_id: "default".to_string(),
-            document_title: "Standard-Notizbuch".to_string(),
+            document_title: t!("Standard-Notizbuch").to_string(),
             available_notebooks: Vec::new(),
             new_notebook_title_input: String::new(),
             renaming_notebook_id: None,
@@ -505,6 +510,7 @@ impl Default for UiState {
             restorable_page: None,
             shutdown_error: None,
             sidebar_side: SidebarSide::Left,
+            language: None,
             is_more_menu_open: false,
             eraser_mode: EraserMode::All,
             paper_theme: PaperTheme::White,
@@ -879,7 +885,7 @@ fn stroke_preview_button(
         );
     }
 
-    response.on_hover_text(format!("Stärke auf {} setzen", label_text))
+    response.on_hover_text(t!("Stärke auf {width} setzen", width = label_text))
 }
 
 /// Inhalt eines Symbol-Knopfs der Werkzeugleiste.
@@ -1101,13 +1107,16 @@ fn popover_placement(
 /// Farbe und Beschriftung der Speicherstatus-Anzeige.
 fn autosave_status_style(status: AutosaveStatus) -> (egui::Color32, &'static str) {
     match status {
-        AutosaveStatus::Saved => (egui::Color32::from_rgb(46, 204, 113), "Alles gespeichert"),
-        AutosaveStatus::Saving => (egui::Color32::from_rgb(241, 196, 15), "Speichert …"),
+        AutosaveStatus::Saved => (
+            egui::Color32::from_rgb(46, 204, 113),
+            t!("Alles gespeichert"),
+        ),
+        AutosaveStatus::Saving => (egui::Color32::from_rgb(241, 196, 15), t!("Speichert …")),
         AutosaveStatus::Pending => (
             egui::Color32::from_rgb(230, 126, 34),
-            "Ungespeicherte Änderungen",
+            t!("Ungespeicherte Änderungen"),
         ),
-        AutosaveStatus::Error => (egui::Color32::from_rgb(231, 76, 60), "Speicherfehler!"),
+        AutosaveStatus::Error => (egui::Color32::from_rgb(231, 76, 60), t!("Speicherfehler!")),
     }
 }
 
@@ -1129,7 +1138,7 @@ fn color_editor(
                 .iter()
                 .zip(&color[..3])
                 .all(|(a, b)| (a - b).abs() < 0.01);
-            if color_circle_swatch(ui, preset, is_sel, label, 30.0).clicked() {
+            if color_circle_swatch(ui, preset, is_sel, crate::i18n::tr(label), 30.0).clicked() {
                 *color = [preset[0], preset[1], preset[2], color[3]];
                 changed = true;
             }
@@ -1139,7 +1148,7 @@ fn color_editor(
                 *picker_open,
                 egui::RichText::new("🎨").size(18.0),
             ))
-            .on_hover_text("Eigene Farbe wählen")
+            .on_hover_text(t!("Eigene Farbe wählen"))
             .clicked()
         {
             *picker_open = !*picker_open;
@@ -1379,8 +1388,8 @@ fn text_style_buttons(ui: &mut egui::Ui, btn: f32, state: &mut UiState) {
         .copied()
         .find(|&s| s < size - 0.01);
     let larger = TEXT_SIZES_PT.iter().copied().find(|&s| s > size + 0.01);
-    let smaller_tip = format!("Kleinere Schrift (jetzt {size} pt)");
-    let larger_tip = format!("Größere Schrift (jetzt {size} pt)");
+    let smaller_tip = t!("Kleinere Schrift (jetzt {size} pt)", size = size);
+    let larger_tip = t!("Größere Schrift (jetzt {size} pt)", size = size);
     enum Change {
         Font(TextFont),
         /// Neue Größe; `None`: keine kleinere bzw. größere mehr
@@ -1389,12 +1398,12 @@ fn text_style_buttons(ui: &mut egui::Ui, btn: f32, state: &mut UiState) {
     let buttons = [
         (
             SidebarIcon::Text("Aa"),
-            "Normale Schrift",
+            t!("Normale Schrift"),
             Change::Font(TextFont::Sans),
         ),
         (
             SidebarIcon::Text("{ }"),
-            "Code-Schrift (feste Zeichenbreite, Tab rückt ein)",
+            t!("Code-Schrift (feste Zeichenbreite, Tab rückt ein)"),
             Change::Font(TextFont::Mono),
         ),
         (SidebarIcon::Text("A−"), &smaller_tip, Change::Size(smaller)),
@@ -1412,7 +1421,7 @@ fn text_style_buttons(ui: &mut egui::Ui, btn: f32, state: &mut UiState) {
             Change::Font(font) => state.text_font = font,
             Change::Size(Some(new_size)) => {
                 state.text_size_pt = new_size;
-                state.set_export_message(format!("Schriftgröße {new_size} pt"));
+                state.set_export_message(t!("Schriftgröße {size} pt", size = new_size));
             }
             Change::Size(None) => {}
         }
@@ -1558,8 +1567,12 @@ fn page_thumbnail(
         );
     }
     match &page.title {
-        Some(title) => response.on_hover_text(format!("Seite {number} – {title}")),
-        None => response.on_hover_text(format!("Seite {number}")),
+        Some(title) => response.on_hover_text(t!(
+            "Seite {number} – {title}",
+            number = number,
+            title = title
+        )),
+        None => response.on_hover_text(t!("Seite {number}", number = number)),
     }
 }
 
@@ -1570,7 +1583,7 @@ fn page_title_list(ui: &mut egui::Ui, notebook: &Notebook) -> Option<usize> {
     if notebook.pages.iter().all(|p| p.title.is_none()) {
         ui.label(
             egui::RichText::new(
-                "Noch keine Seite hat einen Titel. Gib oben einen Titel für die aktuelle Seite ein.",
+                t!("Noch keine Seite hat einen Titel. Gib oben einen Titel für die aktuelle Seite ein."),
             )
             .color(egui::Color32::from_gray(150)),
         );
@@ -1659,7 +1672,7 @@ fn pattern_color_button(
         egui::Rounding::same(3.0),
         egui::Stroke::new(1.0_f32, egui::Color32::from_gray(120)),
     );
-    response.on_hover_text("Gilt für alle Seiten, auch beim Export")
+    response.on_hover_text(t!("Gilt für alle Seiten, auch beim Export"))
 }
 
 /// Schieberegler für die Druckkurve mit Vorschau der Kennlinie. Änderungen gelten sofort
@@ -1671,13 +1684,13 @@ fn stylus_buttons_editor(ui: &mut egui::Ui, state: &mut UiState) -> bool {
     use crate::settings::StylusAction;
     let mut changed = false;
     ui.add_space(4.0);
-    ui.label(egui::RichText::new("Tasten am Stift").color(egui::Color32::from_gray(200)));
+    ui.label(egui::RichText::new(t!("Tasten am Stift")).color(egui::Color32::from_gray(200)));
     if state.stylus_buttons.is_empty() {
         ui.label(
-            egui::RichText::new(
+            egui::RichText::new(t!(
                 "Drücke eine Taste am Stift (über dem Bildschirm) – sie erscheint dann hier. \
-                 Bis dahin radieren alle Tasten.",
-            )
+                 Bis dahin radieren alle Tasten."
+            ))
             .size(11.0)
             .color(egui::Color32::from_gray(150)),
         );
@@ -1687,13 +1700,13 @@ fn stylus_buttons_editor(ui: &mut egui::Ui, state: &mut UiState) -> bool {
     for i in 0..state.stylus_buttons.len() {
         ui.horizontal(|ui| {
             let pressed = state.pressed_stylus_button == Some(i);
-            let label = egui::RichText::new(format!("Taste {}", i + 1));
+            let label = egui::RichText::new(t!("Taste {number}", number = i + 1));
             ui.label(if pressed {
                 label.strong().color(egui::Color32::from_rgb(46, 204, 113))
             } else {
                 label
             })
-            .on_hover_text("Leuchtet grün, solange die Taste gedrückt ist");
+            .on_hover_text(t!("Leuchtet grün, solange die Taste gedrückt ist"));
             let current = state.stylus_buttons[i].action;
             egui::ComboBox::from_id_source(("stylus_button", i))
                 .selected_text(current.label())
@@ -1712,9 +1725,9 @@ fn stylus_buttons_editor(ui: &mut egui::Ui, state: &mut UiState) -> bool {
                 });
             if ui
                 .small_button("🗙")
-                .on_hover_text(
-                    "Vergessen (erscheint beim nächsten Drücken wieder, dann mit Radieren)",
-                )
+                .on_hover_text(t!(
+                    "Vergessen (erscheint beim nächsten Drücken wieder, dann mit Radieren)"
+                ))
                 .clicked()
             {
                 remove = Some(i);
@@ -1738,7 +1751,7 @@ fn pressure_curve_editor(ui: &mut egui::Ui, state: &mut UiState) -> Option<Press
     };
 
     ui.add_space(4.0);
-    ui.label("Druckkurve des Stifts");
+    ui.label(t!("Druckkurve des Stifts"));
     let (graph, _) =
         ui.allocate_exact_size(egui::vec2(ui.available_width(), 56.0), egui::Sense::hover());
     let painter = ui.painter_at(graph);
@@ -1778,28 +1791,28 @@ fn pressure_curve_editor(ui: &mut egui::Ui, state: &mut UiState) -> Option<Press
     }
 
     ui.horizontal(|ui| {
-        ui.label("weich");
+        ui.label(t!("weich"));
         ui.spacing_mut().slider_width = (ui.available_width() - 40.0).max(60.0);
         track(ui.add(
             egui::Slider::new(&mut state.pressure_curve.exponent, PressureCurve::EXPONENT_RANGE)
                 .logarithmic(true)
                 .show_value(false),
-        ).on_hover_text("Weich: schon leichter Druck ergibt kräftige Linien.\nHart: erst fester Druck ergibt kräftige Linien."));
-        ui.label("hart");
+        ).on_hover_text(t!("Weich: schon leichter Druck ergibt kräftige Linien.\nHart: erst fester Druck ergibt kräftige Linien.")));
+        ui.label(t!("hart"));
     });
     ui.horizontal(|ui| {
-        ui.label("Mindestdruck");
+        ui.label(t!("Mindestdruck"));
         ui.spacing_mut().slider_width = (ui.available_width() - 60.0).max(60.0);
         track(ui.add(
             egui::Slider::new(&mut state.pressure_curve.threshold, PressureCurve::THRESHOLD_RANGE)
                 .custom_formatter(|v, _| format!("{:.0} %", v * 100.0))
                 .custom_parser(|s| s.trim().trim_end_matches('%').trim().parse::<f64>().ok().map(|v| v / 100.0)),
-        ).on_hover_text("Leichterer Druck zählt als kein Druck (dünnste Linie).\nHilft bei Stiften, die schon beim Schweben Druck melden."));
+        ).on_hover_text(t!("Leichterer Druck zählt als kein Druck (dünnste Linie).\nHilft bei Stiften, die schon beim Schweben Druck melden.")));
     });
     if ui
         .add_enabled(
             state.pressure_curve != PressureCurve::default(),
-            egui::Button::new("Druckkurve zurücksetzen"),
+            egui::Button::new(t!("Druckkurve zurücksetzen")),
         )
         .clicked()
     {
@@ -1816,7 +1829,10 @@ fn folder_breadcrumbs(ui: &mut egui::Ui, state: &mut UiState, folder: &str) {
         ui.spacing_mut().item_spacing.x = 4.0;
         let mut target = None;
         if ui
-            .selectable_label(folder.is_empty(), egui::RichText::new("📚 Alle").size(13.0))
+            .selectable_label(
+                folder.is_empty(),
+                egui::RichText::new(t!("📚 Alle")).size(13.0),
+            )
             .clicked()
         {
             target = Some(String::new());
@@ -1876,23 +1892,25 @@ fn folder_row(ui: &mut egui::Ui, state: &mut UiState, path: &str, actions: &mut 
             .show(ui, |ui| {
                 ui.vertical(|ui| {
                     ui.add(
-                        egui::Label::new(format!(
+                        egui::Label::new(t!(
                     "Ordner „{name}“ löschen? Seine Notizbücher und Unterordner rücken eine \
-                     Ebene nach oben, gelöscht wird kein Notizbuch."
+                     Ebene nach oben, gelöscht wird kein Notizbuch.",
+                    name = name
                 ))
                         .wrap(true),
                     );
                     ui.horizontal(|ui| {
                         if ui
                             .button(
-                                egui::RichText::new("Ordner löschen").color(egui::Color32::WHITE),
+                                egui::RichText::new(t!("Ordner löschen"))
+                                    .color(egui::Color32::WHITE),
                             )
                             .clicked()
                         {
                             actions.push(UiAction::DeleteFolder(path.to_string()));
                             state.confirm_delete_folder = None;
                         }
-                        if ui.button("Abbrechen").clicked() {
+                        if ui.button(t!("Abbrechen")).clicked() {
                             state.confirm_delete_folder = None;
                         }
                     });
@@ -1921,21 +1939,21 @@ fn folder_row(ui: &mut egui::Ui, state: &mut UiState, path: &str, actions: &mut 
                             .size(16.0)
                             .color(egui::Color32::from_rgb(255, 120, 120)),
                     )
-                    .on_hover_text("Ordner löschen (die Notizbücher bleiben erhalten)")
+                    .on_hover_text(t!("Ordner löschen (die Notizbücher bleiben erhalten)"))
                     .clicked()
                 {
                     state.confirm_delete_folder = Some(path.to_string());
                 }
                 if ui
                     .button(egui::RichText::new("📂").size(16.0))
-                    .on_hover_text("Ordner samt Inhalt in einen anderen Ordner verschieben")
+                    .on_hover_text(t!("Ordner samt Inhalt in einen anderen Ordner verschieben"))
                     .clicked()
                 {
                     state.moving = Some(MoveSubject::Folder(path.to_string()));
                 }
                 if ui
                     .button(egui::RichText::new("✏").size(16.0))
-                    .on_hover_text("Ordner umbenennen")
+                    .on_hover_text(t!("Ordner umbenennen"))
                     .clicked()
                 {
                     state.renaming_folder = Some(path.to_string());
@@ -1953,8 +1971,8 @@ fn folder_row(ui: &mut egui::Ui, state: &mut UiState, path: &str, actions: &mut 
                             );
                             ui.label(
                                 egui::RichText::new(match count {
-                                    1 => "1 Notizbuch".to_string(),
-                                    n => format!("{n} Notizbücher"),
+                                    1 => t!("1 Notizbuch").to_string(),
+                                    n => t!("{n} Notizbücher", n = n),
                                 })
                                 .size(11.0)
                                 .color(egui::Color32::from_gray(160)),
@@ -1999,9 +2017,9 @@ fn move_target_list(
             state.library.folder_move_targets(path),
         ),
     };
-    ui.label(egui::RichText::new(format!("„{title}“ verschieben nach:")).strong());
+    ui.label(egui::RichText::new(t!("„{title}“ verschieben nach:", title = title)).strong());
     ui.add_space(4.0);
-    let mut targets = vec![(String::new(), "📚 Oberste Ebene".to_string(), 0)];
+    let mut targets = vec![(String::new(), t!("📚 Oberste Ebene").to_string(), 0)];
     for path in folders {
         let depth = path.matches('/').count() + 1;
         targets.push((
@@ -2019,7 +2037,7 @@ fn move_target_list(
                     let here = path == current;
                     if ui
                         .add_enabled(!here, egui::Button::new(label))
-                        .on_disabled_hover_text("Liegt bereits hier")
+                        .on_disabled_hover_text(t!("Liegt bereits hier"))
                         .clicked()
                     {
                         actions.push(match subject {
@@ -2038,7 +2056,7 @@ fn move_target_list(
             }
         });
     ui.add_space(6.0);
-    if ui.button("Abbrechen").clicked() {
+    if ui.button(t!("Abbrechen")).clicked() {
         state.moving = None;
     }
 }
@@ -2053,16 +2071,21 @@ fn delete_page_buttons(
     let number = notebook.current_page_index + 1;
     if state.confirm_delete_page {
         ui.label(
-            egui::RichText::new(format!("Seite {number} mit allem Inhalt löschen?"))
-                .color(egui::Color32::from_rgb(255, 170, 160)),
+            egui::RichText::new(t!(
+                "Seite {number} mit allem Inhalt löschen?",
+                number = number
+            ))
+            .color(egui::Color32::from_rgb(255, 170, 160)),
         );
         ui.horizontal(|ui| {
             let half = (ui.available_width() - ui.spacing().item_spacing.x) / 2.0;
             if ui
                 .add_sized(
                     [half, 30.0],
-                    egui::Button::new(egui::RichText::new("Löschen").color(egui::Color32::WHITE))
-                        .fill(egui::Color32::from_rgb(170, 50, 45)),
+                    egui::Button::new(
+                        egui::RichText::new(t!("Löschen")).color(egui::Color32::WHITE),
+                    )
+                    .fill(egui::Color32::from_rgb(170, 50, 45)),
                 )
                 .clicked()
             {
@@ -2070,7 +2093,7 @@ fn delete_page_buttons(
                 state.confirm_delete_page = false;
             }
             if ui
-                .add_sized([half, 30.0], egui::Button::new("Abbrechen"))
+                .add_sized([half, 30.0], egui::Button::new(t!("Abbrechen")))
                 .clicked()
             {
                 state.confirm_delete_page = false;
@@ -2082,14 +2105,16 @@ fn delete_page_buttons(
             .add_enabled_ui(!only_page, |ui| {
                 ui.add_sized(
                     [ui.available_width(), 30.0],
-                    egui::Button::new(format!("🗑  Seite {number} löschen …")),
+                    egui::Button::new(t!("🗑  Seite {number} löschen …", number = number)),
                 )
             })
             .inner
-            .on_hover_text("Löscht die aktuelle Seite; danach im Menü wiederherstellbar")
-            .on_disabled_hover_text(
-                "Die einzige Seite eines Notizbuchs kann nicht gelöscht werden",
-            );
+            .on_hover_text(t!(
+                "Löscht die aktuelle Seite; danach im Menü wiederherstellbar"
+            ))
+            .on_disabled_hover_text(t!(
+                "Die einzige Seite eines Notizbuchs kann nicht gelöscht werden"
+            ));
         if response.clicked() {
             state.confirm_delete_page = true;
         }
@@ -2098,7 +2123,10 @@ fn delete_page_buttons(
         if ui
             .add_sized(
                 [ui.available_width(), 30.0],
-                egui::Button::new(format!("⟲  Gelöschte Seite {number} wiederherstellen")),
+                egui::Button::new(t!(
+                    "⟲  Gelöschte Seite {number} wiederherstellen",
+                    number = number
+                )),
             )
             .clicked()
         {
@@ -2122,17 +2150,17 @@ fn context_menu(ctx: &egui::Context, state: &mut UiState, actions: &mut Vec<UiAc
                 touch_friendly_spacing(ui);
                 ui.set_width(220.0);
                 if ui
-                    .add_sized([220.0, 36.0], egui::Button::new("📋  Einfügen"))
-                    .on_hover_text(
-                        "Bild, Text oder kopierte Objekte aus der Zwischenablage hier einfügen",
-                    )
+                    .add_sized([220.0, 36.0], egui::Button::new(t!("📋  Einfügen")))
+                    .on_hover_text(t!(
+                        "Bild, Text oder kopierte Objekte aus der Zwischenablage hier einfügen"
+                    ))
                     .clicked()
                 {
                     actions.push(UiAction::PasteAt(menu.page));
                     state.context_menu = None;
                 }
                 if ui
-                    .add_sized([220.0, 36.0], egui::Button::new("🖼  Bild aus Datei …"))
+                    .add_sized([220.0, 36.0], egui::Button::new(t!("🖼  Bild aus Datei …")))
                     .clicked()
                 {
                     state.open_image_picker();
@@ -2188,7 +2216,7 @@ fn space_preview(ctx: &egui::Context, state: &UiState, notebook: &Notebook) {
         egui::pos2(right.x - 8.0, moved.y.max(left.y) + 4.0),
         egui::Align2::RIGHT_TOP,
         if dy >= 0.0 {
-            format!("⏷ {mm:.0} mm Platz")
+            t!("⏷ {mm} mm Platz", mm = format!("{mm:.0}"))
         } else {
             format!("⏶ {:.0} mm", -mm)
         },
@@ -2382,19 +2410,21 @@ fn file_picker_dialog(ctx: &egui::Context, state: &mut UiState, actions: &mut Ve
     let picker_kind = picker.kind;
     let (title, header, file_icon, empty_hint, tip) = match picker.kind {
         PickerKind::Image => (
-            "Bild einfügen",
-            "🖼 Bild einfügen",
+            t!("Bild einfügen"),
+            t!("🖼 Bild einfügen"),
             "🖼",
-            "Keine Ordner oder Bilder (PNG, JPEG, GIF, WebP, BMP)",
-            "Tipp: Screenshots mit Strg+V einfügen oder Bilddateien ins Fenster ziehen.",
+            t!("Keine Ordner oder Bilder (PNG, JPEG, GIF, WebP, BMP)"),
+            t!("Tipp: Screenshots mit Strg+V einfügen oder Bilddateien ins Fenster ziehen."),
         ),
         PickerKind::Pdf => (
-            "PDF importieren",
-            "📄 PDF importieren",
+            t!("PDF importieren"),
+            t!("📄 PDF importieren"),
             "📄",
-            "Keine Ordner oder PDF-Dateien",
-            "Das PDF wird als neues Notizbuch angelegt, eine Seite je PDF-Seite. \
-             Beim Export liegen deine Notizen über den Originalseiten.",
+            t!("Keine Ordner oder PDF-Dateien"),
+            t!(
+                "Das PDF wird als neues Notizbuch angelegt, eine Seite je PDF-Seite. \
+             Beim Export liegen deine Notizen über den Originalseiten."
+            ),
         ),
     };
     dialog_window(title, state, false).show(ctx, |ui| {
@@ -2406,7 +2436,10 @@ fn file_picker_dialog(ctx: &egui::Context, state: &mut UiState, actions: &mut Ve
 
         ui.horizontal_wrapped(|ui| {
             for (label, path) in crate::file_picker::shortcuts() {
-                if ui.selectable_label(picker.dir == path, label).clicked() {
+                if ui
+                    .selectable_label(picker.dir == path, crate::i18n::tr(label))
+                    .clicked()
+                {
                     navigate = Some(path);
                 }
             }
@@ -2415,7 +2448,7 @@ fn file_picker_dialog(ctx: &egui::Context, state: &mut UiState, actions: &mut Ve
         ui.horizontal(|ui| {
             if ui
                 .add_enabled(picker.dir.parent().is_some(), egui::Button::new("⏶"))
-                .on_hover_text("Übergeordneter Ordner")
+                .on_hover_text(t!("Übergeordneter Ordner"))
                 .clicked()
             {
                 go_up = true;
@@ -2582,7 +2615,7 @@ fn close_button(ui: &mut egui::Ui) -> egui::Response {
         [36.0, 36.0],
         egui::Button::new(egui::RichText::new("🗙").size(16.0)).frame(false),
     )
-    .on_hover_text("Schließen (Esc)")
+    .on_hover_text(t!("Schließen (Esc)"))
 }
 
 /// Größere Knöpfe, Eingabefelder und Schieberegler für Finger und Stift.
@@ -2688,10 +2721,10 @@ pub fn render_ui(
                                 ui.spacing_mut().item_spacing = egui::vec2(0.0, 3.0);
 
                                 // --- Notizbücher ---
-                                let doc_tooltip = format!(
-                                    "Notizbücher verwalten (aktuell: {})",
-                                    if state.document_title.is_empty() {
-                                        "Notizbuch"
+                                let doc_tooltip = t!(
+                                    "Notizbücher verwalten (aktuell: {title})",
+                                    title = if state.document_title.is_empty() {
+                                        t!("Notizbuch")
                                     } else {
                                         state.document_title.as_str()
                                     }
@@ -2736,7 +2769,7 @@ pub fn render_ui(
                                     if state.is_pen_menu_open {
                                         ""
                                     } else {
-                                        "Stift (B/U/R für Farben) – erneut tippen für Farbe & Stärke"
+                                        t!("Stift (B/U/R für Farben) – erneut tippen für Farbe & Stärke")
                                     },
                                 );
                                 pen_btn_rect = Some(pen_resp.rect);
@@ -2768,7 +2801,7 @@ pub fn render_ui(
                                     if state.is_highlighter_menu_open {
                                         ""
                                     } else {
-                                        "Textmarker – erneut tippen für Farbe & Stärke"
+                                        t!("Textmarker – erneut tippen für Farbe & Stärke")
                                     },
                                 );
                                 high_btn_rect = Some(high_resp.rect);
@@ -2794,30 +2827,30 @@ pub fn render_ui(
                                     (
                                         ActiveTool::Shape,
                                         SidebarIcon::Glyph("📐"),
-                                        "Formen: Striche werden zu Linien, Rechtecken, Kreisen … (S/F)",
+                                        t!("Formen: Striche werden zu Linien, Rechtecken, Kreisen … (S/F)"),
                                     ),
                                     (
                                         ActiveTool::Eraser,
                                         SidebarIcon::Eraser,
-                                        "Radierer (E oder rechte Maustaste) – darunter: ganze Striche, Teilstrich oder nur Textmarker",
+                                        t!("Radierer (E oder rechte Maustaste) – darunter: ganze Striche, Teilstrich oder nur Textmarker"),
                                     ),
                                     (
                                         ActiveTool::Select,
                                         SidebarIcon::Lasso,
-                                        "Auswählen: verschieben, drehen, skalieren, kopieren (V)",
+                                        t!("Auswählen: verschieben, drehen, skalieren, kopieren (V)"),
                                     ),
                                     (
                                         ActiveTool::Space,
                                         SidebarIcon::Glyph("↕"),
-                                        "Platz schaffen: auf das Blatt tippen und nach unten ziehen – alles \
+                                        t!("Platz schaffen: auf das Blatt tippen und nach unten ziehen – alles \
                                          darunter rutscht mit, auch auf die folgenden Seiten; nach oben \
-                                         schließt leeren Platz",
+                                         schließt leeren Platz"),
                                     ),
                                     (
                                         ActiveTool::Text,
                                         SidebarIcon::Glyph("T"),
-                                        "Text (T): ins Blatt tippen und schreiben, vorhandenen Text \
-                                         antippen zum Ändern; Esc beendet",
+                                        t!("Text (T): ins Blatt tippen und schreiben, vorhandenen Text \
+                                         antippen zum Ändern; Esc beendet"),
                                     ),
                                 ] {
                                     if sidebar_button(
@@ -2847,8 +2880,8 @@ pub fn render_ui(
                                     state.ruler.is_some(),
                                     true,
                                     None,
-                                    "Lineal (L): Fläche ziehen = verschieben, Griff ⟳ = drehen; \
-                                     Striche an einer Kante werden gerade",
+                                    t!("Lineal (L): Fläche ziehen = verschieben, Griff ⟳ = drehen; \
+                                     Striche an einer Kante werden gerade"),
                                 )
                                 .clicked()
                                 {
@@ -2868,14 +2901,14 @@ pub fn render_ui(
                                         let preset = state.pen_presets[i];
                                         let selected = i == state.active_pen;
                                         let tooltip = if selected {
-                                            format!(
-                                                "Stift {} ({:.2} mm) – erneut tippen für Farbe & Stärke; \
+                                            t!(
+                                                "Stift {number} ({width} mm) – erneut tippen für Farbe & Stärke; \
                                                  Änderungen merkt sich der Stift",
-                                                i + 1,
-                                                preset.width_mm
+                                                number = i + 1,
+                                                width = format!("{:.2}", preset.width_mm)
                                             )
                                         } else {
-                                            format!("Stift {} ({:.2} mm)", i + 1, preset.width_mm)
+                                            t!("Stift {number} ({width} mm)", number = i + 1, width = format!("{:.2}", preset.width_mm))
                                         };
                                         let response =
                                             pen_preset_swatch(ui, preset, selected, &tooltip, swatch);
@@ -2926,13 +2959,13 @@ pub fn render_ui(
                                         };
                                         let tooltip = match tool {
                                             ActiveTool::Select => {
-                                                format!("Auswahl in der Farbe von Stift {} umfärben", i + 1)
+                                                t!("Auswahl in der Farbe von Stift {number} umfärben", number = i + 1)
                                             }
-                                            _ if selected => format!(
-                                                "Farbe {} – erneut tippen, um sie anzupassen",
-                                                i + 1
+                                            _ if selected => t!(
+                                                "Farbe {number} – erneut tippen, um sie anzupassen",
+                                                number = i + 1
                                             ),
-                                            _ => format!("Farbe {}", i + 1),
+                                            _ => t!("Farbe {number}", number = i + 1),
                                         };
                                         let response =
                                             color_circle_swatch(ui, color, selected, &tooltip, swatch);
@@ -2979,21 +3012,21 @@ pub fn render_ui(
                                     for (mode, icon, indicator, tooltip) in [
                                         (
                                             EraserMode::All,
-                                            SidebarIcon::Text("Alle"),
+                                            SidebarIcon::Text(t!("Alle")),
                                             None,
-                                            "Alle Striche radieren",
+                                            t!("Alle Striche radieren"),
                                         ),
                                         (
                                             EraserMode::Partial,
                                             SidebarIcon::Glyph("✂"),
                                             None,
-                                            "Teilstrich radieren – nur den überstrichenen Teil entfernen (Formen ganz)",
+                                            t!("Teilstrich radieren – nur den überstrichenen Teil entfernen (Formen ganz)"),
                                         ),
                                         (
                                             EraserMode::HighlighterOnly,
                                             SidebarIcon::Glyph("🖊"),
                                             Some(state.highlighter_color),
-                                            "Nur Textmarker radieren – Handschrift darunter bleibt",
+                                            t!("Nur Textmarker radieren – Handschrift darunter bleibt"),
                                         ),
                                     ] {
                                         if sidebar_button(
@@ -3022,10 +3055,10 @@ pub fn render_ui(
                                 if state.active_tool == ActiveTool::Select {
                                     sidebar_divider(ui, btn);
                                     for (icon, tooltip, action) in [
-                                        ("📋", "Kopieren (Strg+C)", UiAction::CopySelected),
-                                        ("📥", "Einfügen (Strg+V)", UiAction::PasteSelected),
-                                        ("🔄", "Um 90° drehen (R)", UiAction::RotateSelected),
-                                        ("🗑", "Löschen (Entf)", UiAction::DeleteSelected),
+                                        ("📋", t!("Kopieren (Strg+C)"), UiAction::CopySelected),
+                                        ("📥", t!("Einfügen (Strg+V)"), UiAction::PasteSelected),
+                                        ("🔄", t!("Um 90° drehen (R)"), UiAction::RotateSelected),
+                                        ("🗑", t!("Löschen (Entf)"), UiAction::DeleteSelected),
                                     ] {
                                         if sidebar_button(
                                             ui,
@@ -3060,7 +3093,7 @@ pub fn render_ui(
                                     false,
                                     history.can_undo(),
                                     None,
-                                    "Rückgängig (Strg+Z)",
+                                    t!("Rückgängig (Strg+Z)"),
                                 )
                                 .clicked()
                                 {
@@ -3073,7 +3106,7 @@ pub fn render_ui(
                                     false,
                                     history.can_redo(),
                                     None,
-                                    "Wiederholen (Strg+Y)",
+                                    t!("Wiederholen (Strg+Y)"),
                                 )
                                 .clicked()
                                 {
@@ -3094,7 +3127,7 @@ pub fn render_ui(
                                         false,
                                         notebook.current_page_index > 0,
                                         None,
-                                        "Vorherige Seite (Bild auf)",
+                                        t!("Vorherige Seite (Bild auf)"),
                                     )
                                     .clicked()
                                 {
@@ -3112,7 +3145,7 @@ pub fn render_ui(
                                     state.show_page_jump_popup,
                                     true,
                                     None,
-                                    "Seite wählen",
+                                    t!("Seite wählen"),
                                 );
                                 page_btn_rect = Some(page_resp.rect);
                                 if page_resp.clicked() {
@@ -3128,7 +3161,7 @@ pub fn render_ui(
                                         false,
                                         notebook.current_page_index + 1 < notebook.pages.len(),
                                         None,
-                                        "Nächste Seite (Bild ab)",
+                                        t!("Nächste Seite (Bild ab)"),
                                     )
                                     .clicked()
                                 {
@@ -3141,7 +3174,7 @@ pub fn render_ui(
                                     false,
                                     true,
                                     None,
-                                    "Neue Seite nach dieser einfügen",
+                                    t!("Neue Seite nach dieser einfügen"),
                                 )
                                 .clicked()
                                 {
@@ -3165,9 +3198,9 @@ pub fn render_ui(
                                     true,
                                     None,
                                     if update_available {
-                                        "Weitere Funktionen – Update verfügbar"
+                                        t!("Weitere Funktionen – Update verfügbar")
                                     } else {
-                                        "Weitere Funktionen: PDF, Hintergrund, Zoom, Einstellungen"
+                                        t!("Weitere Funktionen: PDF, Hintergrund, Zoom, Einstellungen")
                                     },
                                 );
                                 more_btn_rect = Some(more_resp.rect);
@@ -3219,10 +3252,13 @@ pub fn render_ui(
                         // Titelzeile mit Schließen-Button
                         ui.horizontal(|ui| {
                             ui.label(
-                                egui::RichText::new(format!("Stift {}", state.active_pen + 1))
-                                    .strong()
-                                    .color(egui::Color32::WHITE)
-                                    .size(12.5),
+                                egui::RichText::new(t!(
+                                    "Stift {number}",
+                                    number = state.active_pen + 1
+                                ))
+                                .strong()
+                                .color(egui::Color32::WHITE)
+                                .size(12.5),
                             );
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
@@ -3238,7 +3274,7 @@ pub fn render_ui(
 
                         // Zeile 1: Farbauswahl (Color Swatches)
                         ui.label(
-                            egui::RichText::new("FARBE")
+                            egui::RichText::new(t!("FARBE"))
                                 .size(10.5)
                                 .strong()
                                 .color(egui::Color32::from_gray(160)),
@@ -3257,7 +3293,7 @@ pub fn render_ui(
 
                         // Zeile 2: Dicken-Presets mit visueller Linien-Vorschau
                         ui.label(
-                            egui::RichText::new("DICKEN-PRESETS")
+                            egui::RichText::new(t!("DICKEN-PRESETS"))
                                 .size(10.5)
                                 .strong()
                                 .color(egui::Color32::from_gray(160)),
@@ -3280,7 +3316,7 @@ pub fn render_ui(
 
                         // Zeile 3: Feinjustierung (Slider)
                         ui.label(
-                            egui::RichText::new("STUFENLOSE STÄRKE")
+                            egui::RichText::new(t!("STUFENLOSE STÄRKE"))
                                 .size(10.5)
                                 .strong()
                                 .color(egui::Color32::from_gray(160)),
@@ -3319,9 +3355,9 @@ pub fn render_ui(
 
                         ui.horizontal(|ui| {
                             ui.label(
-                                egui::RichText::new(format!(
-                                    "Textmarker – Farbe {}",
-                                    state.active_highlighter + 1
+                                egui::RichText::new(t!(
+                                    "Textmarker – Farbe {number}",
+                                    number = state.active_highlighter + 1
                                 ))
                                 .strong()
                                 .color(egui::Color32::WHITE)
@@ -3341,7 +3377,7 @@ pub fn render_ui(
 
                         // Zeile 1: Farbauswahl
                         ui.label(
-                            egui::RichText::new("FARBE")
+                            egui::RichText::new(t!("FARBE"))
                                 .size(10.5)
                                 .strong()
                                 .color(egui::Color32::from_gray(160)),
@@ -3360,7 +3396,7 @@ pub fn render_ui(
 
                         // Zeile 2: Dicken-Presets
                         ui.label(
-                            egui::RichText::new("DICKEN-PRESETS")
+                            egui::RichText::new(t!("DICKEN-PRESETS"))
                                 .size(10.5)
                                 .strong()
                                 .color(egui::Color32::from_gray(160)),
@@ -3390,7 +3426,7 @@ pub fn render_ui(
 
                         // Zeile 3: Slider
                         ui.label(
-                            egui::RichText::new("STUFENLOSE STÄRKE")
+                            egui::RichText::new(t!("STUFENLOSE STÄRKE"))
                                 .size(10.5)
                                 .strong()
                                 .color(egui::Color32::from_gray(160)),
@@ -3433,9 +3469,9 @@ pub fn render_ui(
                         touch_friendly_spacing(ui);
                         ui.horizontal(|ui| {
                             ui.label(
-                                egui::RichText::new(format!(
-                                    "Textfarbe {}",
-                                    state.active_text_color + 1
+                                egui::RichText::new(t!(
+                                    "Textfarbe {number}",
+                                    number = state.active_text_color + 1
                                 ))
                                 .strong()
                                 .color(egui::Color32::WHITE)
@@ -3506,7 +3542,7 @@ pub fn render_ui(
 
                             ui.horizontal(|ui| {
                                 ui.label(
-                                    egui::RichText::new("Weitere Funktionen")
+                                    egui::RichText::new(t!("Weitere Funktionen"))
                                         .strong()
                                         .color(egui::Color32::WHITE)
                                         .size(12.5),
@@ -3526,20 +3562,20 @@ pub fn render_ui(
                             egui::ScrollArea::vertical()
                                 .max_height((ctx.screen_rect().height() - 90.0).max(150.0))
                                 .show(ui, |ui| {
-                            section(ui, "DOKUMENT");
+                            section(ui, t!("DOKUMENT"));
                             if ui
-                                .add_sized([ui.available_width(), 30.0], egui::Button::new("📄  Als PDF exportieren (Strg+E)"))
+                                .add_sized([ui.available_width(), 30.0], egui::Button::new(t!("📄  Als PDF exportieren (Strg+E)")))
                                 .clicked()
                             {
                                 actions.push(UiAction::ExportPdf);
                                 state.is_more_menu_open = false;
                             }
                             ui.horizontal(|ui| {
-                                ui.label(egui::RichText::new("Seite als").color(egui::Color32::from_gray(190)));
+                                ui.label(egui::RichText::new(t!("Seite als")).color(egui::Color32::from_gray(190)));
                                 for (label, kind, hint) in [
-                                    ("PNG", PageExportKind::Png, "Bild mit Papier und Raster (200 dpi)"),
-                                    ("PNG transp.", PageExportKind::PngTransparent, "Bild mit transparentem Hintergrund, nur Inhalt"),
-                                    ("SVG", PageExportKind::Svg, "Vektorgrafik, z. B. für Inkscape oder LaTeX"),
+                                    ("PNG", PageExportKind::Png, t!("Bild mit Papier und Raster (200 dpi)")),
+                                    ("PNG transp.", PageExportKind::PngTransparent, t!("Bild mit transparentem Hintergrund, nur Inhalt")),
+                                    ("SVG", PageExportKind::Svg, t!("Vektorgrafik, z. B. für Inkscape oder LaTeX")),
                                 ] {
                                     if ui.button(label).on_hover_text(hint).clicked() {
                                         actions.push(UiAction::ExportPage(kind));
@@ -3548,39 +3584,39 @@ pub fn render_ui(
                                 }
                             });
                             if ui
-                                .add_sized([ui.available_width(), 30.0], egui::Button::new("➕  Neue Seite einfügen"))
-                                .on_hover_text("Leere Seite direkt nach der aktuellen Seite")
+                                .add_sized([ui.available_width(), 30.0], egui::Button::new(t!("➕  Neue Seite einfügen")))
+                                .on_hover_text(t!("Leere Seite direkt nach der aktuellen Seite"))
                                 .clicked()
                             {
                                 actions.push(UiAction::AddPage);
                             }
                             delete_page_buttons(ui, state, notebook, &mut actions);
                             if ui
-                                .add_sized([ui.available_width(), 30.0], egui::Button::new("🖼  Bild einfügen … (Strg+I)"))
-                                .on_hover_text("Auch per Strg+V aus der Zwischenablage oder durch Ziehen einer Bilddatei ins Fenster")
+                                .add_sized([ui.available_width(), 30.0], egui::Button::new(t!("🖼  Bild einfügen … (Strg+I)")))
+                                .on_hover_text(t!("Auch per Strg+V aus der Zwischenablage oder durch Ziehen einer Bilddatei ins Fenster"))
                                 .clicked()
                             {
                                 state.open_image_picker();
                             }
                             if ui
-                                .add_sized([ui.available_width(), 30.0], egui::Button::new("📄  PDF importieren …"))
-                                .on_hover_text("Vorlesungsfolien, Übungsblätter oder Formulare als neues Notizbuch öffnen und darauf schreiben")
+                                .add_sized([ui.available_width(), 30.0], egui::Button::new(t!("📄  PDF importieren …")))
+                                .on_hover_text(t!("Vorlesungsfolien, Übungsblätter oder Formulare als neues Notizbuch öffnen und darauf schreiben"))
                                 .clicked()
                             {
                                 state.open_pdf_picker();
                             }
 
-                            section(ui, "HINTERGRUND DIESER SEITE");
+                            section(ui, t!("HINTERGRUND DIESER SEITE"));
                             let current_bg = notebook.current_page().background;
                             egui::Grid::new("more_menu_backgrounds")
                                 .num_columns(2)
                                 .spacing([6.0, 6.0])
                                 .show(ui, |ui| {
                                     for (i, (bg, label)) in [
-                                        (PageBackground::Grid5mm, "Kariert"),
-                                        (PageBackground::Lined, "Liniert"),
-                                        (PageBackground::DotGrid, "Punkte"),
-                                        (PageBackground::Blank, "Blanko"),
+                                        (PageBackground::Grid5mm, t!("Kariert")),
+                                        (PageBackground::Lined, t!("Liniert")),
+                                        (PageBackground::DotGrid, t!("Punkte")),
+                                        (PageBackground::Blank, t!("Blanko")),
                                     ]
                                     .into_iter()
                                     .enumerate()
@@ -3600,7 +3636,7 @@ pub fn render_ui(
                                     }
                                 });
 
-                            section(ui, "PAPIERFARBE (NUR ANZEIGE)");
+                            section(ui, t!("PAPIERFARBE (NUR ANZEIGE)"));
                             let mut paper_changed = false;
                             egui::Grid::new("more_menu_paper")
                                 .num_columns(2)
@@ -3624,12 +3660,12 @@ pub fn render_ui(
                                     state.paper_theme.is_dark(),
                                     egui::Checkbox::new(
                                         &mut state.adapt_ink_colors,
-                                        "Dunkle Stiftfarben aufhellen",
+                                        t!("Dunkle Stiftfarben aufhellen"),
                                     ),
                                 )
                                 .on_hover_text(
-                                    "Schwarz wird Weiß, Dunkelblau wird Hellblau. Gespeichert und \
-                                     als PDF exportiert werden immer die Originalfarben.",
+                                    t!("Schwarz wird Weiß, Dunkelblau wird Hellblau. Gespeichert und \
+                                     als PDF exportiert werden immer die Originalfarben."),
                                 )
                                 .changed()
                             {
@@ -3642,7 +3678,7 @@ pub fn render_ui(
                                 });
                             }
 
-                            section(ui, "KAROS, LINIEN UND PUNKTE");
+                            section(ui, t!("KAROS, LINIEN UND PUNKTE"));
                             ui.horizontal_wrapped(|ui| {
                                 ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
                                 for pattern in PatternColor::ALL {
@@ -3661,24 +3697,24 @@ pub fn render_ui(
                                 }
                             });
 
-                            section(ui, "ANSICHT");
+                            section(ui, t!("ANSICHT"));
                             if ui
-                                .checkbox(&mut state.continuous_scroll, "Seiten durchgehend scrollen")
+                                .checkbox(&mut state.continuous_scroll, t!("Seiten durchgehend scrollen"))
                                 .on_hover_text(
-                                    "An: Seiten hängen untereinander, Mausrad und Finger scrollen \
+                                    t!("An: Seiten hängen untereinander, Mausrad und Finger scrollen \
                                      (Strg+Mausrad zoomt); wer unten auf der letzten Seite schreibt, \
-                                     bekommt automatisch eine neue Seite.\nAus: Seite für Seite blättern.",
+                                     bekommt automatisch eine neue Seite.\nAus: Seite für Seite blättern."),
                                 )
                                 .changed()
                             {
                                 actions.push(UiAction::SetContinuousScroll(state.continuous_scroll));
                             }
 
-                            section(ui, "ZOOM");
+                            section(ui, t!("ZOOM"));
                             ui.horizontal(|ui| {
                                 if ui
                                     .add_enabled(state.current_zoom > 0.25, egui::Button::new("🔍 -"))
-                                    .on_hover_text("Herauszoomen (Strg+-)")
+                                    .on_hover_text(t!("Herauszoomen (Strg+-)"))
                                     .clicked()
                                 {
                                     actions.push(UiAction::ZoomOut);
@@ -3686,27 +3722,27 @@ pub fn render_ui(
                                 let pct = (state.current_zoom * 100.0).round() as u32;
                                 if ui
                                     .button(format!("{pct} %"))
-                                    .on_hover_text("Zurücksetzen (Strg+0)")
+                                    .on_hover_text(t!("Zurücksetzen (Strg+0)"))
                                     .clicked()
                                 {
                                     actions.push(UiAction::ResetZoom);
                                 }
                                 if ui
                                     .add_enabled(state.current_zoom < 5.0, egui::Button::new("🔍 +"))
-                                    .on_hover_text("Heranzoomen (Strg++)")
+                                    .on_hover_text(t!("Heranzoomen (Strg++)"))
                                     .clicked()
                                 {
                                     actions.push(UiAction::ZoomIn);
                                 }
                             });
 
-                            section(ui, "EINGABE");
+                            section(ui, t!("EINGABE"));
                             ui.checkbox(
                                 &mut state.touch_draw_enabled,
-                                "Mit dem Finger zeichnen",
+                                t!("Mit dem Finger zeichnen"),
                             )
                             .on_hover_text(
-                                "Aus: ein Finger verschiebt, zwei Finger zoomen (empfohlen mit Stift).\nAn: ein Finger zeichnet.",
+                                t!("Aus: ein Finger verschiebt, zwei Finger zoomen (empfohlen mit Stift).\nAn: ein Finger zeichnet."),
                             );
                             if let Some(curve) = pressure_curve_editor(ui, state) {
                                 actions.push(UiAction::SavePressureCurve(curve));
@@ -3715,10 +3751,10 @@ pub fn render_ui(
                                 actions.push(UiAction::SaveStylusButtons);
                             }
 
-                            section(ui, "WERKZEUGLEISTE");
+                            section(ui, t!("WERKZEUGLEISTE"));
                             ui.horizontal(|ui| {
                                 for (side, label) in
-                                    [(SidebarSide::Left, "Links"), (SidebarSide::Right, "Rechts")]
+                                    [(SidebarSide::Left, t!("Links")), (SidebarSide::Right, t!("Rechts"))]
                                 {
                                     if ui
                                         .add_sized(
@@ -3737,7 +3773,34 @@ pub fn render_ui(
                                 }
                             });
 
-                            section(ui, "STATUS");
+                            // Zweisprachig, damit man die Auswahl in jeder Sprache findet
+                            section(ui, "SPRACHE / LANGUAGE");
+                            ui.horizontal(|ui| {
+                                let choices = [
+                                    (None, t!("System")),
+                                    (Some(crate::i18n::Language::German), "Deutsch"),
+                                    (Some(crate::i18n::Language::English), "English"),
+                                ];
+                                for (language, label) in choices {
+                                    if ui
+                                        .add_sized(
+                                            [75.0, 28.0],
+                                            egui::SelectableLabel::new(
+                                                state.language == language,
+                                                label,
+                                            ),
+                                        )
+                                        .on_hover_text(t!("Sprache der Oberfläche"))
+                                        .clicked()
+                                        && state.language != language
+                                    {
+                                        state.language = language;
+                                        actions.push(UiAction::SetLanguage(language));
+                                    }
+                                }
+                            });
+
+                            section(ui, t!("STATUS"));
                             let (dot_color, status_text) = autosave_status_style(autosave_status);
                             ui.horizontal(|ui| {
                                 let (dot_rect, _) = ui.allocate_exact_size(
@@ -3749,18 +3812,18 @@ pub fn render_ui(
                             });
                             let update_label = match updater.status() {
                                 crate::updater::UpdaterStatus::UpdateAvailable(rel) => {
-                                    format!("🚀  Update {} verfügbar", rel.tag_name)
+                                    t!("🚀  Update {version} verfügbar", version = rel.tag_name)
                                 }
                                 crate::updater::UpdaterStatus::Downloading { percent, .. } => {
-                                    format!("⏳  Update lädt … {:.0} %", percent * 100.0)
+                                    t!("⏳  Update lädt … {percent} %", percent = format!("{:.0}", percent * 100.0))
                                 }
                                 crate::updater::UpdaterStatus::DownloadFinished { .. } => {
-                                    "✔  Update bereit".to_string()
+                                    t!("✔  Update bereit").to_string()
                                 }
                                 crate::updater::UpdaterStatus::Checking => {
-                                    "🔄  Suche nach Updates …".to_string()
+                                    t!("🔄  Suche nach Updates …").to_string()
                                 }
-                                _ => "🔄  Updates & Versionen".to_string(),
+                                _ => t!("🔄  Updates & Versionen").to_string(),
                             };
                             if ui
                                 .add_sized([ui.available_width(), 30.0], egui::Button::new(update_label))
@@ -3793,7 +3856,7 @@ pub fn render_ui(
                             // Breite = Kachelraster; sonst nimmt die Kopfzeile die ganze Fensterbreite ein
                             ui.set_width(PAGE_PICKER_COLUMNS as f32 * (PAGE_TILE.x + 8.0) - 8.0);
                             touch_friendly_spacing(ui);
-                            let title = format!("Seiten ({})", notebook.pages.len());
+                            let title = t!("Seiten ({count})", count = notebook.pages.len());
                             if dialog_header(ui, &title, true) {
                                 state.show_page_jump_popup = false;
                             }
@@ -3804,9 +3867,9 @@ pub fn render_ui(
                                 state.page_title_input = current.title.clone().unwrap_or_default();
                             }
                             ui.label(
-                                egui::RichText::new(format!(
-                                    "TITEL VON SEITE {}",
-                                    notebook.current_page_index + 1
+                                egui::RichText::new(t!(
+                                    "TITEL VON SEITE {number}",
+                                    number = notebook.current_page_index + 1
                                 ))
                                 .size(10.5)
                                 .strong()
@@ -3814,7 +3877,7 @@ pub fn render_ui(
                             );
                             let field = ui.add(
                                 egui::TextEdit::singleline(&mut state.page_title_input)
-                                    .hint_text("z. B. Kapitel 2 – Integrale")
+                                    .hint_text(t!("z. B. Kapitel 2 – Integrale"))
                                     .margin(egui::vec2(8.0, 8.0))
                                     .desired_width(f32::INFINITY),
                             );
@@ -3827,7 +3890,8 @@ pub fn render_ui(
                             }
                             ui.add_space(2.0);
                             ui.horizontal(|ui| {
-                                for (list, label) in [(false, "🖼  Kacheln"), (true, "📑  Inhalt")]
+                                for (list, label) in
+                                    [(false, t!("🖼  Kacheln")), (true, t!("📑  Inhalt"))]
                                 {
                                     if ui
                                         .add_sized(
@@ -3894,9 +3958,9 @@ pub fn render_ui(
                             if ui
                                 .add_sized(
                                     [ui.available_width(), 36.0],
-                                    egui::Button::new("➕  Neue Seite einfügen"),
+                                    egui::Button::new(t!("➕  Neue Seite einfügen")),
                                 )
-                                .on_hover_text("Leere Seite direkt nach der aktuellen Seite")
+                                .on_hover_text(t!("Leere Seite direkt nach der aktuellen Seite"))
                                 .clicked()
                             {
                                 actions.push(UiAction::AddPage);
@@ -3938,11 +4002,11 @@ pub fn render_ui(
 
     // 3b. Dokumenten-Manager (Notizbücher wechseln, anlegen, umbenennen, löschen)
     if state.is_document_menu_open {
-        let doc_win = dialog_window("Dokumenten-Manager", state, false)
+        let doc_win = dialog_window(t!("Dokumenten-Manager"), state, false)
             .show(ctx, |ui| {
                 ui.set_width(420.0);
                 touch_friendly_spacing(ui);
-                if dialog_header(ui, "📚 Notizbücher", true) {
+                if dialog_header(ui, t!("📚 Notizbücher"), true) {
                     state.is_document_menu_open = false;
                 }
 
@@ -3960,16 +4024,16 @@ pub fn render_ui(
                 ui.horizontal(|ui| {
                     let text_edit = ui.add(
                         egui::TextEdit::singleline(&mut state.new_notebook_title_input)
-                            .hint_text("Name …")
+                            .hint_text(t!("Name …"))
                             .margin(egui::vec2(8.0, 8.0))
                             .desired_width(190.0),
                     );
                     let create_btn = ui
-                        .button(egui::RichText::new("➕ Notizbuch").strong())
-                        .on_hover_text("Neues Notizbuch in diesem Ordner anlegen und öffnen");
+                        .button(egui::RichText::new(t!("➕ Notizbuch")).strong())
+                        .on_hover_text(t!("Neues Notizbuch in diesem Ordner anlegen und öffnen"));
                     let folder_btn = ui
-                        .button(egui::RichText::new("📁 Ordner").strong())
-                        .on_hover_text("Neuen Ordner hier anlegen (z. B. Semester oder Fach)");
+                        .button(egui::RichText::new(t!("📁 Ordner")).strong())
+                        .on_hover_text(t!("Neuen Ordner hier anlegen (z. B. Semester oder Fach)"));
                     let title = state.new_notebook_title_input.trim().to_string();
                     if !title.is_empty() {
                         if create_btn.clicked()
@@ -4022,7 +4086,7 @@ pub fn render_ui(
                     }
                     if subfolders.is_empty() && summaries.is_empty() {
                         ui.label(
-                            egui::RichText::new("Dieser Ordner ist leer.")
+                            egui::RichText::new(t!("Dieser Ordner ist leer."))
                                 .color(egui::Color32::from_gray(150)),
                         );
                     }
@@ -4080,15 +4144,15 @@ pub fn render_ui(
                                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                                 if summary.status == crate::storage::NotebookStatus::Damaged {
                                                     if ui
-                                                        .button(egui::RichText::new("🔄 Backup").size(13.0).color(egui::Color32::from_rgb(100, 200, 255)))
-                                                        .on_hover_text("Aus manifest.json.bak wiederherstellen")
+                                                        .button(egui::RichText::new(t!("🔄 Backup")).size(13.0).color(egui::Color32::from_rgb(100, 200, 255)))
+                                                        .on_hover_text(t!("Aus manifest.json.bak wiederherstellen"))
                                                         .clicked()
                                                     {
                                                         actions.push(UiAction::RestoreNotebookBackup(summary.id.clone()));
                                                     }
                                                     if ui
-                                                        .button(egui::RichText::new("📁 Ordner").size(13.0))
-                                                        .on_hover_text("Pfad in Statusleiste anzeigen")
+                                                        .button(egui::RichText::new(t!("📁 Ordner")).size(13.0))
+                                                        .on_hover_text(t!("Pfad in Statusleiste anzeigen"))
                                                         .clicked()
                                                     {
                                                         actions.push(UiAction::OpenNotebookFolder(summary.id.clone()));
@@ -4097,7 +4161,7 @@ pub fn render_ui(
                                                     if state.available_notebooks.len() > 1
                                                         && ui
                                                             .button(egui::RichText::new("🗑").size(16.0).color(egui::Color32::from_rgb(255, 120, 120)))
-                                                            .on_hover_text("Notizbuch in Papierkorb verschieben")
+                                                            .on_hover_text(t!("Notizbuch in Papierkorb verschieben"))
                                                             .clicked()
                                                     {
                                                         actions.push(UiAction::DeleteNotebook(summary.id.clone()));
@@ -4105,14 +4169,14 @@ pub fn render_ui(
 
                                                     if ui
                                                         .button(egui::RichText::new("📂").size(16.0))
-                                                        .on_hover_text("In einen anderen Ordner verschieben")
+                                                        .on_hover_text(t!("In einen anderen Ordner verschieben"))
                                                         .clicked()
                                                     {
                                                         state.moving = Some(MoveSubject::Notebook(summary.id.clone()));
                                                     }
 
                                                     if ui.button(egui::RichText::new("✏").size(16.0))
-                                                        .on_hover_text("Titel umbenennen")
+                                                        .on_hover_text(t!("Titel umbenennen"))
                                                         .clicked()
                                                     {
                                                         state.renaming_notebook_id = Some(summary.id.clone());
@@ -4132,15 +4196,15 @@ pub fn render_ui(
                                                             .color(egui::Color32::WHITE),
                                                     );
                                                     if summary.status == crate::storage::NotebookStatus::Damaged {
-                                                        ui.colored_label(egui::Color32::from_rgb(255, 100, 100), "⚠ Beschädigt");
+                                                        ui.colored_label(egui::Color32::from_rgb(255, 100, 100), t!("⚠ Beschädigt"));
                                                     } else if is_current {
-                                                        ui.colored_label(egui::Color32::from_rgb(46, 204, 113), "⚫ Aktiv");
+                                                        ui.colored_label(egui::Color32::from_rgb(46, 204, 113), t!("⚫ Aktiv"));
                                                     }
                                                 });
                                                 let subtext = if let Some(ref err) = summary.error {
-                                                    format!("Fehler: {err}")
+                                                    t!("Fehler: {err}", err = err)
                                                 } else {
-                                                    format!("{} Seite(n)", summary.page_count)
+                                                    t!("{count} Seite(n)", count = summary.page_count)
                                                 };
                                                 ui.label(
                                                     egui::RichText::new(subtext)
@@ -4175,12 +4239,12 @@ pub fn render_ui(
                     ui.add_space(4.0);
                     ui.horizontal(|ui| {
                         ui.label(
-                            egui::RichText::new(format!("'{title}' gelöscht"))
+                            egui::RichText::new(t!("'{title}' gelöscht", title = title))
                                 .size(11.0)
                                 .color(egui::Color32::from_rgb(255, 180, 100)),
                         );
                         if ui
-                            .button(egui::RichText::new("↩ Rückgängig").size(13.0).color(egui::Color32::from_rgb(100, 200, 255)))
+                            .button(egui::RichText::new(t!("↩ Rückgängig")).size(13.0).color(egui::Color32::from_rgb(100, 200, 255)))
                             .clicked()
                         {
                             actions.push(UiAction::UndoDeleteNotebook);
@@ -4200,11 +4264,11 @@ pub fn render_ui(
 
     // 3c. Release- & Update-Center (Gitea Releases)
     if state.is_update_dialog_open {
-        let win = dialog_window("Release- & Update-Center", state, false)
+        let win = dialog_window(t!("Release- & Update-Center"), state, false)
             .show(ctx, |ui| {
                 ui.set_width(460.0);
                 touch_friendly_spacing(ui);
-                if dialog_header(ui, "🚀 Updates & Versionen", true) {
+                if dialog_header(ui, t!("🚀 Updates & Versionen"), true) {
                     state.is_update_dialog_open = false;
                 }
 
@@ -4212,13 +4276,13 @@ pub fn render_ui(
                 let current_ver = env!("CARGO_PKG_VERSION");
                 let runtime_name = updater.runtime().display_name();
                 ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("Aktuelle Version:").color(egui::Color32::from_gray(180)));
+                    ui.label(egui::RichText::new(t!("Aktuelle Version:")).color(egui::Color32::from_gray(180)));
                     ui.label(egui::RichText::new(format!("v{}", current_ver)).strong().color(egui::Color32::WHITE));
                     ui.label(egui::RichText::new(format!("({})", runtime_name)).color(egui::Color32::from_gray(150)));
                 });
 
                 ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("Server:").color(egui::Color32::from_gray(180)));
+                    ui.label(egui::RichText::new(t!("Server:")).color(egui::Color32::from_gray(180)));
                     ui.label(egui::RichText::new(format!("{}/{}/{}", updater.config().server_url, updater.config().repo_owner, updater.config().repo_name)).color(egui::Color32::from_gray(210)));
                 });
 
@@ -4227,7 +4291,7 @@ pub fn render_ui(
                 // Update-Prüfung auslösen
                 let is_busy = matches!(updater.status(), crate::updater::UpdaterStatus::Checking | crate::updater::UpdaterStatus::Downloading { .. });
                 ui.horizontal(|ui| {
-                    if ui.add_enabled(!is_busy, egui::Button::new(egui::RichText::new("🔄 Nach Updates suchen").strong())).clicked() {
+                    if ui.add_enabled(!is_busy, egui::Button::new(egui::RichText::new(t!("🔄 Nach Updates suchen")).strong())).clicked() {
                         actions.push(UiAction::CheckForUpdates);
                     }
                 });
@@ -4240,21 +4304,21 @@ pub fn render_ui(
                 match updater.status() {
                     crate::updater::UpdaterStatus::Idle => {
                         ui.label(
-                            egui::RichText::new("Klicke auf 'Nach Updates suchen', um die neuesten Releases vom Gitea-Server abzufragen.")
+                            egui::RichText::new(t!("Klicke auf 'Nach Updates suchen', um die neuesten Releases vom Gitea-Server abzufragen."))
                                 .color(egui::Color32::from_gray(170)),
                         );
                     }
                     crate::updater::UpdaterStatus::Checking => {
                         ui.horizontal(|ui| {
                             ui.spinner();
-                            ui.label(egui::RichText::new("Prüfe Gitea-Releases...").color(egui::Color32::WHITE));
+                            ui.label(egui::RichText::new(t!("Prüfe Gitea-Releases...")).color(egui::Color32::WHITE));
                         });
                     }
                     crate::updater::UpdaterStatus::UpToDate { current_version } => {
                         ui.horizontal(|ui| {
                             ui.colored_label(egui::Color32::from_rgb(46, 204, 113), "✔");
                             ui.label(
-                                egui::RichText::new(format!("ink-notes ist auf dem neuesten Stand (v{}).", current_version))
+                                egui::RichText::new(t!("ink-notes ist auf dem neuesten Stand (v{version}).", version = current_version))
                                     .color(egui::Color32::from_rgb(46, 204, 113))
                                     .strong(),
                             );
@@ -4265,7 +4329,7 @@ pub fn render_ui(
                             ui.horizontal(|ui| {
                                 ui.colored_label(egui::Color32::from_rgb(231, 76, 60), "⚠");
                                 ui.label(
-                                    egui::RichText::new("Abfrage fehlgeschlagen:")
+                                    egui::RichText::new(t!("Abfrage fehlgeschlagen:"))
                                         .color(egui::Color32::from_rgb(231, 76, 60))
                                         .strong(),
                                 );
@@ -4278,7 +4342,7 @@ pub fn render_ui(
                             );
                             ui.add_space(4.0);
                             ui.label(
-                                egui::RichText::new("Hinweis: Falls das Repository privat ist, unten ein Personal Access Token eintragen.")
+                                egui::RichText::new(t!("Hinweis: Falls das Repository privat ist, unten ein Personal Access Token eintragen."))
                                     .size(11.0)
                                     .italics()
                                     .color(egui::Color32::from_gray(140)),
@@ -4290,7 +4354,7 @@ pub fn render_ui(
                             ui.horizontal(|ui| {
                                 ui.colored_label(egui::Color32::from_rgb(46, 204, 113), "⚫");
                                 ui.label(
-                                    egui::RichText::new(format!("Neue Version verfügbar: {}", release.tag_name))
+                                    egui::RichText::new(t!("Neue Version verfügbar: {version}", version = release.tag_name))
                                         .strong()
                                         .size(14.0)
                                         .color(egui::Color32::WHITE),
@@ -4303,14 +4367,14 @@ pub fn render_ui(
 
                             if !release.body.is_empty() {
                                 ui.add_space(6.0);
-                                ui.label(egui::RichText::new("Änderungen:").strong().size(11.5).color(egui::Color32::from_gray(170)));
+                                ui.label(egui::RichText::new(t!("Änderungen:")).strong().size(11.5).color(egui::Color32::from_gray(170)));
                                 egui::ScrollArea::vertical().max_height(100.0).show(ui, |ui| {
                                     ui.label(egui::RichText::new(&release.body).size(11.5).color(egui::Color32::from_gray(210)));
                                 });
                             }
 
                             ui.add_space(10.0);
-                            ui.label(egui::RichText::new("VERFÜGBARE ARTEFAKTE:").size(10.5).strong().color(egui::Color32::from_gray(150)));
+                            ui.label(egui::RichText::new(t!("VERFÜGBARE ARTEFAKTE:")).size(10.5).strong().color(egui::Color32::from_gray(150)));
                             ui.add_space(4.0);
 
                             for asset in &release.assets {
@@ -4341,14 +4405,14 @@ pub fn render_ui(
                                     }
 
                                     if is_recommended {
-                                        ui.label(egui::RichText::new("(Empfohlen für dieses System)").size(10.5).color(egui::Color32::from_rgb(46, 204, 113)));
+                                        ui.label(egui::RichText::new(t!("(Empfohlen für dieses System)")).size(10.5).color(egui::Color32::from_rgb(46, 204, 113)));
                                     }
                                 });
                             }
 
                             ui.add_space(8.0);
                             if !release.html_url.is_empty()
-                                && ui.button(egui::RichText::new("🌐 Release auf Gitea öffnen").size(12.0)).clicked()
+                                && ui.button(egui::RichText::new(t!("🌐 Release auf Gitea öffnen")).size(12.0)).clicked()
                             {
                                 actions.push(UiAction::OpenUrlInBrowser(release.html_url.clone()));
                             }
@@ -4356,7 +4420,7 @@ pub fn render_ui(
                     }
                     crate::updater::UpdaterStatus::Downloading { asset_name, percent } => {
                         ui.vertical(|ui| {
-                            ui.label(egui::RichText::new(format!("Lade '{}' herunter...", asset_name)).strong());
+                            ui.label(egui::RichText::new(t!("Lade '{name}' herunter...", name = asset_name)).strong());
                             ui.add_space(6.0);
                             ui.add(egui::ProgressBar::new(*percent).show_percentage());
                         });
@@ -4366,30 +4430,30 @@ pub fn render_ui(
                             ui.horizontal(|ui| {
                                 ui.colored_label(egui::Color32::from_rgb(46, 204, 113), "✔");
                                 ui.label(
-                                    egui::RichText::new(format!("'{}' erfolgreich heruntergeladen!", asset_name))
+                                    egui::RichText::new(t!("'{name}' erfolgreich heruntergeladen!", name = asset_name))
                                         .strong()
                                         .color(egui::Color32::from_rgb(46, 204, 113)),
                                 );
                             });
                             ui.add_space(4.0);
                             ui.label(
-                                egui::RichText::new(format!("Gespeichert in: {}", file_path.display()))
+                                egui::RichText::new(t!("Gespeichert in: {path}", path = file_path.display()))
                                     .size(11.0)
                                     .color(egui::Color32::from_gray(170)),
                             );
                             ui.add_space(8.0);
 
                             let action_label = match updater.runtime() {
-                                crate::updater::RuntimeEnvironment::AppImage { .. } => "🚀 AppImage aktualisieren & ausführen",
-                                crate::updater::RuntimeEnvironment::DebPackage { .. } => "📦 Paket mit Software-Center öffnen / installieren",
-                                crate::updater::RuntimeEnvironment::PortableOrDev { .. } => "📂 Im Dateimanager anzeigen",
+                                crate::updater::RuntimeEnvironment::AppImage { .. } => t!("🚀 AppImage aktualisieren & ausführen"),
+                                crate::updater::RuntimeEnvironment::DebPackage { .. } => t!("📦 Paket mit Software-Center öffnen / installieren"),
+                                crate::updater::RuntimeEnvironment::PortableOrDev { .. } => t!("📂 Im Dateimanager anzeigen"),
                             };
 
                             ui.horizontal(|ui| {
                                 if ui.button(egui::RichText::new(action_label).strong()).clicked() {
                                     actions.push(UiAction::InstallOrOpenUpdate(file_path.clone()));
                                 }
-                                if ui.button("📂 Ordner öffnen").clicked() {
+                                if ui.button(t!("📂 Ordner öffnen")).clicked() {
                                     if let Some(parent) = file_path.parent() {
                                         actions.push(UiAction::OpenUrlInBrowser(parent.to_string_lossy().to_string()));
                                     }
@@ -4404,19 +4468,19 @@ pub fn render_ui(
                 ui.add_space(4.0);
 
                 // Erweiterte Konfiguration (Collapsible)
-                egui::CollapsingHeader::new(egui::RichText::new("⚙ Erweiterte Server-Einstellungen").size(11.5).color(egui::Color32::from_gray(160)))
+                egui::CollapsingHeader::new(egui::RichText::new(t!("⚙ Erweiterte Server-Einstellungen")).size(11.5).color(egui::Color32::from_gray(160)))
                     .default_open(false)
                     .show(ui, |ui| {
                         ui.add_space(4.0);
-                        ui.label(egui::RichText::new("Gitea Server-URL:").size(11.0));
+                        ui.label(egui::RichText::new(t!("Gitea Server-URL:")).size(11.0));
                         ui.add(egui::TextEdit::singleline(&mut state.updater_server_url_input).desired_width(380.0));
 
                         ui.add_space(4.0);
-                        ui.label(egui::RichText::new("Personal Access Token (optional für private Repos):").size(11.0));
+                        ui.label(egui::RichText::new(t!("Personal Access Token (optional für private Repos):")).size(11.0));
                         ui.add(egui::TextEdit::singleline(&mut state.updater_token_input).password(true).desired_width(380.0));
 
                         ui.add_space(6.0);
-                        if ui.button(egui::RichText::new("💾 Einstellungen speichern").size(11.5)).clicked() {
+                        if ui.button(egui::RichText::new(t!("💾 Einstellungen speichern")).size(11.5)).clicked() {
                             let token = if state.updater_token_input.trim().is_empty() {
                                 None
                             } else {
@@ -4485,16 +4549,16 @@ pub fn render_ui(
 
     // 5. Nicht-wegklickbare Warnung bei Ladefehlern / Quarantäne (Block 1)
     if let Some(warning) = notebook.load_warnings.get(&notebook.current_page().id) {
-        dialog_window("⚠ Datenintegritäts-Warnung", state, true)
+        dialog_window(t!("⚠ Datenintegritäts-Warnung"), state, true)
             .show(ctx, |ui| {
                 ui.set_width(420.0);
                 touch_friendly_spacing(ui);
                 ui.horizontal(|ui| {
                     ui.colored_label(egui::Color32::from_rgb(255, 80, 80), "⚠");
                     ui.label(
-                        egui::RichText::new(format!(
-                            "Seite {} konnte nicht fehlerfrei geladen werden!",
-                            warning.page_id
+                        egui::RichText::new(t!(
+                            "Seite {id} konnte nicht fehlerfrei geladen werden!",
+                            id = warning.page_id
                         ))
                         .strong()
                         .size(15.0)
@@ -4503,14 +4567,14 @@ pub fn render_ui(
                 });
                 ui.add_space(8.0);
                 ui.label(
-                    egui::RichText::new(format!("Fehlermeldung: {}", warning.message))
+                    egui::RichText::new(t!("Fehlermeldung: {message}", message = warning.message))
                         .size(12.0)
                         .color(egui::Color32::from_gray(200)),
                 );
                 ui.add_space(8.0);
                 if let Some(ref q_path) = warning.quarantine_path {
                     ui.label(
-                        egui::RichText::new("Die beschädigte Originaldatei wurde in Quarantäne gesichert:")
+                        egui::RichText::new(t!("Die beschädigte Originaldatei wurde in Quarantäne gesichert:"))
                             .size(12.0)
                             .color(egui::Color32::from_gray(220)),
                     );
@@ -4523,8 +4587,8 @@ pub fn render_ui(
                     ui.add_space(10.0);
                     ui.label(
                         egui::RichText::new(
-                            "Um Datenverlust zu verhindern, ist diese Seite schreibgeschützt.\n\
-                             Wenn Sie diese Seite bearbeiten möchten, können Sie den Schreibschutz aufheben.",
+                            t!("Um Datenverlust zu verhindern, ist diese Seite schreibgeschützt.\n\
+                             Wenn Sie diese Seite bearbeiten möchten, können Sie den Schreibschutz aufheben."),
                         )
                         .size(11.5)
                         .color(egui::Color32::from_gray(180)),
@@ -4532,7 +4596,7 @@ pub fn render_ui(
                     ui.add_space(12.0);
                     if ui
                         .button(
-                            egui::RichText::new("Als leere Seite bearbeiten (Schreibschutz aufheben)")
+                            egui::RichText::new(t!("Als leere Seite bearbeiten (Schreibschutz aufheben)"))
                                 .color(egui::Color32::WHITE)
                                 .size(12.5),
                         )
@@ -4543,8 +4607,8 @@ pub fn render_ui(
                 } else {
                     ui.label(
                         egui::RichText::new(
-                            "Zugriffsfehler (I/O). Die Datei existiert, kann aber nicht gelesen werden.\n\
-                             Die Seite bleibt schreibgeschützt, um ein Überschreiben zu verhindern.",
+                            t!("Zugriffsfehler (I/O). Die Datei existiert, kann aber nicht gelesen werden.\n\
+                             Die Seite bleibt schreibgeschützt, um ein Überschreiben zu verhindern."),
                         )
                         .size(12.0)
                         .color(egui::Color32::from_gray(200)),
@@ -4556,13 +4620,13 @@ pub fn render_ui(
     // Notfall-/Sicherheits-Dialog bei Fehlschlag des Speicherns vor dem Beenden
     if let Some(err) = &state.shutdown_error {
         let mut dismiss = false;
-        dialog_window("⚠ Ungespeicherte Änderungen", state, true).show(ctx, |ui| {
+        dialog_window(t!("⚠ Ungespeicherte Änderungen"), state, true).show(ctx, |ui| {
             ui.set_width(460.0);
             touch_friendly_spacing(ui);
             ui.horizontal(|ui| {
                 ui.colored_label(egui::Color32::from_rgb(255, 80, 80), "⚠");
                 ui.label(
-                    egui::RichText::new("Fehler beim Beenden")
+                    egui::RichText::new(t!("Fehler beim Beenden"))
                         .color(egui::Color32::from_rgb(255, 100, 100))
                         .size(16.0)
                         .strong(),
@@ -4570,9 +4634,11 @@ pub fn render_ui(
             });
             ui.add_space(8.0);
             ui.label(
-                egui::RichText::new("Ungespeicherte Änderungen konnten nicht gesichert werden:")
-                    .size(13.0)
-                    .color(egui::Color32::WHITE),
+                egui::RichText::new(t!(
+                    "Ungespeicherte Änderungen konnten nicht gesichert werden:"
+                ))
+                .size(13.0)
+                .color(egui::Color32::WHITE),
             );
             ui.add_space(6.0);
             egui::Frame::none()
@@ -4590,24 +4656,24 @@ pub fn render_ui(
                 });
             ui.add_space(8.0);
             ui.label(
-                egui::RichText::new("Trotzdem beenden?")
+                egui::RichText::new(t!("Trotzdem beenden?"))
                     .size(13.0)
                     .color(egui::Color32::WHITE),
             );
             ui.add_space(12.0);
             ui.horizontal_wrapped(|ui| {
-                if ui.button("Abbrechen").clicked() {
+                if ui.button(t!("Abbrechen")).clicked() {
                     dismiss = true;
                 }
-                if ui.button("Wiederholen").clicked() {
+                if ui.button(t!("Wiederholen")).clicked() {
                     actions.push(UiAction::RetryShutdown);
                 }
-                if ui.button("Notfall-Export").clicked() {
+                if ui.button(t!("Notfall-Export")).clicked() {
                     actions.push(UiAction::ExportRecoveryAndExit);
                 }
                 if ui
                     .button(
-                        egui::RichText::new("Trotzdem beenden")
+                        egui::RichText::new(t!("Trotzdem beenden"))
                             .color(egui::Color32::from_rgb(255, 100, 100)),
                     )
                     .clicked()

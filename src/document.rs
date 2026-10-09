@@ -5,6 +5,7 @@ use std::ops::Range;
 use crate::canvas::InkVertex;
 use crate::history::{HistoryAction, HistoryStack};
 pub use crate::spline::{finalize_stroke, finalize_stroke_with_config};
+use crate::t;
 
 /// Standardmaße DIN A4 in Millimetern.
 pub const A4_WIDTH_MM: f32 = 210.0;
@@ -1306,10 +1307,10 @@ impl Notebook {
 
     /// Text für das On-Screen-Display (OSD), z. B. "Seite 3 / 12".
     pub fn osd_text(&self) -> String {
-        format!(
-            "Seite {} / {}",
-            self.current_page_index + 1,
-            self.pages.len()
+        t!(
+            "Seite {number} / {count}",
+            number = self.current_page_index + 1,
+            count = self.pages.len()
         )
     }
 }

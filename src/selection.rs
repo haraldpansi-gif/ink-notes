@@ -7,6 +7,7 @@ use std::f32::consts::FRAC_PI_2;
 
 use crate::canvas::CanvasState;
 use crate::document::{Aabb, Page, Stroke};
+use crate::t;
 
 /// Status des aktiven Ziehvorgangs (Drag-Operation) mit der Maus oder dem Stylus.
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -404,15 +405,14 @@ pub fn render_selection_overlay(
     }
 
     // Kleines Info-Badge an der Unterkante (z. B. "2 Objekte | [R] Drehen [Entf] Löschen")
-    let badge_text = format!(
-        "{} {} | [R] Drehen [Entf] Löschen",
-        selection.count(),
-        if selection.count() == 1 {
-            "Objekt"
-        } else {
-            "Objekte"
-        }
-    );
+    let badge_text = if selection.count() == 1 {
+        t!("1 Objekt | [R] Drehen [Entf] Löschen").to_string()
+    } else {
+        t!(
+            "{count} Objekte | [R] Drehen [Entf] Löschen",
+            count = selection.count()
+        )
+    };
     let badge_pos = egui::pos2(rect.center().x, rect.max.y + 16.0);
     painter.text(
         badge_pos,

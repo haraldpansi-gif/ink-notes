@@ -10,6 +10,7 @@ pub mod file_picker;
 pub mod filter;
 pub mod geometry;
 pub mod history;
+pub mod i18n;
 pub mod image_layer;
 pub mod library;
 pub mod osk;

@@ -23,6 +23,8 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::t;
+
 /// Konfiguration für den Gitea-Update-Server.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct UpdaterConfig {
@@ -59,13 +61,18 @@ impl Default for UpdaterConfig {
 impl UpdaterConfig {
     /// Validiert die Server-URL auf Protokollsicherheit (erzwingt HTTPS).
     pub fn validate_url(&self) -> Result<url::Url, String> {
-        let parsed = url::Url::parse(&self.server_url)
-            .map_err(|e| format!("Ungültige Server-URL '{}': {e}", self.server_url))?;
+        let parsed = url::Url::parse(&self.server_url).map_err(|e| {
+            t!(
+                "Ungültige Server-URL '{url}': {e}",
+                url = self.server_url,
+                e = e
+            )
+        })?;
 
         if parsed.scheme() != "https" && !self.allow_insecure_http {
-            return Err(format!(
-                "Unsicheres Protokoll '{}' abgewiesen. Es wird zwingend HTTPS verlangt (z. B. https://gitea.pansi.eu).",
-                parsed.scheme()
+            return Err(t!(
+                "Unsicheres Protokoll '{scheme}' abgewiesen. Es wird zwingend HTTPS verlangt (z. B. https://gitea.pansi.eu).",
+                scheme = parsed.scheme()
             ));
         }
         Ok(parsed)
@@ -146,9 +153,9 @@ impl RuntimeEnvironment {
 
     pub fn display_name(&self) -> &'static str {
         match self {
-            RuntimeEnvironment::AppImage { .. } => "AppImage (Portabel)",
-            RuntimeEnvironment::DebPackage { .. } => "System-Paket (.deb)",
-            RuntimeEnvironment::PortableOrDev { .. } => "Entwicklung / Lokal",
+            RuntimeEnvironment::AppImage { .. } => t!("AppImage (Portabel)"),
+            RuntimeEnvironment::DebPackage { .. } => t!("System-Paket (.deb)"),
+            RuntimeEnvironment::PortableOrDev { .. } => t!("Entwicklung / Lokal"),
         }
     }
 }
@@ -157,22 +164,24 @@ impl RuntimeEnvironment {
 pub fn sanitize_asset_name(raw_name: &str) -> Result<String, String> {
     let trimmed = raw_name.trim();
     if trimmed.is_empty() {
-        return Err("Asset-Name darf nicht leer sein.".to_string());
+        return Err(t!("Asset-Name darf nicht leer sein.").to_string());
     }
     if trimmed.contains('/') || trimmed.contains('\\') || trimmed.contains("..") {
-        return Err(format!(
-            "Ungültiger Asset-Name (enthält unzulässige Pfadkomponenten): '{raw_name}'"
+        return Err(t!(
+            "Ungültiger Asset-Name (enthält unzulässige Pfadkomponenten): '{raw_name}'",
+            raw_name = raw_name
         ));
     }
     let path = Path::new(trimmed);
     let file_name = path
         .file_name()
         .and_then(|n| n.to_str())
-        .ok_or_else(|| format!("Ungültiger Dateiname: '{raw_name}'"))?;
+        .ok_or_else(|| t!("Ungültiger Dateiname: '{raw_name}'", raw_name = raw_name))?;
 
     if file_name != trimmed || file_name.starts_with('.') {
-        return Err(format!(
-            "Ungültiger oder versteckter Asset-Name: '{raw_name}'"
+        return Err(t!(
+            "Ungültiger oder versteckter Asset-Name: '{raw_name}'",
+            raw_name = raw_name
         ));
     }
     Ok(file_name.to_string())
@@ -193,9 +202,10 @@ pub fn get_updates_cache_dir() -> Result<PathBuf, String> {
 
     let dir = base.join("ink-notes").join("updates");
     std::fs::create_dir_all(&dir).map_err(|e| {
-        format!(
-            "Konnte Update-Cache-Verzeichnis nicht anlegen ({}): {e}",
-            dir.display()
+        t!(
+            "Konnte Update-Cache-Verzeichnis nicht anlegen ({path}): {e}",
+            path = dir.display(),
+            e = e
         )
     })?;
 
@@ -210,7 +220,7 @@ pub fn get_updates_cache_dir() -> Result<PathBuf, String> {
 
 fn default_user_cache_dir() -> Result<PathBuf, String> {
     let home = std::env::var("HOME")
-        .map_err(|_| "HOME-Umgebungsvariable ist nicht gesetzt.".to_string())?;
+        .map_err(|_| t!("HOME-Umgebungsvariable ist nicht gesetzt.").to_string())?;
     Ok(PathBuf::from(home).join(".cache"))
 }
 
@@ -251,9 +261,10 @@ pub fn is_newer_version(remote_tag: &str, current_tag: &str, include_prereleases
 /// Berechnet den hex-kodierten SHA-256 Hash einer Datei.
 pub fn compute_sha256(path: &Path) -> Result<String, String> {
     let mut file = std::fs::File::open(path).map_err(|e| {
-        format!(
-            "Konnte Datei '{}' zur Prüfsummenberechnung nicht öffnen: {e}",
-            path.display()
+        t!(
+            "Konnte Datei '{path}' zur Prüfsummenberechnung nicht öffnen: {e}",
+            path = path.display(),
+            e = e
         )
     })?;
     let mut hasher = Sha256::new();
@@ -261,7 +272,7 @@ pub fn compute_sha256(path: &Path) -> Result<String, String> {
     loop {
         let n = file
             .read(&mut buffer)
-            .map_err(|e| format!("Fehler beim Lesen der Prüfsummendatei: {e}"))?;
+            .map_err(|e| t!("Fehler beim Lesen der Prüfsummendatei: {e}", e = e))?;
         if n == 0 {
             break;
         }
@@ -300,15 +311,13 @@ pub fn verify_checksum(
     let checksums = parse_checksums(checksums_content);
     let expected_hash = checksums.get(asset_name).ok_or_else(|| {
         let _ = std::fs::remove_file(downloaded_path);
-        format!("Kein Eintrag für '{asset_name}' in SHA256SUMS.txt gefunden. Heruntergeladene Datei wurde gelöscht.")
+        t!("Kein Eintrag für '{asset_name}' in SHA256SUMS.txt gefunden. Heruntergeladene Datei wurde gelöscht.", asset_name = asset_name)
     })?;
 
     let actual_hash = compute_sha256(downloaded_path)?;
     if !actual_hash.eq_ignore_ascii_case(expected_hash) {
         let _ = std::fs::remove_file(downloaded_path);
-        return Err(format!(
-            "Integritätsprüfung fehlgeschlagen für '{asset_name}': Erwartet {expected_hash}, berechnet {actual_hash}. Datei wurde gelöscht."
-        ));
+        return Err(t!("Integritätsprüfung fehlgeschlagen für '{asset_name}': Erwartet {expected_hash}, berechnet {actual_hash}. Datei wurde gelöscht.", asset_name = asset_name, expected_hash = expected_hash, actual_hash = actual_hash));
     }
     Ok(())
 }
@@ -334,15 +343,26 @@ pub fn verify_checksums_signature(
 ) -> Result<(), String> {
     let key = public_key_b64.trim();
     if key.is_empty() {
-        return Err("In dieser Version ist kein Signaturschlüssel für Updates hinterlegt. Bitte das Update manuell installieren.".to_string());
+        return Err(t!("In dieser Version ist kein Signaturschlüssel für Updates hinterlegt. Bitte das Update manuell installieren.").to_string());
     }
     let public_key = minisign_verify::PublicKey::from_base64(key)
-        .map_err(|e| format!("Ungültiger Update-Signaturschlüssel: {e}."))?;
-    let signature = minisign_verify::Signature::decode(signature_text)
-        .map_err(|e| format!("{CHECKSUMS_SIGNATURE_ASSET_NAME} ist ungültig: {e}."))?;
+        .map_err(|e| t!("Ungültiger Update-Signaturschlüssel: {e}.", e = e))?;
+    let signature = minisign_verify::Signature::decode(signature_text).map_err(|e| {
+        t!(
+            "{file} ist ungültig: {e}.",
+            file = CHECKSUMS_SIGNATURE_ASSET_NAME,
+            e = e
+        )
+    })?;
     public_key
         .verify(checksums, &signature, false)
-        .map_err(|e| format!("Signaturprüfung von {CHECKSUMS_ASSET_NAME} fehlgeschlagen: {e}."))
+        .map_err(|e| {
+            t!(
+                "Signaturprüfung von {file} fehlgeschlagen: {e}.",
+                file = CHECKSUMS_ASSET_NAME,
+                e = e
+            )
+        })
 }
 
 /// Lädt einen Text-Asset des Releases über den abgesicherten HTTP-Client.
@@ -356,7 +376,7 @@ fn fetch_release_text(
         .assets
         .iter()
         .find(|a| a.name == name)
-        .ok_or_else(|| format!("Release enthält keine {name}."))?;
+        .ok_or_else(|| t!("Release enthält keine {name}.", name = name))?;
     http_get_with_auth_guard(
         agent,
         &asset.browser_download_url,
@@ -364,9 +384,9 @@ fn fetch_release_text(
         5,
         config.allow_insecure_http,
     )
-    .map_err(|e| format!("Konnte {name} nicht laden: {e}."))?
+    .map_err(|e| t!("Konnte {name} nicht laden: {e}.", name = name, e = e))?
     .into_string()
-    .map_err(|e| format!("Konnte {name} nicht dekodieren: {e}."))
+    .map_err(|e| t!("Konnte {name} nicht dekodieren: {e}.", name = name, e = e))
 }
 
 /// Lädt `SHA256SUMS.txt` samt Minisign-Signatur und gibt den Inhalt nur bei gültiger
@@ -429,9 +449,7 @@ fn ensure_secure_scheme(url: &url::Url, allow_insecure_http: bool) -> Result<(),
     match url.scheme() {
         "https" => Ok(()),
         "http" if allow_insecure_http => Ok(()),
-        scheme => Err(format!(
-            "Unsicheres Protokoll '{scheme}' für '{url}' abgewiesen. Es wird zwingend HTTPS verlangt."
-        )),
+        scheme => Err(t!("Unsicheres Protokoll '{scheme}' für '{url}' abgewiesen. Es wird zwingend HTTPS verlangt.", scheme = scheme, url = url)),
     }
 }
 
@@ -453,8 +471,13 @@ fn http_get_with_auth_guard(
     max_redirects: usize,
     allow_insecure_http: bool,
 ) -> Result<ureq::Response, String> {
-    let mut current_url = url::Url::parse(initial_url_str)
-        .map_err(|e| format!("Ungültige URL '{initial_url_str}': {e}"))?;
+    let mut current_url = url::Url::parse(initial_url_str).map_err(|e| {
+        t!(
+            "Ungültige URL '{initial_url_str}': {e}",
+            initial_url_str = initial_url_str,
+            e = e
+        )
+    })?;
     let initial_origin = current_url.origin().ascii_serialization();
 
     for _ in 0..=max_redirects {
@@ -476,24 +499,35 @@ fn http_get_with_auth_guard(
             Ok(resp) => return Ok(resp),
             Err(ureq::Error::Status(code, resp)) if (301..=308).contains(&code) => {
                 let loc = resp.header("Location").ok_or_else(|| {
-                    format!("HTTP {code} Weiterleitung ohne Location-Header erhalten")
+                    t!(
+                        "HTTP {code} Weiterleitung ohne Location-Header erhalten",
+                        code = code
+                    )
                 })?;
-                current_url = current_url
-                    .join(loc)
-                    .map_err(|e| format!("Ungültiges Weiterleitungsziel '{loc}': {e}"))?;
+                current_url = current_url.join(loc).map_err(|e| {
+                    t!(
+                        "Ungültiges Weiterleitungsziel '{loc}': {e}",
+                        loc = loc,
+                        e = e
+                    )
+                })?;
                 continue;
             }
             Err(ureq::Error::Status(code, resp)) => {
                 let body = resp.into_string().unwrap_or_default();
-                return Err(format!("Gitea-Server antwortete mit HTTP {code}: {body}"));
+                return Err(t!(
+                    "Gitea-Server antwortete mit HTTP {code}: {body}",
+                    code = code,
+                    body = body
+                ));
             }
             Err(ureq::Error::Transport(t)) => {
-                return Err(format!("Netzwerk-Transportfehler: {t}"));
+                return Err(t!("Netzwerk-Transportfehler: {t}", t = t));
             }
         }
     }
 
-    Err("Zu viele Weiterleitungen (Redirect-Schleife abgebrochen).".to_string())
+    Err(t!("Zu viele Weiterleitungen (Redirect-Schleife abgebrochen).").to_string())
 }
 
 /// Asynchroner Controller für Update-Prüfung und Asset-Download.
@@ -592,8 +626,9 @@ impl UpdaterController {
                         }
                     }
                     Err(e) => {
-                        let _ = tx.send(UpdaterEvent::CheckError(format!(
-                            "Gitea Release-JSON konnte nicht verarbeitet werden: {e}"
+                        let _ = tx.send(UpdaterEvent::CheckError(t!(
+                            "Gitea Release-JSON konnte nicht verarbeitet werden: {e}",
+                            e = e
                         )));
                     }
                 },
@@ -649,15 +684,16 @@ impl UpdaterController {
                 ) {
                     Ok(text) => text,
                     Err(e) => {
-                        let _ = tx.send(UpdaterEvent::DownloadError(format!(
-                            "{e} Download abgelehnt."
+                        let _ = tx.send(UpdaterEvent::DownloadError(t!(
+                            "{e} Download abgelehnt.",
+                            e = e
                         )));
                         return;
                     }
                 },
                 None => {
                     let _ = tx.send(UpdaterEvent::DownloadError(
-                        "Kein Release ausgewählt. Download abgelehnt.".to_string(),
+                        t!("Kein Release ausgewählt. Download abgelehnt.").to_string(),
                     ));
                     return;
                 }
@@ -673,8 +709,9 @@ impl UpdaterController {
             ) {
                 Ok(r) => r,
                 Err(e) => {
-                    let _ = tx.send(UpdaterEvent::DownloadError(format!(
-                        "Download-Verbindungsfehler: {e}"
+                    let _ = tx.send(UpdaterEvent::DownloadError(t!(
+                        "Download-Verbindungsfehler: {e}",
+                        e = e
                     )));
                     return;
                 }
@@ -686,9 +723,10 @@ impl UpdaterController {
             let mut file = match std::fs::File::create(&target_file) {
                 Ok(f) => f,
                 Err(e) => {
-                    let _ = tx.send(UpdaterEvent::DownloadError(format!(
-                        "Konnte Zieldatei '{}' nicht erstellen: {e}",
-                        target_file.display()
+                    let _ = tx.send(UpdaterEvent::DownloadError(t!(
+                        "Konnte Zieldatei '{path}' nicht erstellen: {e}",
+                        path = target_file.display(),
+                        e = e
                     )));
                     return;
                 }
@@ -705,8 +743,9 @@ impl UpdaterController {
                     Ok(count) => count,
                     Err(e) => {
                         let _ = std::fs::remove_file(&target_file);
-                        let _ = tx.send(UpdaterEvent::DownloadError(format!(
-                            "Fehler beim Lesen des Download-Streams: {e}"
+                        let _ = tx.send(UpdaterEvent::DownloadError(t!(
+                            "Fehler beim Lesen des Download-Streams: {e}",
+                            e = e
                         )));
                         return;
                     }
@@ -714,8 +753,9 @@ impl UpdaterController {
 
                 if let Err(e) = file.write_all(&buffer[..n]) {
                     let _ = std::fs::remove_file(&target_file);
-                    let _ = tx.send(UpdaterEvent::DownloadError(format!(
-                        "Fehler beim Schreiben auf die Festplatte: {e}"
+                    let _ = tx.send(UpdaterEvent::DownloadError(t!(
+                        "Fehler beim Schreiben auf die Festplatte: {e}",
+                        e = e
                     )));
                     return;
                 }
@@ -776,18 +816,19 @@ impl UpdaterController {
     /// Startet die sichere Installation des heruntergeladenen Pakets oder öffnet es im System.
     pub fn install_or_open(&self, file_path: &Path) -> Result<(), String> {
         if !file_path.exists() {
-            return Err("Die heruntergeladene Datei existiert nicht mehr.".to_string());
+            return Err(t!("Die heruntergeladene Datei existiert nicht mehr.").to_string());
         }
 
         match &self.runtime {
             RuntimeEnvironment::AppImage { appimage_path } => {
                 let parent_dir = appimage_path.parent().ok_or_else(|| {
-                    "Konnte übergeordnetes Verzeichnis des AppImages nicht ermitteln.".to_string()
+                    t!("Konnte übergeordnetes Verzeichnis des AppImages nicht ermitteln.")
+                        .to_string()
                 })?;
 
                 let file_name = appimage_path
                     .file_name()
-                    .ok_or_else(|| "Ungültiger AppImage-Dateiname.".to_string())?
+                    .ok_or_else(|| t!("Ungültiger AppImage-Dateiname.").to_string())?
                     .to_string_lossy();
 
                 let temp_new_file =
@@ -797,8 +838,9 @@ impl UpdaterController {
                 // 1. Neue Datei im SELBEN Verzeichnis anlegen (garantiert atomares rename)
                 if let Err(e) = std::fs::copy(file_path, &temp_new_file) {
                     let _ = std::fs::remove_file(&temp_new_file);
-                    return Err(format!(
-                        "Konnte temporäre Update-Datei nicht schreiben: {e}"
+                    return Err(t!(
+                        "Konnte temporäre Update-Datei nicht schreiben: {e}",
+                        e = e
                     ));
                 }
 
@@ -816,18 +858,17 @@ impl UpdaterController {
                 // 3. Backup des alten AppImages anlegen – Fehler NIEMALS ignorieren!
                 if let Err(e) = std::fs::copy(appimage_path, &backup_file) {
                     let _ = std::fs::remove_file(&temp_new_file);
-                    return Err(format!(
-                        "Konnte Backup ({}) nicht anlegen: {e}. Update abgebrochen, altes AppImage unverändert.",
-                        backup_file.display()
+                    return Err(t!(
+                        "Konnte Backup ({path}) nicht anlegen: {e}. Update abgebrochen, altes AppImage unverändert.",
+                        path = backup_file.display(),
+                        e = e
                     ));
                 }
 
                 // 4. Atomar ersetzen via rename
                 if let Err(e) = std::fs::rename(&temp_new_file, appimage_path) {
                     let _ = std::fs::remove_file(&temp_new_file);
-                    return Err(format!(
-                        "Konnte AppImage nicht atomar ersetzen: {e}. Altes AppImage bleibt unverändert."
-                    ));
+                    return Err(t!("Konnte AppImage nicht atomar ersetzen: {e}. Altes AppImage bleibt unverändert.", e = e));
                 }
 
                 // Heruntergeladene Cache-Datei aufräumen
@@ -837,7 +878,7 @@ impl UpdaterController {
             RuntimeEnvironment::DebPackage { .. } => {
                 match Command::new("xdg-open").arg(file_path).spawn() {
                     Ok(_) => Ok(()),
-                    Err(e) => Err(format!("Konnte xdg-open nicht ausführen: {e}")),
+                    Err(e) => Err(t!("Konnte xdg-open nicht ausführen: {e}", e = e)),
                 }
             }
             RuntimeEnvironment::PortableOrDev { .. } => {

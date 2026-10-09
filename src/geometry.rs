@@ -9,6 +9,7 @@ use std::f32::consts::PI;
 
 use crate::canvas::InkVertex;
 use crate::document::{Aabb, Stroke, StylusSample};
+use crate::t;
 
 /// Arten der geometrischen Primitiven.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -104,26 +105,26 @@ impl RecognizedShape {
 
     pub fn name(&self) -> &'static str {
         match self {
-            Self::Line { .. } => "Gerade",
-            Self::Circle { .. } => "Kreis",
-            Self::Ellipse { .. } => "Ellipse",
-            Self::Arrow { double: false, .. } => "Pfeil",
-            Self::Arrow { double: true, .. } => "Doppelpfeil",
-            Self::Rectangle { .. } => "Rechteck",
+            Self::Line { .. } => t!("Gerade"),
+            Self::Circle { .. } => t!("Kreis"),
+            Self::Ellipse { .. } => t!("Ellipse"),
+            Self::Arrow { double: false, .. } => t!("Pfeil"),
+            Self::Arrow { double: true, .. } => t!("Doppelpfeil"),
+            Self::Rectangle { .. } => t!("Rechteck"),
             Self::CoordinateSystem {
                 negative_ends: Some(_),
                 ..
-            } => "Achsenkreuz",
-            Self::CoordinateSystem { .. } => "Koordinatensystem",
-            Self::Triangle { .. } => "Dreieck",
-            Self::Rhombus { .. } => "Raute (Rhombus)",
+            } => t!("Achsenkreuz"),
+            Self::CoordinateSystem { .. } => t!("Koordinatensystem"),
+            Self::Triangle { .. } => t!("Dreieck"),
+            Self::Rhombus { .. } => t!("Raute (Rhombus)"),
             Self::Polygon { vertices } => match vertices.len() {
-                5 => "Fünfeck (Pentagon)",
-                6 => "Sechseck (Hexagon)",
-                8 => "Achteck (Oktagon)",
-                _ => "Polygon",
+                5 => t!("Fünfeck (Pentagon)"),
+                6 => t!("Sechseck (Hexagon)"),
+                8 => t!("Achteck (Oktagon)"),
+                _ => t!("Polygon"),
             },
-            Self::Octahedron { .. } => "Oktaeder (3D-Kantenmodell)",
+            Self::Octahedron { .. } => t!("Oktaeder (3D-Kantenmodell)"),
         }
     }
 

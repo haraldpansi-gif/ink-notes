@@ -13,6 +13,7 @@ use hayro::vello_cpu::color::palette::css::WHITE;
 use hayro::{PixmapSettings, RenderCache, RenderSettings};
 
 use crate::assets::RgbaImage;
+use crate::t;
 
 /// Längste Kante einer gerenderten Seite für die Anzeige in Pixeln (A4 ≈ 220 dpi).
 pub const DISPLAY_RENDER_PIXELS: u32 = 2560;
@@ -38,12 +39,13 @@ pub fn page_sizes(bytes: Vec<u8>) -> Result<Vec<(f32, f32)>, String> {
     let pdf = open(bytes)?;
     let sizes: Vec<(f32, f32)> = pdf.pages().iter().map(|p| p.render_dimensions()).collect();
     if sizes.is_empty() {
-        return Err("Das PDF enthält keine Seiten".into());
+        return Err(t!("Das PDF enthält keine Seiten").into());
     }
     if sizes.len() > MAX_IMPORT_PAGES {
-        return Err(format!(
-            "Das PDF hat {} Seiten, höchstens {MAX_IMPORT_PAGES} werden unterstützt",
-            sizes.len()
+        return Err(t!(
+            "Das PDF hat {count} Seiten, höchstens {max} werden unterstützt",
+            count = sizes.len(),
+            max = MAX_IMPORT_PAGES
         ));
     }
     Ok(sizes)
@@ -52,10 +54,10 @@ pub fn page_sizes(bytes: Vec<u8>) -> Result<Vec<(f32, f32)>, String> {
 fn open(bytes: Vec<u8>) -> Result<Pdf, String> {
     Pdf::new(bytes).map_err(|e| match e {
         LoadPdfError::Decryption(_) => {
-            "Das PDF ist verschlüsselt oder passwortgeschützt und kann nicht geöffnet werden"
+            t!("Das PDF ist verschlüsselt oder passwortgeschützt und kann nicht geöffnet werden")
                 .to_string()
         }
-        LoadPdfError::Invalid => "Die Datei ist kein lesbares PDF".to_string(),
+        LoadPdfError::Invalid => t!("Die Datei ist kein lesbares PDF").to_string(),
     })
 }
 
@@ -65,7 +67,7 @@ pub fn render_page(pdf: &Pdf, index: usize, max_pixels: u32) -> Result<RgbaImage
     let page = pdf
         .pages()
         .get(index)
-        .ok_or_else(|| format!("Seite {} fehlt im PDF", index + 1))?;
+        .ok_or_else(|| t!("Seite {number} fehlt im PDF", number = index + 1))?;
     let (w, h) = page.render_dimensions();
     let scale = (max_pixels as f32 / w.max(h).max(1.0)).min(16.0);
     let pixmap = hayro::render(
@@ -136,7 +138,7 @@ impl PdfRenderService {
                     }
                     let result = match &open_pdf {
                         Some((_, pdf)) => render_page(pdf, request.page, request.max_pixels),
-                        None => Err("PDF kann nicht geöffnet werden".into()),
+                        None => Err(t!("PDF kann nicht geöffnet werden").into()),
                     };
                     if res_tx.send((request.key, result)).is_err() {
                         break;
@@ -206,7 +208,7 @@ impl PdfRenderService {
             return Some(result);
         }
         if !self.request(key, path, page, max_pixels) {
-            return Some(Err("PDF-Render-Thread beendet".into()));
+            return Some(Err(t!("PDF-Render-Thread beendet").into()));
         }
         None
     }

@@ -24,6 +24,7 @@ use crate::background::{PatternColor, DOT_SIZE, GRID_5MM_SPACING, LINED_SPACING}
 use crate::document::{
     Notebook, Page, PageBackground, Stroke, A4_HEIGHT_MM, A4_WIDTH_MM, PAGE_HEIGHT, PAGE_WIDTH,
 };
+use crate::t;
 use ab_glyph::Font as _;
 
 use crate::text::TextFont;
@@ -384,15 +385,15 @@ fn generate_pdf_document_with(
     raster_pdf_pages: &std::collections::HashSet<usize>,
 ) -> Result<PdfDocumentReference, Box<dyn Error>> {
     if notebook.pages.is_empty() {
-        return Err("Notizbuch enthält keine Seiten".into());
+        return Err(t!("Notizbuch enthält keine Seiten").into());
     }
     // Nicht geladene Seiten würden sonst stillschweigend als leere Seiten exportiert
     if let Some(page) = notebook.pages.iter().find(|p| {
         !p.is_loaded || p.persist == crate::document::PersistState::ReadOnlyAfterLoadError
     }) {
-        return Err(format!(
-            "Seite {} ist nicht geladen – Export abgebrochen (vorher storage::load_all_pages aufrufen)",
-            page.id
+        return Err(t!(
+            "Seite {id} ist nicht geladen – Export abgebrochen (vorher storage::load_all_pages aufrufen)",
+            id = page.id
         )
         .into());
     }
@@ -823,7 +824,7 @@ fn render_pdf_raster(
     let longest_pt = pdf.width_pt.max(pdf.height_pt);
     let max_pixels = (longest_pt / 72.0 * PDF_RASTER_DPI).ceil() as u32;
     let rendered = assets
-        .ok_or_else(|| "kein Asset-Ordner".to_string())
+        .ok_or_else(|| t!("kein Asset-Ordner").to_string())
         .and_then(|a| a.path_of(&pdf.asset).map_err(|e| e.to_string()))
         .and_then(|path| crate::pdf_doc::render_file_page(&path, pdf.page as usize, max_pixels));
     let xobject = match rendered {

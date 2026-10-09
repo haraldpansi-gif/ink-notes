@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 use sha2::{Digest, Sha256};
 
 use crate::storage;
+use crate::t;
 
 /// Name des Unterordners mit den Bilddateien.
 pub const ASSETS_DIR: &str = "assets";
@@ -40,15 +41,18 @@ pub enum AssetError {
 impl std::fmt::Display for AssetError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            AssetError::Decode(msg) => write!(f, "Bild kann nicht gelesen werden: {msg}"),
-            AssetError::TooLarge(bytes) => write!(
-                f,
-                "Bild ist zu groß ({} MB, höchstens {} MB)",
-                bytes / (1024 * 1024),
-                MAX_IMPORT_BYTES / (1024 * 1024)
-            ),
-            AssetError::InvalidName(name) => write!(f, "Ungültiger Bildverweis '{name}'"),
-            AssetError::Io(e) => write!(f, "Ein-/Ausgabefehler: {e}"),
+            AssetError::Decode(msg) => {
+                f.write_str(&t!("Bild kann nicht gelesen werden: {msg}", msg = msg))
+            }
+            AssetError::TooLarge(bytes) => f.write_str(&t!(
+                "Bild ist zu groß ({size} MB, höchstens {max} MB)",
+                size = bytes / (1024 * 1024),
+                max = MAX_IMPORT_BYTES / (1024 * 1024)
+            )),
+            AssetError::InvalidName(name) => {
+                f.write_str(&t!("Ungültiger Bildverweis '{name}'", name = name))
+            }
+            AssetError::Io(e) => f.write_str(&t!("Ein-/Ausgabefehler: {e}", e = e)),
         }
     }
 }
@@ -164,8 +168,9 @@ impl AssetStore {
         height: u32,
         pixels: Vec<u8>,
     ) -> Result<ImportedImage, AssetError> {
-        let buffer = image::RgbaImage::from_raw(width, height, pixels)
-            .ok_or_else(|| AssetError::Decode("Pixeldaten passen nicht zur Bildgröße".into()))?;
+        let buffer = image::RgbaImage::from_raw(width, height, pixels).ok_or_else(|| {
+            AssetError::Decode(t!("Pixeldaten passen nicht zur Bildgröße").into())
+        })?;
         let mut decoded = image::DynamicImage::ImageRgba8(buffer);
         if width > MAX_IMPORT_DIMENSION || height > MAX_IMPORT_DIMENSION {
             decoded = decoded.resize(

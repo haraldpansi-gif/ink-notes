@@ -7,7 +7,9 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::background::{PaperTheme, PatternColor};
+use crate::i18n::Language;
 use crate::storage::{self, StorageError};
+use crate::t;
 
 /// Fensterseite, an der die Werkzeugleiste angedockt ist.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -177,11 +179,11 @@ impl StylusAction {
 
     pub fn label(self) -> &'static str {
         match self {
-            StylusAction::Erase => "Radieren",
-            StylusAction::Select => "Auswählen",
-            StylusAction::Highlighter => "Textmarker",
-            StylusAction::Pen => "Stift",
-            StylusAction::Nothing => "Nichts",
+            StylusAction::Erase => t!("Radieren"),
+            StylusAction::Select => t!("Auswählen"),
+            StylusAction::Highlighter => t!("Textmarker"),
+            StylusAction::Pen => t!("Stift"),
+            StylusAction::Nothing => t!("Nichts"),
         }
     }
 }
@@ -222,6 +224,8 @@ pub struct UiSettings {
     pub active_text_color: usize,
     /// Tasten am Stift in der Reihenfolge, in der sie zuerst gedrückt wurden
     pub stylus_buttons: Vec<StylusButton>,
+    /// Sprache der Oberfläche; ohne Angabe die des Systems
+    pub language: Option<Language>,
 }
 
 impl Default for UiSettings {
@@ -240,6 +244,7 @@ impl Default for UiSettings {
             text_colors: DEFAULT_TEXT_COLORS,
             active_text_color: 0,
             stylus_buttons: Vec::new(),
+            language: None,
         }
     }
 }
@@ -338,6 +343,7 @@ mod tests {
                     action: StylusAction::Nothing,
                 },
             ],
+            language: Some(Language::English),
         };
         settings.save_to(&path).unwrap();
         assert_eq!(UiSettings::load_from(&path), settings);

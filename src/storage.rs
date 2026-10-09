@@ -15,6 +15,7 @@ use crate::document::{
 };
 use crate::filter::OneEuroFilter;
 use crate::spline::{self, ControlPoint, SplineConfig};
+use crate::t;
 
 /// Serialisierbarer Stylus-Abtastpunkt in DIN-A4-Koordinaten.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -371,19 +372,30 @@ pub enum StorageError {
 impl fmt::Display for StorageError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            StorageError::Io(e) => write!(f, "I/O-Fehler: {e}"),
-            StorageError::Serialization(e) => write!(f, "Serialisierungsfehler: {e}"),
-            StorageError::InvalidManifest(msg) => write!(f, "Ungültiges Manifest: {msg}"),
-            StorageError::CorruptedPage(id, msg) => {
-                write!(f, "Beschädigte Seite {id}: {msg}")
+            StorageError::Io(e) => f.write_str(&t!("I/O-Fehler: {e}", e = e)),
+            StorageError::Serialization(e) => {
+                f.write_str(&t!("Serialisierungsfehler: {e}", e = e))
             }
-            StorageError::PageNotFound(id) => write!(f, "Seite {id} nicht gefunden"),
-            StorageError::UnsupportedVersion { found, supported } => write!(
-                f,
-                "Notizbuch wurde mit neuerer Version erstellt (Formatversion {found}, unterstützt wird bis {supported})"
-            ),
-            StorageError::AlreadyLocked(msg) => write!(f, "Notizbuch ist gesperrt: {msg}"),
-            StorageError::PathTraversal(msg) => write!(f, "Ungültiger Pfad (Path Traversal): {msg}"),
+            StorageError::InvalidManifest(msg) => {
+                f.write_str(&t!("Ungültiges Manifest: {msg}", msg = msg))
+            }
+            StorageError::CorruptedPage(id, msg) => {
+                f.write_str(&t!("Beschädigte Seite {id}: {msg}", id = id, msg = msg))
+            }
+            StorageError::PageNotFound(id) => {
+                f.write_str(&t!("Seite {id} nicht gefunden", id = id))
+            }
+            StorageError::UnsupportedVersion { found, supported } => f.write_str(&t!(
+                "Notizbuch wurde mit neuerer Version erstellt (Formatversion {found}, unterstützt wird bis {supported})",
+                found = found,
+                supported = supported
+            )),
+            StorageError::AlreadyLocked(msg) => {
+                f.write_str(&t!("Notizbuch ist gesperrt: {msg}", msg = msg))
+            }
+            StorageError::PathTraversal(msg) => {
+                f.write_str(&t!("Ungültiger Pfad (Path Traversal): {msg}", msg = msg))
+            }
         }
     }
 }
@@ -490,7 +502,7 @@ pub fn atomic_write_file(path: &Path, content: &[u8]) -> Result<(), io::Error> {
     let dir = path.parent().ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::NotFound,
-            "Übergeordnetes Verzeichnis nicht gefunden",
+            t!("Übergeordnetes Verzeichnis nicht gefunden"),
         )
     })?;
     create_secure_dir_all(dir)?;
@@ -595,9 +607,9 @@ pub fn load_manifest(notebook_dir: &Path) -> Result<NotebookManifest, StorageErr
             eprintln!("[Storage-Warnung] manifest.json fehlt, lade aus manifest.json.bak");
             return load_manifest_from_file(&bak_path);
         }
-        return Err(StorageError::InvalidManifest(format!(
-            "Manifestdatei nicht gefunden: {}",
-            path.display()
+        return Err(StorageError::InvalidManifest(t!(
+            "Manifestdatei nicht gefunden: {path}",
+            path = path.display()
         )));
     }
 
@@ -625,7 +637,7 @@ pub fn quarantine_corrupted_page(notebook_dir: &Path, page_id: u64) -> Result<Pa
     if !source_path.exists() {
         return Err(io::Error::new(
             io::ErrorKind::NotFound,
-            "Datei existiert nicht",
+            t!("Datei existiert nicht"),
         ));
     }
     let ts = std::time::SystemTime::now()
@@ -764,7 +776,7 @@ pub fn load_notebook(notebook_dir: &Path) -> Result<(Notebook, NotebookManifest)
                 first_id,
                 PageLoadWarning {
                     page_id: first_id,
-                    message: format!("I/O-Fehler: {e}"),
+                    message: t!("I/O-Fehler: {e}", e = e),
                     quarantine_path: None,
                 },
             );
@@ -876,7 +888,7 @@ pub fn ensure_page_loaded(
                 page_id,
                 PageLoadWarning {
                     page_id,
-                    message: format!("I/O-Fehler: {err_str}"),
+                    message: t!("I/O-Fehler: {e}", e = err_str),
                     quarantine_path: None,
                 },
             );
@@ -970,9 +982,9 @@ impl NotebookLock {
             Err(e) => {
                 let kind = e.kind();
                 if kind == io::ErrorKind::WouldBlock || e.raw_os_error() == Some(11) {
-                    Err(StorageError::AlreadyLocked(format!(
-                        "Notizbuch '{}' wird bereits von einer anderen Instanz verwendet",
-                        notebook_dir.display()
+                    Err(StorageError::AlreadyLocked(t!(
+                        "Notizbuch '{path}' wird bereits von einer anderen Instanz verwendet",
+                        path = notebook_dir.display()
                     )))
                 } else {
                     Err(StorageError::Io(e))
@@ -1058,7 +1070,7 @@ pub fn list_notebooks(base_dir: &Path) -> Vec<NotebookSummary> {
 
                         list.push(NotebookSummary {
                             id: dir_name.to_string(),
-                            title: format!("⚠️ {dir_name} (Beschädigt)"),
+                            title: t!("⚠️ {name} (Beschädigt)", name = dir_name),
                             page_count: 0,
                             modified_at,
                             status: NotebookStatus::Damaged,
@@ -1077,11 +1089,11 @@ pub fn list_notebooks(base_dir: &Path) -> Vec<NotebookSummary> {
 
                 list.push(NotebookSummary {
                     id: dir_name.to_string(),
-                    title: format!("⚠️ {dir_name} (Beschädigt - kein Manifest)"),
+                    title: t!("⚠️ {name} (Beschädigt - kein Manifest)", name = dir_name),
                     page_count: 0,
                     modified_at,
                     status: NotebookStatus::Damaged,
-                    error: Some("Keine manifest.json vorhanden".to_string()),
+                    error: Some(t!("Keine manifest.json vorhanden").to_string()),
                 });
             }
         }
@@ -1135,7 +1147,7 @@ pub fn create_new_notebook(
         if counter > 100 {
             return Err(StorageError::Io(io::Error::new(
                 io::ErrorKind::AlreadyExists,
-                "Konnte nach 100 Versuchen kein eindeutiges Notizbuch-Verzeichnis finden",
+                t!("Konnte nach 100 Versuchen kein eindeutiges Notizbuch-Verzeichnis finden"),
             )));
         }
     }
@@ -1214,18 +1226,18 @@ pub fn rename_notebook(
 /// Prüft, dass der Pfad direkt unter `base_dir` liegt, kein Symlink ist und `manifest.json` enthält.
 pub fn delete_notebook(notebook_dir: &Path, base_dir: &Path) -> Result<PathBuf, StorageError> {
     if !notebook_dir.exists() {
-        return Err(StorageError::InvalidManifest(format!(
-            "Verzeichnis '{}' existiert nicht",
-            notebook_dir.display()
+        return Err(StorageError::InvalidManifest(t!(
+            "Verzeichnis '{path}' existiert nicht",
+            path = notebook_dir.display()
         )));
     }
 
     // Prüfen auf Symlink
     let symlink_meta = fs::symlink_metadata(notebook_dir).map_err(StorageError::Io)?;
     if symlink_meta.file_type().is_symlink() {
-        return Err(StorageError::InvalidManifest(format!(
-            "Pfad '{}' ist ein Symlink und darf nicht gelöscht werden",
-            notebook_dir.display()
+        return Err(StorageError::InvalidManifest(t!(
+            "Pfad '{path}' ist ein Symlink und darf nicht gelöscht werden",
+            path = notebook_dir.display()
         )));
     }
 
@@ -1234,18 +1246,18 @@ pub fn delete_notebook(notebook_dir: &Path, base_dir: &Path) -> Result<PathBuf, 
 
     // Prüfen, dass der Pfad direkt unter base_dir liegt
     if canon_target.parent() != Some(&canon_base) {
-        return Err(StorageError::PathTraversal(format!(
-            "Pfad '{}' liegt nicht direkt unter Basis-Verzeichnis '{}'",
-            notebook_dir.display(),
-            base_dir.display()
+        return Err(StorageError::PathTraversal(t!(
+            "Pfad '{path}' liegt nicht direkt unter Basis-Verzeichnis '{base}'",
+            path = notebook_dir.display(),
+            base = base_dir.display()
         )));
     }
 
     // Prüfen, dass manifest.json vorhanden ist
     if !canon_target.join("manifest.json").exists() {
-        return Err(StorageError::InvalidManifest(format!(
-            "Verzeichnis '{}' enthält kein manifest.json",
-            notebook_dir.display()
+        return Err(StorageError::InvalidManifest(t!(
+            "Verzeichnis '{path}' enthält kein manifest.json",
+            path = notebook_dir.display()
         )));
     }
 
@@ -1276,9 +1288,9 @@ pub fn restore_notebook_from_trash(
     if !trash_target.exists() {
         return Err(StorageError::Io(io::Error::new(
             io::ErrorKind::NotFound,
-            format!(
-                "Papierkorb-Eintrag '{}' existiert nicht",
-                trash_target.display()
+            t!(
+                "Papierkorb-Eintrag '{path}' existiert nicht",
+                path = trash_target.display()
             ),
         )));
     }
@@ -1289,7 +1301,7 @@ pub fn restore_notebook_from_trash(
     let expected_trash_dir = canon_base.join(".trash");
     if !expected_trash_dir.exists() {
         return Err(StorageError::InvalidManifest(
-            "Papierkorb-Verzeichnis existiert nicht".to_string(),
+            t!("Papierkorb-Verzeichnis existiert nicht").to_string(),
         ));
     }
     let canon_trash_base = expected_trash_dir
@@ -1297,9 +1309,9 @@ pub fn restore_notebook_from_trash(
         .map_err(StorageError::Io)?;
 
     if canon_trash.parent() != Some(&canon_trash_base) {
-        return Err(StorageError::PathTraversal(format!(
-            "Papierkorb-Pfad '{}' liegt nicht im Papierkorb",
-            trash_target.display()
+        return Err(StorageError::PathTraversal(t!(
+            "Papierkorb-Pfad '{path}' liegt nicht im Papierkorb",
+            path = trash_target.display()
         )));
     }
 
@@ -1344,7 +1356,7 @@ pub fn restore_manifest_from_backup(notebook_dir: &Path) -> Result<(), StorageEr
         Ok(())
     } else {
         Err(StorageError::InvalidManifest(
-            "Keine Sicherungskopie (manifest.json.bak) vorhanden".to_string(),
+            t!("Keine Sicherungskopie (manifest.json.bak) vorhanden").to_string(),
         ))
     }
 }
@@ -1387,7 +1399,7 @@ pub fn load_all_pages(notebook_dir: &Path, notebook: &mut Notebook) -> Result<()
         if page.persist == crate::document::PersistState::ReadOnlyAfterLoadError {
             return Err(StorageError::CorruptedPage(
                 page.id,
-                "Seite konnte nicht geladen werden".to_string(),
+                t!("Seite konnte nicht geladen werden").to_string(),
             ));
         }
         if !page.is_loaded {

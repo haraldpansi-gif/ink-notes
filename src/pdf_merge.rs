@@ -9,6 +9,8 @@ use std::collections::{BTreeMap, HashMap};
 
 use printpdf::lopdf::{Dictionary, Document, Object, ObjectId, Stream};
 
+use crate::t;
+
 /// Eine Zielseite, unter die eine Seite eines Quell-PDFs gelegt wird.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Underlay {
@@ -137,7 +139,7 @@ fn page_as_form(
                     .map_err(|e| e.to_string())?;
                 let data = stream
                     .decompressed_content()
-                    .map_err(|e| format!("Inhalt nicht lesbar: {e}"))?;
+                    .map_err(|e| t!("Inhalt nicht lesbar: {e}", e = e))?;
                 content.extend_from_slice(&data);
                 content.push(b'\n');
             }
@@ -183,10 +185,10 @@ pub fn apply_underlays(
         let result = (|| {
             let bytes = sources
                 .get(&underlay.source)
-                .ok_or_else(|| "Quell-PDF fehlt".to_string())?;
+                .ok_or_else(|| t!("Quell-PDF fehlt").to_string())?;
             let mut source = Document::load_mem(bytes).map_err(|e| e.to_string())?;
             if source.is_encrypted() {
-                return Err("Quell-PDF ist verschlüsselt".to_string());
+                return Err(t!("Quell-PDF ist verschlüsselt").to_string());
             }
             source.renumber_objects_with(target.max_id + 1);
             let pages = source.get_pages();
@@ -206,10 +208,15 @@ pub fn apply_underlays(
                 .map_err(Clone::clone)?;
             let source_page = *pages
                 .get(&(underlay.source_page as u32 + 1))
-                .ok_or_else(|| format!("Seite {} fehlt im Quell-PDF", underlay.source_page + 1))?;
+                .ok_or_else(|| {
+                    t!(
+                        "Seite {number} fehlt im Quell-PDF",
+                        number = underlay.source_page + 1
+                    )
+                })?;
             let target_page = *target_pages
                 .get(underlay.target_page)
-                .ok_or_else(|| "Zielseite fehlt".to_string())?;
+                .ok_or_else(|| t!("Zielseite fehlt").to_string())?;
             let (form, matrix) = page_as_form(&target, source_page, underlay.rect)?;
             let form_id = target.add_object(Object::Stream(form));
             let name = format!("InkPdf{}", form_id.0);
