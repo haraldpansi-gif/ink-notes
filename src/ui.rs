@@ -4281,6 +4281,18 @@ pub fn render_ui(
                     ui.label(egui::RichText::new(format!("({})", runtime_name)).color(egui::Color32::from_gray(150)));
                 });
 
+                if !updater.runtime().self_update_allowed() {
+                    ui.add_space(8.0);
+                    ui.label(
+                        egui::RichText::new(t!(
+                            "Diese Version wird über die Software-Verwaltung aktualisiert \
+                             (z. B. GNOME Software oder „flatpak update“)."
+                        ))
+                        .color(egui::Color32::from_gray(210)),
+                    );
+                    return;
+                }
+
                 ui.horizontal(|ui| {
                     ui.label(egui::RichText::new(t!("Server:")).color(egui::Color32::from_gray(180)));
                     ui.label(egui::RichText::new(format!("{}/{}/{}", updater.config().server_url, updater.config().repo_owner, updater.config().repo_name)).color(egui::Color32::from_gray(210)));
@@ -4446,7 +4458,8 @@ pub fn render_ui(
                             let action_label = match updater.runtime() {
                                 crate::updater::RuntimeEnvironment::AppImage { .. } => t!("🚀 AppImage aktualisieren & ausführen"),
                                 crate::updater::RuntimeEnvironment::DebPackage { .. } => t!("📦 Paket mit Software-Center öffnen / installieren"),
-                                crate::updater::RuntimeEnvironment::PortableOrDev { .. } => t!("📂 Im Dateimanager anzeigen"),
+                                crate::updater::RuntimeEnvironment::PortableOrDev { .. }
+                                | crate::updater::RuntimeEnvironment::Flatpak => t!("📂 Im Dateimanager anzeigen"),
                             };
 
                             ui.horizontal(|ui| {

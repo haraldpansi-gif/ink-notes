@@ -46,7 +46,9 @@ pub fn sanitize_filename_component(title: &str) -> String {
     }
 }
 
-/// Ermittelt das Standard-Dokumentenverzeichnis ($XDG_DOCUMENTS_DIR mit Fallback ~/Documents).
+/// Ermittelt das Standard-Dokumentenverzeichnis: `$XDG_DOCUMENTS_DIR`, sonst der Eintrag in
+/// `~/.config/user-dirs.dirs` (z. B. „Dokumente“), sonst `~/Documents`. Im Flatpak ist nur
+/// dieser Ordner beschreibbar, der Fallback allein träfe bei deutschen Systemen daneben.
 pub fn default_documents_dir() -> PathBuf {
     if let Ok(dir) = std::env::var("XDG_DOCUMENTS_DIR") {
         if !dir.trim().is_empty() {
@@ -56,7 +58,16 @@ pub fn default_documents_dir() -> PathBuf {
 
     if let Ok(home) = std::env::var("HOME") {
         if !home.trim().is_empty() {
-            return PathBuf::from(home).join("Documents");
+            let home = PathBuf::from(home);
+            let user_dirs =
+                std::fs::read_to_string(home.join(".config/user-dirs.dirs")).unwrap_or_default();
+            if let Some(dir) =
+                crate::file_picker::parse_user_dir(&user_dirs, "XDG_DOCUMENTS_DIR", &home)
+                    .filter(|dir| *dir != home)
+            {
+                return dir;
+            }
+            return home.join("Documents");
         }
     }
 

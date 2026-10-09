@@ -74,6 +74,7 @@ Die Oberfläche gibt es auf Deutsch und Englisch; ink-notes folgt der Systemspra
 
 ### Updates
 - Die App prüft auf neue Versionen auf Gitea und installiert sie auf Wunsch. Installiert wird nur, wenn die Minisign-Signatur und die SHA-256-Prüfsumme stimmen (Details unten).
+- Als Flatpak sucht ink-notes nicht selbst nach Updates; die kommen dann über die Software-Verwaltung (`flatpak update`).
 
 ---
 
@@ -189,6 +190,17 @@ Mehr dazu in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md), das Speicherformat 
 ```
 
 Veröffentlicht wird über Gitea Actions ([`.gitea/workflows/release.yaml`](.gitea/workflows/release.yaml)), sobald ein Tag `vX.Y.Z` gepusht wird: Tests, Pakete bauen, signieren, Release anlegen. Manuell geht es mit `GITEA_TOKEN=… ./scripts/publish-gitea-release.sh`.
+
+### Flatpak
+
+Das Manifest liegt in [`packaging/flatpak/`](packaging/flatpak/) (Runtime `org.freedesktop.Platform` 26.08, Rust aus der SDK-Erweiterung `rust-stable`). Lokal bauen und installieren:
+
+```bash
+flatpak-builder --user --install --force-clean target/flatpak-build packaging/flatpak/eu.pansi.ink-notes.yml
+flatpak run eu.pansi.ink-notes
+```
+
+Nach jeder Änderung an `Cargo.lock` muss `packaging/flatpak/cargo-sources.json` mit dem [flatpak-cargo-generator](https://github.com/flatpak/flatpak-builder-tools/tree/master/cargo) neu erzeugt werden (`python3 flatpak-cargo-generator.py Cargo.lock -o packaging/flatpak/cargo-sources.json`). In der Sandbox darf ink-notes Bilder, Downloads und Schreibtisch lesen und in den Dokumente-Ordner exportieren; die Notizbücher liegen unter `~/.var/app/eu.pansi.ink-notes/`.
 
 ### Release-Signatur einrichten (einmalig)
 

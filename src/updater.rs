@@ -118,11 +118,20 @@ pub enum RuntimeEnvironment {
     DebPackage { binary_path: PathBuf },
     /// Aus Quellcode / Entwicklungs-Binary (z.B. target/debug oder target/release)
     PortableOrDev { binary_path: PathBuf },
+    /// Als Flatpak installiert: Updates kommen über die Software-Verwaltung, ink-notes lädt
+    /// selbst nichts herunter (Vorgabe von Flathub)
+    Flatpak,
 }
 
 impl RuntimeEnvironment {
     /// Erkennt die aktuelle Laufzeitumgebung anhand der Umgebung und des Binärpfads.
     pub fn detect() -> Self {
+        if is_flatpak(
+            std::env::var("FLATPAK_ID").ok().as_deref(),
+            Path::new("/.flatpak-info").exists(),
+        ) {
+            return RuntimeEnvironment::Flatpak;
+        }
         let appimage_var = std::env::var("APPIMAGE").ok();
         let current_exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("ink-notes"));
         Self::detect_from(appimage_var.as_deref(), &current_exe)
@@ -156,8 +165,20 @@ impl RuntimeEnvironment {
             RuntimeEnvironment::AppImage { .. } => t!("AppImage (Portabel)"),
             RuntimeEnvironment::DebPackage { .. } => t!("System-Paket (.deb)"),
             RuntimeEnvironment::PortableOrDev { .. } => t!("Entwicklung / Lokal"),
+            RuntimeEnvironment::Flatpak => "Flatpak",
         }
     }
+
+    /// Ob ink-notes selbst nach Updates suchen und sie installieren darf
+    pub fn self_update_allowed(&self) -> bool {
+        !matches!(self, RuntimeEnvironment::Flatpak)
+    }
+}
+
+/// Läuft ink-notes in einer Flatpak-Sandbox (`FLATPAK_ID` gesetzt oder `/.flatpak-info`
+/// vorhanden)?
+pub fn is_flatpak(flatpak_id: Option<&str>, info_file_exists: bool) -> bool {
+    flatpak_id.is_some_and(|id| !id.trim().is_empty()) || info_file_exists
 }
 
 /// Bereinigt und validiert einen Asset-Dateinamen gegen Path Traversal Angriffe.
@@ -578,6 +599,9 @@ impl UpdaterController {
 
     /// Fragt im Hintergrund die Gitea-API ab.
     pub fn check_for_updates(&mut self) {
+        if !self.runtime.self_update_allowed() {
+            return;
+        }
         if matches!(
             self.status,
             UpdaterStatus::Checking | UpdaterStatus::Downloading { .. }
@@ -887,6 +911,10 @@ impl UpdaterController {
                 }
                 Ok(())
             }
+            RuntimeEnvironment::Flatpak => Err(t!(
+                "Die Flatpak-Version wird über die Software-Verwaltung aktualisiert."
+            )
+            .to_string()),
         }
     }
 
@@ -1071,6 +1099,19 @@ dcdeb7ac87d9e6cb8022e5a71bc7f2c56d779b4fce4efdd5bae5be3b0214884a  ink-notes_0.1.
             RuntimeEnvironment::PortableOrDev {
                 binary_path: PathBuf::from("/home/user/ink-notes/target/release/ink-notes")
             }
+        );
+    }
+
+    #[test]
+    fn test_flatpak_detection_disables_self_update() {
+        assert!(is_flatpak(Some("eu.pansi.ink-notes"), false));
+        assert!(is_flatpak(None, true));
+        assert!(!is_flatpak(Some(" "), false));
+        assert!(!is_flatpak(None, false));
+        assert!(!RuntimeEnvironment::Flatpak.self_update_allowed());
+        assert!(
+            RuntimeEnvironment::detect_from(None, Path::new("/usr/bin/ink-notes"))
+                .self_update_allowed()
         );
     }
 

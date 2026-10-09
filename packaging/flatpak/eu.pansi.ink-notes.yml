@@ -1,0 +1,55 @@
+# Flatpak-Manifest für ink-notes (Flathub).
+#
+# Lokal bauen und installieren (aus dem Repository-Wurzelverzeichnis):
+#   flatpak-builder --user --install --force-clean target/flatpak-build \
+#       packaging/flatpak/eu.pansi.ink-notes.yml
+#
+# cargo-sources.json nach jeder Änderung an Cargo.lock neu erzeugen:
+#   python3 flatpak-cargo-generator.py Cargo.lock -o packaging/flatpak/cargo-sources.json
+# (flatpak-builder-tools, https://github.com/flatpak/flatpak-builder-tools/tree/master/cargo)
+#
+# Für die Einreichung bei Flathub die Quelle `type: dir` durch das Release-Tag ersetzen
+# (type: git, url, tag, commit).
+id: eu.pansi.ink-notes
+runtime: org.freedesktop.Platform
+runtime-version: '26.08'
+sdk: org.freedesktop.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+command: ink-notes
+finish-args:
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --share=ipc
+  - --device=dri
+  # Die eingebaute Dateiauswahl (Bilder und PDFs einfügen) arbeitet ohne Desktop-Portal und
+  # bietet Bilder, Downloads und Schreibtisch an; Export (PDF, PNG, SVG) in den Dokumente-Ordner.
+  # Ziehen aus dem Dateimanager geht über das Dokumenten-Portal auch aus anderen Ordnern.
+  - --filesystem=xdg-pictures:ro
+  - --filesystem=xdg-download:ro
+  - --filesystem=xdg-desktop:ro
+  - --filesystem=xdg-documents
+build-options:
+  append-path: /usr/lib/sdk/rust-stable/bin
+  env:
+    CARGO_HOME: /run/build/ink-notes/cargo
+modules:
+  - name: ink-notes
+    buildsystem: simple
+    build-commands:
+      - cargo --offline build --release --locked
+      - install -Dm755 target/release/ink-notes /app/bin/ink-notes
+      - install -Dm644 packaging/eu.pansi.ink-notes.desktop /app/share/applications/eu.pansi.ink-notes.desktop
+      - install -Dm644 packaging/eu.pansi.ink-notes.metainfo.xml /app/share/metainfo/eu.pansi.ink-notes.metainfo.xml
+      - install -Dm644 assets/ink-notes.svg /app/share/icons/hicolor/scalable/apps/eu.pansi.ink-notes.svg
+      - install -Dm644 assets/ink-notes.png /app/share/icons/hicolor/256x256/apps/eu.pansi.ink-notes.png
+    sources:
+      - type: dir
+        path: ../..
+        skip:
+          - target
+          - .git
+          - .flatpak-builder
+          - ideas.txt
+          - issue.txt
+      - cargo-sources.json
