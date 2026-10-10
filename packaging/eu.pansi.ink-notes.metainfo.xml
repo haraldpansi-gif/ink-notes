@@ -67,6 +67,11 @@
   </branding>
   <content_rating type="oars-1.1" />
   <releases>
+    <release version="0.26.0" date="2026-10-10">
+      <description>
+        <p>Select and move objects with a finger; text and make-space tools also work with a finger. Exports go to the documents folder of the user directories.</p>
+      </description>
+    </release>
     <release version="0.25.0" date="2026-10-09">
       <description>
         <p>English user interface; the language follows the system and can be changed in the menu. Holding to snap a shape tolerates a slightly trembling pen.</p>
