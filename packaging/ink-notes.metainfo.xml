@@ -72,6 +72,11 @@
       <caption xml:lang="de">Erkannte Formen: Koordinatensystem, Dreieck, Kreis, Oktaeder</caption>
       <image>https://gitea.pansi.eu/harald/ink-notes/raw/branch/main/packaging/screenshots/shapes.png</image>
     </screenshot>
+    <screenshot>
+      <caption>Annotating imported PDF slides</caption>
+      <caption xml:lang="de">Importierte PDF-Folien beschriften</caption>
+      <image>https://gitea.pansi.eu/harald/ink-notes/raw/branch/main/packaging/screenshots/pdf.png</image>
+    </screenshot>
   </screenshots>
   <branding>
     <color type="primary" scheme_preference="light">#a8c8f0</color>
