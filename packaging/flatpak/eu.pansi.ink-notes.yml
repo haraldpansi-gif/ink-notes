@@ -50,6 +50,4 @@ modules:
           - target
           - .git
           - .flatpak-builder
-          - ideas.txt
-          - issue.txt
       - cargo-sources.json
