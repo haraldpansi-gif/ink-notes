@@ -596,6 +596,31 @@ fn insert_image_on_page(
     ));
 }
 
+/// Trifft ein Finger auf `screen` die Auswahl (Rahmen, Griffe) oder ein Objekt? Dann wählt bzw.
+/// verschiebt er, sonst verschiebt er das Blatt.
+fn finger_grabs_selection(
+    screen: (f32, f32),
+    canvas: &CanvasState,
+    page: &ink_notes::document::Page,
+    pixels_per_point: f32,
+    selection_state: &SelectionState,
+) -> bool {
+    let on_selection = !selection_state.is_empty()
+        && !matches!(
+            selection_state.hit_test_handles(
+                page,
+                canvas,
+                Vec2::new(screen.0, screen.1),
+                pixels_per_point
+            ),
+            SelectionHandleHit::None
+        );
+    on_selection
+        || canvas
+            .screen_to_page(screen.0, screen.1)
+            .is_some_and(|p| page.find_stroke_at(p, 25.0).is_some())
+}
+
 /// Auswahlwerkzeug: Druck auf `screen` (physische Pixel) greift einen Griff, die Auswahl
 /// oder das Objekt darunter oder beginnt einen Auswahlrahmen. Mit `shift` wird die Auswahl
 /// erweitert. `true`, wenn etwas begonnen wurde.
@@ -2820,7 +2845,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     cursor_screen_pos = (tx, ty);
                                     current_pressure = pressure;
 
-                                    if !ui_state.touch_draw_enabled {
+                                    // Ohne Finger-Zeichnen verschiebt ein Finger das Blatt – außer bei
+                                    // Werkzeugen, die nicht zeichnen: Text und Platz schaffen nehmen den
+                                    // Finger immer, Auswählen, wenn er ein Objekt oder die Auswahl trifft
+                                    // (Issue #26)
+                                    let finger_uses_tool = match ui_state.active_tool {
+                                        ActiveTool::Text | ActiveTool::Space => true,
+                                        ActiveTool::Select => {
+                                            focus_page_at!((tx, ty));
+                                            finger_grabs_selection(
+                                                (tx, ty),
+                                                &canvas,
+                                                notebook.current_page(),
+                                                egui_ctx.pixels_per_point(),
+                                                &selection_state,
+                                            )
+                                        }
+                                        _ => false,
+                                    };
+                                    if finger_uses_tool {
+                                        // Halten soll hier kein Kontextmenü öffnen
+                                        long_press.cancel();
+                                    }
+                                    if !ui_state.touch_draw_enabled && !finger_uses_tool {
                                         // Standard: 1 Finger scrollt / verschiebt den Canvas (Pan)
                                         is_touch_panning = true;
                                         touch_pan_last_pos = (tx, ty);
