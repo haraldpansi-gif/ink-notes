@@ -61,6 +61,18 @@
   <url type="homepage">https://gitea.pansi.eu/harald/ink-notes</url>
   <url type="bugtracker">https://gitea.pansi.eu/harald/ink-notes/issues</url>
   <url type="vcs-browser">https://gitea.pansi.eu/harald/ink-notes</url>
+  <screenshots>
+    <screenshot type="default">
+      <caption>Notes with highlighter, handwriting and text boxes</caption>
+      <caption xml:lang="de">Notizen mit Textmarker, Handschrift und Textfeldern</caption>
+      <image>https://gitea.pansi.eu/harald/ink-notes/raw/branch/main/packaging/screenshots/notes.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>Recognized shapes: coordinate system, triangle, circle, octahedron</caption>
+      <caption xml:lang="de">Erkannte Formen: Koordinatensystem, Dreieck, Kreis, Oktaeder</caption>
+      <image>https://gitea.pansi.eu/harald/ink-notes/raw/branch/main/packaging/screenshots/shapes.png</image>
+    </screenshot>
+  </screenshots>
   <branding>
     <color type="primary" scheme_preference="light">#a8c8f0</color>
     <color type="primary" scheme_preference="dark">#1f3a5f</color>
