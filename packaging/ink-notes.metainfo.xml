@@ -65,17 +65,17 @@
     <screenshot type="default">
       <caption>Notes with highlighter, handwriting and text boxes</caption>
       <caption xml:lang="de">Notizen mit Textmarker, Handschrift und Textfeldern</caption>
-      <image>https://gitea.pansi.eu/harald/ink-notes/raw/branch/main/packaging/screenshots/notes.png</image>
+      <image>https://gitea.pansi.eu/harald/ink-notes/raw/tag/v0.26.1/packaging/screenshots/notes.png</image>
     </screenshot>
     <screenshot>
       <caption>Recognized shapes: coordinate system, triangle, circle, octahedron</caption>
       <caption xml:lang="de">Erkannte Formen: Koordinatensystem, Dreieck, Kreis, Oktaeder</caption>
-      <image>https://gitea.pansi.eu/harald/ink-notes/raw/branch/main/packaging/screenshots/shapes.png</image>
+      <image>https://gitea.pansi.eu/harald/ink-notes/raw/tag/v0.26.1/packaging/screenshots/shapes.png</image>
     </screenshot>
     <screenshot>
       <caption>Annotating imported PDF slides</caption>
       <caption xml:lang="de">Importierte PDF-Folien beschriften</caption>
-      <image>https://gitea.pansi.eu/harald/ink-notes/raw/branch/main/packaging/screenshots/pdf.png</image>
+      <image>https://gitea.pansi.eu/harald/ink-notes/raw/tag/v0.26.1/packaging/screenshots/pdf.png</image>
     </screenshot>
   </screenshots>
   <branding>
@@ -84,6 +84,11 @@
   </branding>
   <content_rating type="oars-1.1" />
   <releases>
+    <release version="0.26.1" date="2026-10-10">
+      <description>
+        <p>Screenshots in the app description for software centers. The app itself is unchanged.</p>
+      </description>
+    </release>
     <release version="0.26.0" date="2026-10-10">
       <description>
         <p>Select and move objects with a finger; text and make-space tools also work with a finger. Exports go to the documents folder of the user directories.</p>
