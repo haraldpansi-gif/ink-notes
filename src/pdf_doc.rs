@@ -6,7 +6,8 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::mpsc::{self, Receiver};
+use std::sync::{Arc, Condvar, Mutex};
 
 use hayro::hayro_interpret::InterpreterSettings;
 use hayro::hayro_syntax::{LoadPdfError, Pdf};
@@ -105,7 +106,58 @@ struct RenderRequest {
     path: PathBuf,
     page: usize,
     max_pixels: u32,
+    /// Wichtigkeit: kleiner zuerst (Reihenfolge der Anfragen im aktuellen Bild)
+    rank: usize,
 }
+
+/// Wichtigkeit einer vorab gerenderten Seite: nach allen sichtbaren.
+const PREFETCH_RANK: usize = usize::MAX;
+
+/// Warteschlange der noch nicht begonnenen Render-Aufträge, geteilt mit dem Render-Thread.
+#[derive(Default)]
+struct RenderQueue {
+    requests: Vec<RenderRequest>,
+    shutdown: bool,
+}
+
+impl RenderQueue {
+    /// Fügt einen Auftrag hinzu oder macht einen wartenden wichtiger.
+    fn push(&mut self, request: RenderRequest) {
+        match self.requests.iter_mut().find(|r| r.key == request.key) {
+            Some(queued) => queued.rank = queued.rank.min(request.rank),
+            None => self.requests.push(request),
+        }
+    }
+
+    /// Nimmt den wichtigsten Auftrag heraus.
+    fn pop(&mut self) -> Option<RenderRequest> {
+        let (index, _) = self
+            .requests
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, r)| r.rank)?;
+        Some(self.requests.swap_remove(index))
+    }
+
+    /// Verwirft Aufträge, für die `rank_of` keinen Rang mehr liefert, und ordnet die übrigen
+    /// neu. Liefert die Schlüssel der verworfenen.
+    fn retain(&mut self, rank_of: impl Fn(&str) -> Option<usize>) -> Vec<String> {
+        let mut dropped = Vec::new();
+        self.requests.retain_mut(|r| match rank_of(&r.key) {
+            Some(rank) => {
+                r.rank = rank;
+                true
+            }
+            None => {
+                dropped.push(r.key.clone());
+                false
+            }
+        });
+        dropped
+    }
+}
+
+type SharedQueue = Arc<(Mutex<RenderQueue>, Condvar)>;
 
 /// Ergebnis eines Render-Auftrags: die Mipmap-Stufen der Seite (siehe
 /// [`crate::image_layer::mip_chain`]), Stufe 0 in voller Größe.
@@ -113,23 +165,48 @@ pub type RenderResult = Result<Vec<RgbaImage>, String>;
 
 /// Rendert PDF-Seiten im Hintergrund. Fertige Seiten holt der Event-Loop mit
 /// [`PdfRenderService::take`] ab; `on_ready` weckt ihn dafür auf.
+///
+/// Je Bild meldet der Event-Loop zwischen [`Self::begin_frame`] und [`Self::end_frame`] mit
+/// `take` alle Seiten an, die er gerade braucht (die wichtigste zuerst). Gerendert wird die
+/// wichtigste wartende Seite zuerst; Seiten, die beim schnellen Scrollen schon wieder aus dem
+/// Bild sind, verwirft `end_frame`, bevor der Render-Thread sie beginnt.
 pub struct PdfRenderService {
-    requests: Sender<RenderRequest>,
+    queue: SharedQueue,
+    worker: std::thread::JoinHandle<()>,
     results: Receiver<(String, RenderResult)>,
+    /// Wartende oder gerade gerenderte Seiten
     pending: HashSet<String>,
     ready: HashMap<String, RenderResult>,
+    /// Im aktuellen Bild angeforderte Seiten in ihrer Reihenfolge
+    wanted: Vec<String>,
+    /// Zuletzt vorab angeforderte Seite (bleibt erhalten, bis sie abgeholt wird)
+    prefetched: Option<String>,
 }
 
 impl PdfRenderService {
     pub fn new(on_ready: impl Fn() + Send + 'static) -> Self {
-        let (req_tx, req_rx) = mpsc::channel::<RenderRequest>();
+        let queue: SharedQueue = Arc::default();
         let (res_tx, res_rx) = mpsc::channel();
-        std::thread::Builder::new()
+        let worker_queue = Arc::clone(&queue);
+        let worker = std::thread::Builder::new()
             .name("pdf-render".into())
             .spawn(move || {
                 // Zuletzt geöffnetes PDF behalten: Blättern rendert meist dieselbe Datei
                 let mut open_pdf: Option<(PathBuf, Pdf)> = None;
-                while let Ok(request) = req_rx.recv() {
+                loop {
+                    let request = {
+                        let (lock, ready) = &*worker_queue;
+                        let mut queue = lock.lock().unwrap_or_else(|e| e.into_inner());
+                        loop {
+                            if queue.shutdown {
+                                return;
+                            }
+                            if let Some(request) = queue.pop() {
+                                break request;
+                            }
+                            queue = ready.wait(queue).unwrap_or_else(|e| e.into_inner());
+                        }
+                    };
                     if open_pdf.as_ref().map(|(p, _)| p) != Some(&request.path) {
                         open_pdf = std::fs::read(&request.path)
                             .map_err(|e| e.to_string())
@@ -146,32 +223,57 @@ impl PdfRenderService {
                         None => Err(t!("PDF kann nicht geöffnet werden").into()),
                     };
                     if res_tx.send((request.key, result)).is_err() {
-                        break;
+                        return;
                     }
                     on_ready();
                 }
             })
             .expect("PDF-Render-Thread konnte nicht gestartet werden");
         Self {
-            requests: req_tx,
+            queue,
+            worker,
             results: res_rx,
             pending: HashSet::new(),
             ready: HashMap::new(),
+            wanted: Vec::new(),
+            prefetched: None,
         }
+    }
+
+    /// Beginnt die Anfragen eines neuen Bildes (siehe [`Self::end_frame`]).
+    pub fn begin_frame(&mut self) {
+        self.wanted.clear();
+    }
+
+    /// Verwirft wartende Aufträge und fertige Ergebnisse für Seiten, die in diesem Bild nicht
+    /// mehr angefordert wurden (außer der vorab angeforderten), und ordnet die übrigen nach
+    /// der Reihenfolge der Anfragen.
+    pub fn end_frame(&mut self) {
+        let rank_of = |key: &str| {
+            self.wanted
+                .iter()
+                .position(|k| k == key)
+                .or_else(|| (self.prefetched.as_deref() == Some(key)).then_some(PREFETCH_RANK))
+        };
+        let dropped = {
+            let mut queue = self.queue.0.lock().unwrap_or_else(|e| e.into_inner());
+            queue.retain(rank_of)
+        };
+        for key in dropped {
+            self.pending.remove(&key);
+        }
+        self.ready.retain(|key, _| rank_of(key).is_some());
     }
 
     /// Rendert eine Seite vorab (z. B. die nächste), ohne auf das Ergebnis zu warten;
     /// [`Self::take`] liefert es später sofort.
     pub fn prefetch(&mut self, key: &str, path: PathBuf, page: usize) {
         self.collect();
-        if self.ready.contains_key(key) || self.pending.contains(key) {
+        self.prefetched = Some(key.to_string());
+        if self.ready.contains_key(key) {
             return;
         }
-        // Vorab gerenderte Seiten nicht unbegrenzt aufheben
-        if self.ready.len() >= 2 {
-            self.ready.clear();
-        }
-        self.request(key, path, page, DISPLAY_RENDER_PIXELS);
+        self.request(key, path, page, DISPLAY_RENDER_PIXELS, PREFETCH_RANK);
     }
 
     fn collect(&mut self) {
@@ -181,21 +283,37 @@ impl PdfRenderService {
         }
     }
 
-    /// Erteilt den Auftrag, falls noch keiner läuft. `false`, wenn der Thread beendet ist.
-    fn request(&mut self, key: &str, path: PathBuf, page: usize, max_pixels: u32) -> bool {
-        if !self.pending.insert(key.to_string()) {
+    /// Erteilt den Auftrag bzw. macht einen wartenden wichtiger. `false`, wenn der
+    /// Render-Thread beendet ist.
+    fn request(
+        &mut self,
+        key: &str,
+        path: PathBuf,
+        page: usize,
+        max_pixels: u32,
+        rank: usize,
+    ) -> bool {
+        if self.worker.is_finished() {
+            self.pending.remove(key);
+            return false;
+        }
+        let (lock, ready) = &*self.queue;
+        let mut queue = lock.lock().unwrap_or_else(|e| e.into_inner());
+        // Steht ein angefragter Auftrag nicht mehr in der Warteschlange, rendert ihn der
+        // Thread gerade: nicht doppelt erteilen
+        let waiting = queue.requests.iter().any(|r| r.key == key);
+        if self.pending.contains(key) && !waiting {
             return true;
         }
-        let request = RenderRequest {
+        self.pending.insert(key.to_string());
+        queue.push(RenderRequest {
             key: key.to_string(),
             path,
             page,
             max_pixels,
-        };
-        if self.requests.send(request).is_err() {
-            self.pending.remove(key);
-            return false;
-        }
+            rank,
+        });
+        ready.notify_one();
         true
     }
 
@@ -209,13 +327,26 @@ impl PdfRenderService {
         max_pixels: u32,
     ) -> Option<RenderResult> {
         self.collect();
+        if self.prefetched.as_deref() == Some(key) {
+            self.prefetched = None;
+        }
         if let Some(result) = self.ready.remove(key) {
             return Some(result);
         }
-        if !self.request(key, path, page, max_pixels) {
+        let rank = self.wanted.len();
+        self.wanted.push(key.to_string());
+        if !self.request(key, path, page, max_pixels, rank) {
             return Some(Err(t!("PDF-Render-Thread beendet").into()));
         }
         None
+    }
+}
+
+impl Drop for PdfRenderService {
+    fn drop(&mut self) {
+        let (lock, ready) = &*self.queue;
+        lock.lock().unwrap_or_else(|e| e.into_inner()).shutdown = true;
+        ready.notify_all();
     }
 }
 
@@ -320,6 +451,76 @@ pub(crate) mod tests {
         wake_rx
             .recv_timeout(std::time::Duration::from_secs(20))
             .unwrap();
+        assert!(service.take("a#0", path, 0, px).unwrap().is_ok());
+    }
+
+    fn request(key: &str, rank: usize) -> RenderRequest {
+        RenderRequest {
+            key: key.into(),
+            path: PathBuf::new(),
+            page: 0,
+            max_pixels: 1,
+            rank,
+        }
+    }
+
+    #[test]
+    fn test_render_queue_priorities_and_stale_requests() {
+        let mut queue = RenderQueue::default();
+        queue.push(request("a", 2));
+        queue.push(request("b", 0));
+        queue.push(request("c", 1));
+        // Erneute Anfrage macht einen wartenden Auftrag wichtiger, ohne ihn zu verdoppeln
+        queue.push(request("a", 0));
+        assert_eq!(queue.requests.len(), 3);
+        assert_eq!(queue.pop().map(|r| r.key), Some("a".into()));
+
+        // Nach dem Scrollen wird nur noch „c“ gebraucht: „b“ fällt weg
+        let dropped = queue.retain(|key| (key == "c").then_some(0));
+        assert_eq!(dropped, vec!["b".to_string()]);
+        assert_eq!(queue.pop().map(|r| r.key), Some("c".into()));
+        assert!(queue.pop().is_none());
+    }
+
+    #[test]
+    fn test_end_frame_drops_unwanted_results_but_keeps_prefetch() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.pdf");
+        std::fs::write(&path, sample_pdf(&[(400.0, 300.0, 0), (400.0, 300.0, 0)])).unwrap();
+        let (wake_tx, wake_rx) = mpsc::channel();
+        let mut service = PdfRenderService::new(move || {
+            let _ = wake_tx.send(());
+        });
+        let px = DISPLAY_RENDER_PIXELS;
+        let wait = || {
+            wake_rx
+                .recv_timeout(std::time::Duration::from_secs(20))
+                .unwrap()
+        };
+
+        // Bild 1 braucht Seite 1; vorab gerendert wird Seite 2
+        service.begin_frame();
+        assert!(service.take("a#0", path.clone(), 0, px).is_none());
+        service.prefetch("a#1", path.clone(), 1);
+        service.end_frame();
+        wait();
+        wait();
+
+        // Bild 2 braucht keine Seite mehr (weggescrollt): Seite 1 wird verworfen,
+        // die vorab gerenderte Seite 2 bleibt
+        service.begin_frame();
+        service.collect();
+        service.end_frame();
+        assert!(!service.ready.contains_key("a#0"));
+        assert!(service.ready.contains_key("a#1"));
+        assert!(service.pending.is_empty());
+
+        service.begin_frame();
+        assert!(service.take("a#1", path.clone(), 1, px).unwrap().is_ok());
+        // Seite 1 wird bei Bedarf neu gerendert
+        assert!(service.take("a#0", path.clone(), 0, px).is_none());
+        service.end_frame();
+        wait();
         assert!(service.take("a#0", path, 0, px).unwrap().is_ok());
     }
 

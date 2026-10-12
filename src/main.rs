@@ -3920,6 +3920,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             canvas.set_neighbor_pages(&[]);
                         }
                         let assets = AssetStore::new(&storage_dir);
+                        // PDF-Seiten, die nach diesem Bild nicht mehr gebraucht werden (schnelles
+                        // Scrollen), verwirft end_frame, bevor sie gerendert werden
+                        pdf_renderer.begin_frame();
                         canvas.prepare_images(&mut |key| texture_for(key, &assets, &mut pdf_renderer));
                         // Nächste PDF-Seite vorab rendern, damit Blättern sofort klappt
                         if !canvas.is_waiting_for_images() {
@@ -3930,6 +3933,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                             }
                         }
+                        pdf_renderer.end_frame();
                         match canvas.render(&clipped_primitives, &screen_descriptor, &full_output.textures_delta) {
                             Ok(_) => {}
                             Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
