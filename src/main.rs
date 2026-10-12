@@ -941,25 +941,21 @@ fn texture_for(
     assets: &AssetStore,
     pdf_renderer: &mut PdfRenderService,
 ) -> TextureSource {
-    let result = match key.contains('#') {
-        true => {
-            let Some((Ok(path), page, max_pixels)) = ink_notes::pdf_doc::parse_page_key(key)
-                .map(|(asset, page, px)| (assets.path_of(asset), page, px))
-            else {
-                return TextureSource::Failed(t!("Ungültiger PDF-Verweis '{key}'", key = key));
-            };
-            match pdf_renderer.take(key, path, page, max_pixels) {
-                Some(result) => result,
-                None => return TextureSource::Pending,
-            }
-        }
-        false => assets
-            .load_rgba(key, ink_notes::assets::MAX_DISPLAY_DIMENSION)
-            .map_err(|e| e.to_string()),
+    if !key.contains('#') {
+        return match assets.load_rgba(key, ink_notes::assets::MAX_DISPLAY_DIMENSION) {
+            Ok(image) => TextureSource::Ready(image),
+            Err(err) => TextureSource::Failed(err.to_string()),
+        };
+    }
+    let Some((Ok(path), page, max_pixels)) = ink_notes::pdf_doc::parse_page_key(key)
+        .map(|(asset, page, px)| (assets.path_of(asset), page, px))
+    else {
+        return TextureSource::Failed(t!("Ungültiger PDF-Verweis '{key}'", key = key));
     };
-    match result {
-        Ok(image) => TextureSource::Ready(image),
-        Err(err) => TextureSource::Failed(err),
+    match pdf_renderer.take(key, path, page, max_pixels) {
+        Some(Ok(levels)) => TextureSource::ReadyMips(levels),
+        Some(Err(err)) => TextureSource::Failed(err),
+        None => TextureSource::Pending,
     }
 }
 

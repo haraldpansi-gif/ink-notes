@@ -1,7 +1,8 @@
 //! Lesen und Rendern importierter PDF-Dateien mit `hayro` (reines Rust, nur CPU).
 //!
 //! Das Rendern einer Seite kann einige hundert Millisekunden dauern; [`PdfRenderService`]
-//! erledigt es deshalb in einem Hintergrund-Thread und meldet fertige Seiten zurück.
+//! erledigt es deshalb in einem Hintergrund-Thread, samt Mipmaps für die Anzeige, und meldet
+//! fertige Seiten zurück.
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -106,8 +107,9 @@ struct RenderRequest {
     max_pixels: u32,
 }
 
-/// Ergebnis eines Render-Auftrags.
-pub type RenderResult = Result<RgbaImage, String>;
+/// Ergebnis eines Render-Auftrags: die Mipmap-Stufen der Seite (siehe
+/// [`crate::image_layer::mip_chain`]), Stufe 0 in voller Größe.
+pub type RenderResult = Result<Vec<RgbaImage>, String>;
 
 /// Rendert PDF-Seiten im Hintergrund. Fertige Seiten holt der Event-Loop mit
 /// [`PdfRenderService::take`] ab; `on_ready` weckt ihn dafür auf.
@@ -137,7 +139,10 @@ impl PdfRenderService {
                             .map(|pdf| (request.path.clone(), pdf));
                     }
                     let result = match &open_pdf {
-                        Some((_, pdf)) => render_page(pdf, request.page, request.max_pixels),
+                        // Mipmaps hier statt im Haupt-Thread: sonst stockt das Scrollen bei
+                        // jeder neu gerenderten Seite (Issue #28)
+                        Some((_, pdf)) => render_page(pdf, request.page, request.max_pixels)
+                            .map(crate::image_layer::mip_chain),
                         None => Err(t!("PDF kann nicht geöffnet werden").into()),
                     };
                     if res_tx.send((request.key, result)).is_err() {
@@ -303,8 +308,12 @@ pub(crate) mod tests {
         wake_rx
             .recv_timeout(std::time::Duration::from_secs(20))
             .unwrap();
-        let image = service.take("a#0", path.clone(), 0, px).unwrap().unwrap();
-        assert_eq!(image.width, DISPLAY_RENDER_PIXELS);
+        let levels = service.take("a#0", path.clone(), 0, px).unwrap().unwrap();
+        assert_eq!(levels[0].width, DISPLAY_RENDER_PIXELS);
+        assert_eq!(
+            (levels.last().unwrap().width, levels.last().unwrap().height),
+            (1, 1)
+        );
 
         // Vorab rendern: danach sofort verfügbar
         service.prefetch("a#0", path.clone(), 0);

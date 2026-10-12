@@ -45,24 +45,55 @@ pub fn quad_vertices(corners: &[glam::Vec2; 4]) -> [ImageVertex; 6] {
     [tl, tr, bl, bl, tr, br]
 }
 
-/// Mipmap-Stufen eines Bildes, jeweils halbe Kantenlänge bis 1 × 1.
-pub fn mip_chain(base: &RgbaImage) -> Vec<RgbaImage> {
-    let mut levels = vec![base.clone()];
-    let Some(mut current) =
-        image::RgbaImage::from_raw(base.width, base.height, base.pixels.clone())
-    else {
-        return levels;
-    };
-    while current.width() > 1 || current.height() > 1 {
-        let (w, h) = ((current.width() / 2).max(1), (current.height() / 2).max(1));
-        current = image::imageops::resize(&current, w, h, image::imageops::FilterType::Triangle);
-        levels.push(RgbaImage {
-            width: w,
-            height: h,
-            pixels: current.as_raw().clone(),
-        });
+/// Mipmap-Stufen eines Bildes, jeweils halbe Kantenlänge bis 1 × 1. Für eine gerenderte
+/// PDF-Seite dauert das spürbar (2560 px: einige 10 ms); deshalb erzeugt sie der
+/// PDF-Render-Thread und nicht der Haupt-Thread.
+pub fn mip_chain(base: RgbaImage) -> Vec<RgbaImage> {
+    let mut levels = vec![base];
+    loop {
+        let current = &levels[levels.len() - 1];
+        if current.width <= 1 && current.height <= 1 {
+            break;
+        }
+        let next = half_size(current);
+        levels.push(next);
     }
     levels
+}
+
+/// Halbiert ein Bild: Mittelwert aus je 2 × 2 Pixeln (bei ungerader Kante entfällt die
+/// letzte Spalte bzw. Zeile, bei Kantenlänge 1 wird nur in der anderen Richtung gemittelt).
+fn half_size(image: &RgbaImage) -> RgbaImage {
+    let (w, h) = (image.width as usize, image.height as usize);
+    let (nw, nh) = ((w / 2).max(1), (h / 2).max(1));
+    let mut pixels = vec![0u8; nw * nh * 4];
+    if image.pixels.len() < w * h * 4 {
+        return RgbaImage {
+            width: nw as u32,
+            height: nh as u32,
+            pixels,
+        };
+    }
+    for y in 0..nh {
+        let (y0, y1) = ((2 * y).min(h - 1), (2 * y + 1).min(h - 1));
+        let (row0, row1) = (&image.pixels[y0 * w * 4..], &image.pixels[y1 * w * 4..]);
+        let out = &mut pixels[y * nw * 4..(y + 1) * nw * 4];
+        for x in 0..nw {
+            let (x0, x1) = ((2 * x).min(w - 1) * 4, (2 * x + 1).min(w - 1) * 4);
+            for c in 0..4 {
+                let sum = row0[x0 + c] as u16
+                    + row0[x1 + c] as u16
+                    + row1[x0 + c] as u16
+                    + row1[x1 + c] as u16;
+                out[x * 4 + c] = ((sum + 2) / 4) as u8;
+            }
+        }
+    }
+    RgbaImage {
+        width: nw as u32,
+        height: nh as u32,
+        pixels,
+    }
 }
 
 /// Name der Ersatztextur für Bilder, deren Datei fehlt oder beschädigt ist.
@@ -74,6 +105,8 @@ const TEXTURE_CACHE_BYTES: u64 = 384 * 1024 * 1024;
 /// Antwort einer Texturquelle für einen Schlüssel.
 pub enum TextureSource {
     Ready(RgbaImage),
+    /// Fertige Mipmap-Stufen (siehe [`mip_chain`]), z. B. vom PDF-Render-Thread
+    ReadyMips(Vec<RgbaImage>),
     /// Wird gerade erzeugt; später erneut fragen
     Pending,
     Failed(String),
@@ -233,10 +266,16 @@ impl ImageLayer {
                 continue;
             }
             let (bind_group, bytes) = match load(&key) {
-                TextureSource::Ready(image) => (
-                    self.upload_texture(device, queue, &key, &image),
-                    image.pixels.len() as u64 * 4 / 3,
-                ),
+                TextureSource::Ready(image) => {
+                    self.upload_texture(device, queue, &key, mip_chain(image))
+                }
+                TextureSource::ReadyMips(levels) if !levels.is_empty() => {
+                    self.upload_texture(device, queue, &key, levels)
+                }
+                TextureSource::ReadyMips(_) => {
+                    eprintln!("[Bilder] '{key}' kann nicht angezeigt werden: leeres Bild");
+                    (self.missing_texture(device, queue), 4)
+                }
                 // Noch in Arbeit (PDF-Seite wird gerendert): beim nächsten Bild erneut fragen
                 TextureSource::Pending => continue,
                 TextureSource::Failed(err) => {
@@ -342,17 +381,19 @@ impl ImageLayer {
             height: 1,
             pixels: vec![200, 200, 200, 255],
         };
-        self.upload_texture(device, queue, MISSING, &gray)
+        self.upload_texture(device, queue, MISSING, vec![gray]).0
     }
 
+    /// Lädt die Mipmap-Stufen hoch (Stufe 0 = volle Größe); liefert die Bind Group und den
+    /// belegten Grafikspeicher.
     fn upload_texture(
         &self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         label: &str,
-        image: &RgbaImage,
-    ) -> wgpu::BindGroup {
-        let levels = mip_chain(image);
+        levels: Vec<RgbaImage>,
+    ) -> (wgpu::BindGroup, u64) {
+        let image = &levels[0];
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some(label),
             size: wgpu::Extent3d {
@@ -389,8 +430,9 @@ impl ImageLayer {
                 },
             );
         }
+        let bytes = levels.iter().map(|l| l.pixels.len() as u64).sum();
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        device.create_bind_group(&wgpu::BindGroupDescriptor {
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Image Texture Bind Group"),
             layout: &self.texture_layout,
             entries: &[
@@ -403,7 +445,8 @@ impl ImageLayer {
                     resource: wgpu::BindingResource::Sampler(&self.sampler),
                 },
             ],
-        })
+        });
+        (bind_group, bytes)
     }
 }
 
@@ -439,11 +482,35 @@ mod tests {
             height: 3,
             pixels: vec![128; 8 * 3 * 4],
         };
-        let levels = mip_chain(&base);
+        let levels = mip_chain(base);
         let sizes: Vec<(u32, u32)> = levels.iter().map(|l| (l.width, l.height)).collect();
         assert_eq!(sizes, vec![(8, 3), (4, 1), (2, 1), (1, 1)]);
         for l in &levels {
             assert_eq!(l.pixels.len(), (l.width * l.height * 4) as usize);
         }
+    }
+
+    #[test]
+    fn test_half_size_averages_two_by_two_blocks() {
+        // 3 × 2: links schwarz/weiß übereinander, Mitte grau; die dritte Spalte entfällt
+        let px = |v: u8| [v, v, v, 255];
+        let pixels = [px(0), px(100), px(7), px(255), px(100), px(7)].concat();
+        let base = RgbaImage {
+            width: 3,
+            height: 2,
+            pixels,
+        };
+        let half = half_size(&base);
+        assert_eq!((half.width, half.height), (1, 1));
+        // (0 + 100 + 255 + 100) / 4 = 113,75 → 114
+        assert_eq!(half.pixels, vec![114, 114, 114, 255]);
+
+        // Kantenlänge 1: nur in der anderen Richtung mitteln
+        let column = RgbaImage {
+            width: 1,
+            height: 2,
+            pixels: [px(10), px(20)].concat(),
+        };
+        assert_eq!(half_size(&column).pixels, vec![15, 15, 15, 255]);
     }
 }
