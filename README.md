@@ -240,6 +240,12 @@ Bleibt ein Job auf „Waiting to run“ stehen: Ist der Runner online (*Einstell
 
 ---
 
+## Mitmachen
+
+Fehlermeldungen, Ideen und Beiträge sind willkommen – am liebsten als [Issue auf Gitea](https://gitea.pansi.eu/harald/ink-notes/issues); [GitHub](https://github.com/haraldpansi-gif/ink-notes) ist ein Spiegel. Details in [CONTRIBUTING.md](CONTRIBUTING.md), Sicherheitslücken bitte vertraulich wie in [SECURITY.md](SECURITY.md) beschrieben. Es gilt der [Code of Conduct](CODE_OF_CONDUCT.md).
+
+---
+
 ## Lizenz
 
 [MIT](LICENSE), Copyright © 2026 Harald Pansi.

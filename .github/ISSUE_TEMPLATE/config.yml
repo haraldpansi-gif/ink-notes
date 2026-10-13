@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: "Issues auf Gitea (Hauptrepository) / Issues on Gitea (main repository)"
+    url: https://gitea.pansi.eu/harald/ink-notes/issues
+    about: "GitHub ist ein Spiegel; Issues werden bevorzugt auf Gitea bearbeitet. / GitHub is a mirror; issues are preferably handled on Gitea."
+  - name: "Sicherheitslücke melden / Report a security issue"
+    url: https://gitea.pansi.eu/harald/ink-notes/src/branch/main/SECURITY.md
+    about: "Bitte vertraulich per E-Mail, nicht als öffentliches Issue. / Please report privately by e-mail, not as a public issue."

@@ -1,0 +1,7 @@
+# Gitea liest die Vorlagen aus .github/ISSUE_TEMPLATE; diese Datei ersetzt dort nur die
+# Kontakt-Links (der Verweis auf Gitea selbst entfällt).
+blank_issues_enabled: true
+contact_links:
+  - name: "Sicherheitslücke melden / Report a security issue"
+    url: https://gitea.pansi.eu/harald/ink-notes/src/branch/main/SECURITY.md
+    about: "Bitte vertraulich per E-Mail, nicht als öffentliches Issue. / Please report privately by e-mail, not as a public issue."
