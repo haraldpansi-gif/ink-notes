@@ -84,6 +84,11 @@
   </branding>
   <content_rating type="oars-1.1" />
   <releases>
+    <release version="0.26.2" date="2026-10-13">
+      <description>
+        <p>Smoother scrolling through large imported PDFs: pages no longer stall the display while they are prepared, and pages scrolled past quickly are skipped.</p>
+      </description>
+    </release>
     <release version="0.26.1" date="2026-10-10">
       <description>
         <p>Screenshots in the app description for software centers. The app itself is unchanged.</p>
