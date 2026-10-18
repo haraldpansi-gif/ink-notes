@@ -31,7 +31,7 @@ use ink_notes::osk::{self, KeyboardRequester};
 use ink_notes::pdf_doc::PdfRenderService;
 use ink_notes::platform::{self, DisplayBackend};
 use ink_notes::selection::{
-    render_selection_overlay, DragMode, SelectionHandleHit, SelectionState,
+    render_selection_overlay, scale_factors, DragMode, SelectionHandleHit, SelectionState,
 };
 use ink_notes::settings::{
     SidebarSide, StylusAction, StylusButton, UiSettings, MAX_STYLUS_BUTTONS,
@@ -649,12 +649,18 @@ fn selection_press(
                 ..
             },
             _,
-        ) => DragMode::Scale {
-            fixed_corner_page,
-            start_pos_page,
-            initial_box_size,
-            initial_strokes: page.get_strokes(&selection_state.selected_ids),
-        },
+        ) => {
+            let initial_strokes = page.get_strokes(&selection_state.selected_ids);
+            // Bilder nicht verzerren (Issue #29); Shift hält das Verhältnis auch bei Strichen
+            let keep_aspect = shift || initial_strokes.iter().any(|s| s.is_image());
+            DragMode::Scale {
+                fixed_corner_page,
+                start_pos_page,
+                initial_box_size,
+                initial_strokes,
+                keep_aspect,
+            }
+        }
         (SelectionHandleHit::Body, Some(p)) => DragMode::Move {
             start_page: p,
             initial_strokes: page.get_strokes(&selection_state.selected_ids),
@@ -729,18 +735,10 @@ fn selection_drag(
         DragMode::Scale {
             fixed_corner_page,
             start_pos_page,
+            keep_aspect,
             ..
         } => {
-            let orig = *start_pos_page - *fixed_corner_page;
-            let new = page_pt - *fixed_corner_page;
-            let factor = |n: f32, o: f32| {
-                if o.abs() > 1.0 {
-                    (n / o).clamp(0.05, 20.0)
-                } else {
-                    1.0
-                }
-            };
-            let factors = Vec2::new(factor(new.x, orig.x), factor(new.y, orig.y));
+            let factors = scale_factors(*fixed_corner_page, *start_pos_page, page_pt, *keep_aspect);
             updated
                 .iter_mut()
                 .for_each(|s| s.scale(*fixed_corner_page, factors));

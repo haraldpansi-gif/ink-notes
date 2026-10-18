@@ -36,7 +36,32 @@ pub enum DragMode {
         start_pos_page: Vec2,
         initial_box_size: Vec2,
         initial_strokes: Vec<Stroke>,
+        /// Seitenverhältnis beibehalten (Bilder in der Auswahl oder Shift gedrückt)
+        keep_aspect: bool,
     },
+}
+
+/// Skalierungsfaktoren, wenn der Eckgriff von `start` (relativ zur festen Ecke `fixed`)
+/// nach `current` gezogen wird. Mit `keep_aspect` wird gleichmäßig skaliert: der Faktor ist
+/// die Projektion der Zugposition auf die Diagonale, damit das Seitenverhältnis bleibt.
+pub fn scale_factors(fixed: Vec2, start: Vec2, current: Vec2, keep_aspect: bool) -> Vec2 {
+    let orig = start - fixed;
+    let new = current - fixed;
+    if keep_aspect {
+        let len_sq = orig.length_squared();
+        if len_sq <= 1.0 {
+            return Vec2::ONE;
+        }
+        return Vec2::splat((new.dot(orig) / len_sq).clamp(0.05, 20.0));
+    }
+    let factor = |n: f32, o: f32| {
+        if o.abs() > 1.0 {
+            (n / o).clamp(0.05, 20.0)
+        } else {
+            1.0
+        }
+    };
+    Vec2::new(factor(new.x, orig.x), factor(new.y, orig.y))
 }
 
 /// Ergebnis eines Hit-Tests auf Auswahl-Griffe (Handles).
@@ -521,6 +546,35 @@ mod tests {
         assert!(page.undo());
         let restored_pos = page.strokes[0].points[0].position;
         assert!((orig_pos.x - restored_pos.x).abs() < 1e-4);
+    }
+
+    #[test]
+    fn test_scale_factors_free_and_keep_aspect() {
+        let fixed = Vec2::new(0.0, 0.0);
+        let start = Vec2::new(200.0, 100.0);
+        // Frei: Breite und Höhe unabhängig
+        let free = scale_factors(fixed, start, Vec2::new(400.0, 100.0), false);
+        assert_eq!(free, Vec2::new(2.0, 1.0));
+        // Seitenverhältnis fest: gleicher Faktor in beiden Richtungen
+        let locked = scale_factors(fixed, start, Vec2::new(400.0, 100.0), true);
+        assert!((locked.x - locked.y).abs() < 1e-6);
+        assert!((locked.x - 1.8).abs() < 1e-4);
+        // Entlang der Diagonale genau verdoppelt
+        let diag = scale_factors(fixed, start, Vec2::new(400.0, 200.0), true);
+        assert!((diag - Vec2::splat(2.0)).length() < 1e-5);
+        // Über die feste Ecke hinaus: kein Spiegeln
+        let past = scale_factors(fixed, start, Vec2::new(-50.0, -50.0), true);
+        assert_eq!(past, Vec2::splat(0.05));
+        // Senkrechte Linie (Breite 0): frei bleibt x unverändert, fest skaliert beides
+        let line = Vec2::new(0.0, 100.0);
+        assert_eq!(
+            scale_factors(fixed, line, Vec2::new(30.0, 200.0), false),
+            Vec2::new(1.0, 2.0)
+        );
+        assert_eq!(
+            scale_factors(fixed, line, Vec2::new(30.0, 200.0), true),
+            Vec2::splat(2.0)
+        );
     }
 
     #[test]
