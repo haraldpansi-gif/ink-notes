@@ -63,7 +63,8 @@ Ordner wie „3. Semester › Mathe“ sind rein logisch: Die Notizbücher bleib
   ],
   "page_ids": [1, 2],
   "next_stroke_id": 42,
-  "next_page_id": 3
+  "next_page_id": 3,
+  "layout": "Paged"
 }
 ```
 
@@ -76,6 +77,7 @@ Ordner wie „3. Semester › Mathe“ sind rein logisch: Die Notizbücher bleib
 | `pages` | Seiten in ihrer Reihenfolge: `id`, `background`, optional `title` und `size` (siehe unten) – damit Seitenübersicht und Ansicht sie kennen, ohne jede Seite zu laden |
 | `page_ids` | dieselbe Reihenfolge als reine ID-Liste (für ältere Versionen) |
 | `next_stroke_id`, `next_page_id` | nächste freie IDs |
+| `layout` | Anordnung der Seiten: `Paged` (Seite für Seite) oder `Continuous` (durchgehend untereinander). Seit 0.28; fehlt das Feld, gilt die frühere globale Einstellung `continuous_scroll` aus `ui.json`. Ältere App-Versionen ignorieren es, daher keine neue Formatversion |
 
 ---
 

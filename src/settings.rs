@@ -212,7 +212,8 @@ pub struct UiSettings {
     pub pattern_color: PatternColor,
     /// Druckkennlinie des Stifts
     pub pressure_curve: PressureCurve,
-    /// Seiten durchgehend untereinander anzeigen (sonst einzeln blättern)
+    /// Frühere globale Einstellung „Seiten durchgehend scrollen“: gilt nur noch für Notizbücher
+    /// ohne eigene Anordnung im Manifest (vor 0.28 angelegt), wird nicht mehr geändert
     pub continuous_scroll: bool,
     /// Stifte der Werkzeugleiste und der gewählte davon
     pub pen_presets: [PenPreset; PEN_PRESET_COUNT],

@@ -93,6 +93,8 @@ $$\vec{p}_{\text{neu}} = \vec{c} - (\vec{c} - \vec{p}_{\text{alt}}) \cdot \frac{
 - Im Shader wird jeder Punkt mit `transform_scale` und `transform_offset` (aus `CameraUniforms`) direkt in Gerätekoordinaten umgerechnet.
 
 ### 3.3 Durchgehende Ansicht
+Ob ein Notizbuch Seite für Seite oder durchgehend angezeigt wird, steht in seinem Manifest (`layout`, siehe [`FILE_FORMAT.md`](FILE_FORMAT.md)).
+
 Alle Koordinaten beziehen sich auf die **aktuelle Seite**. `PageStack` (`viewport.rs`) legt die übrigen Seiten lückenlos darunter bzw. darüber (die Grenze zeichnet die Oberfläche als dunkle Linie), waagerecht zur aktuellen Seite zentriert. Jede sichtbare Nachbarseite wird mit einer eigenen Kamera gezeichnet, die um die Lage der Seite verschoben ist (höchstens 12 Nachbarseiten).
 
 Nach dem Scrollen wird die Seite in der Fenstermitte zur aktuellen Seite; die Kamera wird dabei so verschoben, dass sich das Bild nicht bewegt. Während eines Strichs, einer Auswahl, beim Ziehen des Lineals oder beim Schreiben von Text wird nicht gewechselt. Wer auf einer sichtbaren Nachbarseite zu zeichnen beginnt, wechselt zuerst auf diese Seite.

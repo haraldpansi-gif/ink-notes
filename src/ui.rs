@@ -22,7 +22,7 @@ use crate::settings::{
     PenPreset, PressureCurve, SidebarSide, DEFAULT_HIGHLIGHTER_COLORS, DEFAULT_PEN_PRESETS,
     DEFAULT_TEXT_COLORS, PEN_PRESET_COUNT,
 };
-use crate::storage::NotebookSummary;
+use crate::storage::{NotebookLayout, NotebookSummary};
 use crate::text::{TextEditing, TextFont, TEXT_SIZES_PT};
 use crate::{t, tn};
 
@@ -263,6 +263,7 @@ pub enum UiAction {
     CreateNotebook {
         title: String,
         folder: String,
+        layout: NotebookLayout,
     },
     /// Ordnerverwaltung (siehe `library.rs`)
     CreateFolder {
@@ -317,8 +318,8 @@ pub enum UiAction {
     SaveStylusButtons,
     /// Druckkurve speichern (gilt während des Ziehens bereits über `UiState::pressure_curve`)
     SavePressureCurve(PressureCurve),
-    /// Seiten durchgehend untereinander statt einzeln anzeigen (wird gespeichert)
-    SetContinuousScroll(bool),
+    /// Anordnung der Seiten des offenen Notizbuchs (wird im Manifest gespeichert)
+    SetNotebookLayout(NotebookLayout),
     /// Farbe von Karos, Linien und Punkten (wird gespeichert, gilt auch für den Export)
     SetPatternColor(PatternColor),
     /// Bilddatei auf der aktuellen Seite einfügen
@@ -364,6 +365,8 @@ pub struct UiState {
     pub document_title: String,
     pub available_notebooks: Vec<NotebookSummary>,
     pub new_notebook_title_input: String,
+    /// Anordnung für das nächste neue Notizbuch
+    pub new_notebook_layout: NotebookLayout,
     pub renaming_notebook_id: Option<String>,
     /// Ordner der Notizbücher und der gerade angezeigte Ordner im Dokumenten-Manager
     pub library: crate::library::Library,
@@ -483,6 +486,7 @@ impl Default for UiState {
             document_title: t!("Standard-Notizbuch").to_string(),
             available_notebooks: Vec::new(),
             new_notebook_title_input: String::new(),
+            new_notebook_layout: NotebookLayout::Paged,
             renaming_notebook_id: None,
             library: crate::library::Library::default(),
             notebook_folder: String::new(),
@@ -1639,6 +1643,38 @@ fn page_title_list(ui: &mut egui::Ui, notebook: &Notebook) -> Option<usize> {
         }
     }
     chosen
+}
+
+/// Auswahl der Seitenanordnung eines Notizbuchs. `true`, wenn sie geändert wurde.
+fn layout_picker(ui: &mut egui::Ui, layout: &mut NotebookLayout) -> bool {
+    let mut changed = false;
+    ui.horizontal_wrapped(|ui| {
+        for (option, label, tooltip) in [
+            (
+                NotebookLayout::Paged,
+                t!("📄 Feste Seiten"),
+                t!("Seite für Seite blättern"),
+            ),
+            (
+                NotebookLayout::Continuous,
+                t!("📜 Durchgehend"),
+                t!("Seiten hängen untereinander, Mausrad und Finger scrollen \
+                 (Strg+Mausrad zoomt); wer unten auf der letzten Seite schreibt, \
+                 bekommt automatisch eine neue Seite."),
+            ),
+        ] {
+            if ui
+                .selectable_label(*layout == option, label)
+                .on_hover_text(tooltip)
+                .clicked()
+                && *layout != option
+            {
+                *layout = option;
+                changed = true;
+            }
+        }
+    });
+    changed
 }
 
 /// Auswahlknopf für eine Papierfarbe: Farbmuster und Name.
@@ -3753,17 +3789,15 @@ pub fn render_ui(
                                 }
                             });
 
-                            section(ui, t!("ANSICHT"));
-                            if ui
-                                .checkbox(&mut state.continuous_scroll, t!("Seiten durchgehend scrollen"))
-                                .on_hover_text(
-                                    t!("An: Seiten hängen untereinander, Mausrad und Finger scrollen \
-                                     (Strg+Mausrad zoomt); wer unten auf der letzten Seite schreibt, \
-                                     bekommt automatisch eine neue Seite.\nAus: Seite für Seite blättern."),
-                                )
-                                .changed()
-                            {
-                                actions.push(UiAction::SetContinuousScroll(state.continuous_scroll));
+                            section(ui, t!("SEITEN DIESES NOTIZBUCHS"));
+                            let mut layout = if state.continuous_scroll {
+                                NotebookLayout::Continuous
+                            } else {
+                                NotebookLayout::Paged
+                            };
+                            if layout_picker(ui, &mut layout) {
+                                state.continuous_scroll = layout == NotebookLayout::Continuous;
+                                actions.push(UiAction::SetNotebookLayout(layout));
                             }
 
                             section(ui, t!("ZOOM"));
@@ -4098,6 +4132,7 @@ pub fn render_ui(
                             actions.push(UiAction::CreateNotebook {
                                 title,
                                 folder: folder.clone(),
+                                layout: state.new_notebook_layout,
                             });
                             state.new_notebook_title_input.clear();
                         } else if folder_btn.clicked() {
@@ -4108,6 +4143,10 @@ pub fn render_ui(
                             state.new_notebook_title_input.clear();
                         }
                     }
+                });
+                ui.horizontal(|ui| {
+                    ui.label(t!("Seiten:"));
+                    layout_picker(ui, &mut state.new_notebook_layout);
                 });
 
                 ui.add_space(8.0);

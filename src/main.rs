@@ -36,7 +36,7 @@ use ink_notes::selection::{
 use ink_notes::settings::{
     SidebarSide, StylusAction, StylusButton, UiSettings, MAX_STYLUS_BUTTONS,
 };
-use ink_notes::storage::{self, NotebookManifest};
+use ink_notes::storage::{self, NotebookLayout, NotebookManifest};
 use ink_notes::t;
 use ink_notes::ui::{self, ActiveTool, UiAction, UiState};
 use ink_notes::updater::UpdaterController;
@@ -1522,6 +1522,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     event_loop.run(move |event, target| {
+        // Anordnung der Seiten gehört zum offenen Notizbuch (Issue #30)
+        ui_state.continuous_scroll =
+            manifest.layout_or(ui_settings.continuous_scroll) == NotebookLayout::Continuous;
         match event {
             Event::AboutToWait => {
                 let prev_status = autosave.status();
@@ -3562,11 +3565,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     }
                                     window.request_redraw();
                                 }
-                                UiAction::CreateNotebook { title, folder } => {
+                                UiAction::CreateNotebook { title, folder, layout } => {
                                     let _ = autosave.flush();
                                     match storage::create_new_notebook(&storage_base_dir, &title) {
-                                        Ok((new_nb, new_manifest, new_dir)) => {
+                                        Ok((new_nb, mut new_manifest, new_dir)) => {
                                             let id = new_manifest.id.clone();
+                                            new_manifest.layout = Some(layout);
                                             change_library(&storage_base_dir, &mut ui_state, |library| {
                                                 library.move_notebook(&id, &folder)
                                             });
@@ -3576,6 +3580,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             notebook = new_nb;
                                             manifest = new_manifest;
                                             storage_dir = new_dir;
+                                            autosave.mark_manifest_dirty(&manifest);
                                             selection_state.clear();
                                             ui_state.current_notebook_id = manifest.id.clone();
                                             ui_state.document_title = manifest.title.clone();
@@ -3820,9 +3825,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     save_ui_settings(&ui_settings, ui_settings_path.as_deref(), &mut ui_state);
                                     window.request_redraw();
                                 }
-                                UiAction::SetContinuousScroll(on) => {
-                                    ui_settings.continuous_scroll = on;
-                                    save_ui_settings(&ui_settings, ui_settings_path.as_deref(), &mut ui_state);
+                                UiAction::SetNotebookLayout(layout) => {
+                                    manifest.layout = Some(layout);
+                                    ui_state.continuous_scroll = layout == NotebookLayout::Continuous;
+                                    autosave.mark_manifest_dirty(&manifest);
                                     window.request_redraw();
                                 }
                                 UiAction::SaveStylusButtons => {

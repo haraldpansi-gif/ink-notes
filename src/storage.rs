@@ -280,9 +280,32 @@ pub struct NotebookManifest {
     pub page_ids: Vec<u64>,
     pub next_stroke_id: u64,
     pub next_page_id: u64,
+    /// Anordnung der Seiten. Fehlt bei Notizbüchern von vor 0.28; dann gilt die frühere
+    /// globale Einstellung `continuous_scroll` aus `ui.json` (siehe [`Self::layout_or`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layout: Option<NotebookLayout>,
+}
+
+/// Anordnung der Seiten eines Notizbuchs (Issue #30).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum NotebookLayout {
+    /// Feste Seiten: Seite für Seite blättern
+    #[default]
+    Paged,
+    /// Seiten hängen untereinander und werden durchgehend gescrollt
+    Continuous,
 }
 
 impl NotebookManifest {
+    /// Anordnung des Notizbuchs; ohne eigene Angabe die frühere globale Einstellung.
+    pub fn layout_or(&self, legacy_continuous: bool) -> NotebookLayout {
+        self.layout.unwrap_or(if legacy_continuous {
+            NotebookLayout::Continuous
+        } else {
+            NotebookLayout::Paged
+        })
+    }
+
     pub fn new(id: impl Into<String>, title: impl Into<String>) -> Self {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -299,6 +322,7 @@ impl NotebookManifest {
             page_ids: vec![1],
             next_stroke_id: 1,
             next_page_id: 2,
+            layout: Some(NotebookLayout::Paged),
         }
     }
 
@@ -1602,6 +1626,31 @@ mod tests {
 
         let shutdown_res = controller.shutdown();
         assert!(shutdown_res.is_ok());
+    }
+
+    #[test]
+    fn test_notebook_layout_is_saved_and_old_manifests_fall_back() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let (_nb, mut manifest, dir) = create_new_notebook(temp_dir.path(), "Layout").unwrap();
+        // Neue Notizbücher: feste Seiten, unabhängig von der früheren globalen Einstellung
+        assert_eq!(manifest.layout, Some(NotebookLayout::Paged));
+        assert_eq!(manifest.layout_or(true), NotebookLayout::Paged);
+
+        manifest.layout = Some(NotebookLayout::Continuous);
+        save_manifest(&dir, &manifest).unwrap();
+        let (_nb, loaded) = load_notebook(&dir).unwrap();
+        assert_eq!(loaded.layout, Some(NotebookLayout::Continuous));
+
+        // Manifest von vor 0.28 ohne `layout`: es gilt die globale Einstellung
+        let mut json: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(dir.join("manifest.json")).unwrap()).unwrap();
+        json.as_object_mut().unwrap().remove("layout");
+        let old: NotebookManifest = serde_json::from_value(json).unwrap();
+        assert_eq!(old.layout, None);
+        assert_eq!(old.layout_or(true), NotebookLayout::Continuous);
+        assert_eq!(old.layout_or(false), NotebookLayout::Paged);
+        // … und schreibt beim Speichern auch keins dazu
+        assert!(!serde_json::to_string(&old).unwrap().contains("\"layout\""));
     }
 
     #[test]
