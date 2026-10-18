@@ -84,6 +84,11 @@
   </branding>
   <content_rating type="oars-1.1" />
   <releases>
+    <release version="0.27.0" date="2026-10-18">
+      <description>
+        <p>Pictures keep their proportions when resized. A lock button in the selection tool switches between proportional and free resizing; pictures start locked, other objects free.</p>
+      </description>
+    </release>
     <release version="0.26.2" date="2026-10-13">
       <description>
         <p>Smoother scrolling through large imported PDFs: pages no longer stall the display while they are prepared, and pages scrolled past quickly are skipped.</p>
