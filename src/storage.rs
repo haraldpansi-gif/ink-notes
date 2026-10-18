@@ -168,7 +168,9 @@ impl StrokeData {
 /// - Version 6: Seitentitel (`title` in Seite und Manifest).
 /// - Version 7: Textfelder (`text` am Strich).
 /// - Version 8: Seitengröße je Seite (`size` in Seite und Manifest), Querformat für Folien.
-pub const CURRENT_FORMAT_VERSION: u32 = 8;
+/// - Version 9: endlose Notizbücher (`layout: "Endless"` im Manifest, eine Seite mit
+///   `document::ENDLESS_PAGE_SIZE`). Ältere Versionen würden sie als riesige Seite öffnen.
+pub const CURRENT_FORMAT_VERSION: u32 = 9;
 
 /// Standardwert für ältere Dateien ohne explizite Formatversion (Legacy v0).
 pub fn legacy_format_version() -> u32 {
@@ -200,8 +202,12 @@ fn stored_size(size: glam::Vec2) -> Option<[f32; 2]> {
 }
 
 /// Seitengröße aus einer (evtl. von Hand bearbeiteten) Datei; unbrauchbare Werte ergeben A4.
+/// Höchstens 2 × 2 m – außer der endlosen Seite.
 pub fn page_size_from(stored: Option<[f32; 2]>) -> glam::Vec2 {
     match stored {
+        Some(size) if glam::Vec2::from(size) == crate::document::ENDLESS_PAGE_SIZE => {
+            crate::document::ENDLESS_PAGE_SIZE
+        }
         Some([w, h]) if w.is_finite() && h.is_finite() && w >= 100.0 && h >= 100.0 => {
             glam::Vec2::new(w.min(20_000.0), h.min(20_000.0))
         }
@@ -294,6 +300,8 @@ pub enum NotebookLayout {
     Paged,
     /// Seiten hängen untereinander und werden durchgehend gescrollt
     Continuous,
+    /// Eine einzige, praktisch unbegrenzte Fläche (siehe `document::ENDLESS_PAGE_SIZE`)
+    Endless,
 }
 
 impl NotebookManifest {
@@ -1651,6 +1659,15 @@ mod tests {
         assert_eq!(old.layout_or(false), NotebookLayout::Paged);
         // … und schreibt beim Speichern auch keins dazu
         assert!(!serde_json::to_string(&old).unwrap().contains("\"layout\""));
+
+        // Endlos: die endlose Seite übersteht Speichern und Laden
+        let (mut nb, mut manifest, dir) = create_new_notebook(temp_dir.path(), "Endlos").unwrap();
+        assert!(nb.make_endless());
+        manifest.layout = Some(NotebookLayout::Endless);
+        save_notebook(&dir, &nb, &mut manifest).unwrap();
+        let (loaded_nb, loaded) = load_notebook(&dir).unwrap();
+        assert_eq!(loaded.layout, Some(NotebookLayout::Endless));
+        assert!(loaded_nb.is_endless());
     }
 
     #[test]

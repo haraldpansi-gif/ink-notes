@@ -710,14 +710,20 @@ impl CanvasState {
     }
 
     fn recalculate_viewport(&mut self) {
-        self.viewport = PageViewport::calculate_for(
-            self.size.width as f32,
-            self.size.height as f32,
-            Self::VIEWPORT_MARGIN,
-            (self.ui_inset_left, self.ui_inset_right),
-            self.fit_box,
-            self.page_size,
-        );
+        let insets = (self.ui_inset_left, self.ui_inset_right);
+        let (width, height) = (self.size.width as f32, self.size.height as f32);
+        self.viewport = if self.page_size == crate::document::ENDLESS_PAGE_SIZE {
+            PageViewport::calculate_endless(width, height, Self::VIEWPORT_MARGIN, insets)
+        } else {
+            PageViewport::calculate_for(
+                width,
+                height,
+                Self::VIEWPORT_MARGIN,
+                insets,
+                self.fit_box,
+                self.page_size,
+            )
+        };
         self.update_uniforms();
     }
 

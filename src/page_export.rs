@@ -13,7 +13,7 @@ use hayro::{PixmapSettings, RenderCache, RenderSettings};
 
 use crate::assets::{AssetStore, RgbaImage};
 use crate::background::PatternColor;
-use crate::document::{Aabb, Notebook, Page, PageBackground, A4_WIDTH_MM, PAGE_WIDTH};
+use crate::document::{Aabb, Notebook, Page, PageBackground};
 use crate::export::{export_notebook_to_bytes, ExportStrategy};
 use crate::t;
 
@@ -145,38 +145,24 @@ pub fn selection_image(
     };
     let max_width = selected.strokes.iter().map(|s| s.width).fold(0.0, f32::max);
     let bounds: Aabb = bounds.expanded(max_width / 2.0 + 4.0);
-
-    let full = rasterize(
-        single_page_pdf(&selected, assets, PatternColor::default())?,
+    let size = bounds.max - bounds.min;
+    if size.min_element() < 1.0 {
+        return Ok(None);
+    }
+    // Nur den Ausschnitt rastern (auf der endlosen Seite wäre die ganze Seite riesig)
+    let cropped = selected.cropped(bounds.min, size);
+    let image = rasterize(
+        single_page_pdf(&cropped, assets, PatternColor::default())?,
         SELECTION_PNG_DPI,
         true,
     )?;
-    // Seiteneinheiten → Pixel
-    let px_per_unit = SELECTION_PNG_DPI / 25.4 * A4_WIDTH_MM / PAGE_WIDTH;
-    let x0 = ((bounds.min.x * px_per_unit).floor().max(0.0) as u32).min(full.width);
-    let y0 = ((bounds.min.y * px_per_unit).floor().max(0.0) as u32).min(full.height);
-    let x1 = ((bounds.max.x * px_per_unit).ceil().max(0.0) as u32).min(full.width);
-    let y1 = ((bounds.max.y * px_per_unit).ceil().max(0.0) as u32).min(full.height);
-    if x1 <= x0 || y1 <= y0 {
-        return Ok(None);
-    }
-    let (w, h) = (x1 - x0, y1 - y0);
-    let mut pixels = Vec::with_capacity((w * h * 4) as usize);
-    for y in y0..y1 {
-        let start = ((y * full.width + x0) * 4) as usize;
-        pixels.extend_from_slice(&full.pixels[start..start + (w * 4) as usize]);
-    }
-    Ok(Some(RgbaImage {
-        width: w,
-        height: h,
-        pixels,
-    }))
+    Ok(Some(image))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::document::{Stroke, StylusSample, PAGE_HEIGHT};
+    use crate::document::{Stroke, StylusSample, A4_WIDTH_MM, PAGE_HEIGHT, PAGE_WIDTH};
 
     fn page_with_line() -> Page {
         let mut page = Page::new(1, PageBackground::Grid5mm);

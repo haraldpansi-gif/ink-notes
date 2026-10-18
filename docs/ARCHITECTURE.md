@@ -93,13 +93,18 @@ $$\vec{p}_{\text{neu}} = \vec{c} - (\vec{c} - \vec{p}_{\text{alt}}) \cdot \frac{
 - Im Shader wird jeder Punkt mit `transform_scale` und `transform_offset` (aus `CameraUniforms`) direkt in Gerätekoordinaten umgerechnet.
 
 ### 3.3 Durchgehende Ansicht
-Ob ein Notizbuch Seite für Seite oder durchgehend angezeigt wird, steht in seinem Manifest (`layout`, siehe [`FILE_FORMAT.md`](FILE_FORMAT.md)).
+Ob ein Notizbuch Seite für Seite, durchgehend oder als endlose Fläche angezeigt wird, steht in seinem Manifest (`layout`, siehe [`FILE_FORMAT.md`](FILE_FORMAT.md)).
 
 Alle Koordinaten beziehen sich auf die **aktuelle Seite**. `PageStack` (`viewport.rs`) legt die übrigen Seiten lückenlos darunter bzw. darüber (die Grenze zeichnet die Oberfläche als dunkle Linie), waagerecht zur aktuellen Seite zentriert. Jede sichtbare Nachbarseite wird mit einer eigenen Kamera gezeichnet, die um die Lage der Seite verschoben ist (höchstens 12 Nachbarseiten).
 
 Nach dem Scrollen wird die Seite in der Fenstermitte zur aktuellen Seite; die Kamera wird dabei so verschoben, dass sich das Bild nicht bewegt. Während eines Strichs, einer Auswahl, beim Ziehen des Lineals oder beim Schreiben von Text wird nicht gewechselt. Wer auf einer sichtbaren Nachbarseite zu zeichnen beginnt, wechselt zuerst auf diese Seite.
 
 ---
+
+### 3.4 Endlose Fläche
+Ein endloses Notizbuch hat eine einzige Seite von 10 × 10 m (`ENDLESS_PAGE_SIZE`). Damit bleibt alles wie bei jeder anderen Seite – Eingabe, Treffertests, Undo, Speichern –, nur der Rand ist praktisch unerreichbar. `PageViewport::calculate_endless` wählt Maßstab und Lage so, als läge eine DIN-A4-Seite am Startausschnitt (`ENDLESS_HOME`, ein A4-Rahmen in der Mitte); 100 % Zoom und „Ansicht zurücksetzen“ zeigen also diesen Rahmen. Bilder und Textfelder richten ihre Größe bzw. ihren Umbruch an DIN A4 aus (`Page::reference_size`, `Page::text_right_edge`).
+
+Beim Wechsel von und zu Seiten (`Notebook::make_endless`/`make_paged`) wird der Inhalt um `ENDLESS_HOME` verschoben und der Verlauf der Seite geleert. Zurück zu Seiten geht nur, solange alles im Startausschnitt liegt. Export und Bilder einer Auswahl rastern bzw. exportieren nur einen Ausschnitt (`Page::cropped`), beim Export auf das Musterraster gelegt (`Page::endless_export_bounds`).
 
 ## 4. Rendering
 

@@ -435,6 +435,11 @@ pub struct UiState {
     pub pattern_color: PatternColor,
     /// Seiten hängen untereinander und werden durchgehend gescrollt
     pub continuous_scroll: bool,
+    /// Offenes Notizbuch ist eine endlose Fläche (eine Seite ohne Rand, Issue #30)
+    pub endless: bool,
+    /// Wechsel zur bzw. von der endlosen Fläche ist gerade möglich (eine Seite ohne PDF bzw.
+    /// Inhalt im Startausschnitt)
+    pub endless_switch_possible: bool,
     /// Text-Werkzeug: Farbe, Schriftgröße (Punkt) und Schriftart neuer Textfelder
     pub text_color: [f32; 4],
     pub text_size_pt: f32,
@@ -526,6 +531,8 @@ impl Default for UiState {
             adapt_ink_colors: true,
             pattern_color: PatternColor::Light,
             continuous_scroll: true,
+            endless: false,
+            endless_switch_possible: true,
             text_color: PEN_COLOR_PRESETS[0].0,
             text_size_pt: crate::text::DEFAULT_TEXT_SIZE_PT,
             text_font: TextFont::Sans,
@@ -1645,9 +1652,11 @@ fn page_title_list(ui: &mut egui::Ui, notebook: &Notebook) -> Option<usize> {
     chosen
 }
 
-/// Auswahl der Seitenanordnung eines Notizbuchs. `true`, wenn sie geändert wurde.
-fn layout_picker(ui: &mut egui::Ui, layout: &mut NotebookLayout) -> bool {
+/// Auswahl der Seitenanordnung eines Notizbuchs. Ohne `can_cross` lässt sich nicht zwischen
+/// Seiten und endloser Fläche wechseln. `true`, wenn sie geändert wurde.
+fn layout_picker(ui: &mut egui::Ui, layout: &mut NotebookLayout, can_cross: bool) -> bool {
     let mut changed = false;
+    let endless_now = *layout == NotebookLayout::Endless;
     ui.horizontal_wrapped(|ui| {
         for (option, label, tooltip) in [
             (
@@ -1662,10 +1671,24 @@ fn layout_picker(ui: &mut egui::Ui, layout: &mut NotebookLayout) -> bool {
                  (Strg+Mausrad zoomt); wer unten auf der letzten Seite schreibt, \
                  bekommt automatisch eine neue Seite."),
             ),
+            (
+                NotebookLayout::Endless,
+                t!("♾ Endlos"),
+                t!(
+                    "Eine Fläche ohne Rand: in alle Richtungen schreiben, verschieben und zoomen. \
+                 Wechsel nur bei einer einzigen Seite ohne PDF bzw. zurück, solange alles im \
+                 Startausschnitt liegt."
+                ),
+            ),
         ] {
+            let enabled = can_cross || (option == NotebookLayout::Endless) == endless_now;
             if ui
-                .selectable_label(*layout == option, label)
+                .add_enabled(
+                    enabled,
+                    egui::SelectableLabel::new(*layout == option, label),
+                )
                 .on_hover_text(tooltip)
+                .on_disabled_hover_text(tooltip)
                 .clicked()
                 && *layout != option
             {
@@ -3210,7 +3233,7 @@ pub fn render_ui(
                                 // --- Seitennavigation ---
                                 // In der durchgehenden Ansicht wird gescrollt; Blätterpfeile gibt
                                 // es nur in der Einzelseitenansicht
-                                let paging = !state.continuous_scroll;
+                                let paging = !state.continuous_scroll && !state.endless;
                                 if paging
                                     && sidebar_button(
                                         ui,
@@ -3235,7 +3258,7 @@ pub fn render_ui(
                                     btn,
                                     SidebarIcon::Text(&page_text),
                                     state.show_page_jump_popup,
-                                    true,
+                                    !state.endless,
                                     None,
                                     t!("Seite wählen"),
                                 );
@@ -3264,7 +3287,7 @@ pub fn render_ui(
                                     btn,
                                     SidebarIcon::Glyph("➕"),
                                     false,
-                                    true,
+                                    !state.endless,
                                     None,
                                     t!("Neue Seite nach dieser einfügen"),
                                 )
@@ -3676,7 +3699,10 @@ pub fn render_ui(
                                 }
                             });
                             if ui
-                                .add_sized([ui.available_width(), 30.0], egui::Button::new(t!("➕  Neue Seite einfügen")))
+                                .add_enabled_ui(!state.endless, |ui| {
+                                    ui.add_sized([ui.available_width(), 30.0], egui::Button::new(t!("➕  Neue Seite einfügen")))
+                                })
+                                .inner
                                 .on_hover_text(t!("Leere Seite direkt nach der aktuellen Seite"))
                                 .clicked()
                             {
@@ -3790,13 +3816,14 @@ pub fn render_ui(
                             });
 
                             section(ui, t!("SEITEN DIESES NOTIZBUCHS"));
-                            let mut layout = if state.continuous_scroll {
+                            let mut layout = if state.endless {
+                                NotebookLayout::Endless
+                            } else if state.continuous_scroll {
                                 NotebookLayout::Continuous
                             } else {
                                 NotebookLayout::Paged
                             };
-                            if layout_picker(ui, &mut layout) {
-                                state.continuous_scroll = layout == NotebookLayout::Continuous;
+                            if layout_picker(ui, &mut layout, state.endless_switch_possible) {
                                 actions.push(UiAction::SetNotebookLayout(layout));
                             }
 
@@ -4146,7 +4173,7 @@ pub fn render_ui(
                 });
                 ui.horizontal(|ui| {
                     ui.label(t!("Seiten:"));
-                    layout_picker(ui, &mut state.new_notebook_layout);
+                    layout_picker(ui, &mut state.new_notebook_layout, true);
                 });
 
                 ui.add_space(8.0);

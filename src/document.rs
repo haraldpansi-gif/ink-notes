@@ -20,6 +20,21 @@ pub const PAGE_HEIGHT: f32 = 2970.0;
 pub const A4_SIZE: glam::Vec2 = glam::Vec2::new(PAGE_WIDTH, PAGE_HEIGHT);
 pub const UNITS_PER_MM: f32 = 10.0;
 
+/// Größe der Seite eines endlosen Notizbuchs (10 × 10 m, Issue #30): praktisch unbegrenzt,
+/// aber mit festen, positiven Koordinaten – Ansicht, Speichern und Rückgängig funktionieren
+/// so wie bei jeder anderen Seite.
+pub const ENDLESS_PAGE_SIZE: glam::Vec2 = glam::Vec2::new(100_000.0, 100_000.0);
+/// Linke obere Ecke des Startausschnitts (ein DIN-A4-Rahmen in der Mitte der endlosen Seite).
+pub const ENDLESS_HOME: glam::Vec2 = glam::Vec2::new(
+    (ENDLESS_PAGE_SIZE.x - PAGE_WIDTH) / 2.0,
+    (ENDLESS_PAGE_SIZE.y - PAGE_HEIGHT) / 2.0,
+);
+/// Rand um den Inhalt beim Export einer endlosen Seite (10 mm).
+const ENDLESS_EXPORT_MARGIN: f32 = 100.0;
+/// Raster, auf das der Exportausschnitt einer endlosen Seite fällt: Vielfaches der Abstände von
+/// Karos/Punkten (5 mm) und Linien (7 mm), damit das Muster wie am Bildschirm liegt.
+const ENDLESS_EXPORT_SNAP: f32 = 350.0;
+
 /// Ein gefilterter Stylus-Abtastpunkt in DIN-A4-Seitenkoordinaten.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct StylusSample {
@@ -198,18 +213,19 @@ pub const IMAGE_UNITS_PER_PIXEL: f32 = UNITS_PER_MM * 25.4 / 96.0;
 
 /// Ecken (oben links, oben rechts, unten rechts, unten links) für ein neu eingefügtes Bild
 /// von `width` × `height` Pixeln um `center`: Bildschirmgröße bei 96 dpi, höchstens 80 % der
-/// Seitenbreite und 60 % der Seitenhöhe eines Blatts der Größe `page_size`, und möglichst
-/// ganz auf dem Blatt.
+/// Breite und 60 % der Höhe von `reference` (meist die Seitengröße, auf der endlosen Seite
+/// DIN A4), und möglichst ganz auf dem Blatt der Größe `page_size`.
 pub fn place_image(
     width: u32,
     height: u32,
     center: glam::Vec2,
     page_size: glam::Vec2,
+    reference: glam::Vec2,
 ) -> [glam::Vec2; 4] {
     let natural =
         glam::Vec2::new(width.max(1) as f32, height.max(1) as f32) * IMAGE_UNITS_PER_PIXEL;
-    let fit = (page_size.x * 0.8 / natural.x)
-        .min(page_size.y * 0.6 / natural.y)
+    let fit = (reference.x * 0.8 / natural.x)
+        .min(reference.y * 0.6 / natural.y)
         .min(1.0);
     let size = natural * fit;
     let half = size / 2.0;
@@ -774,6 +790,56 @@ impl Page {
         self
     }
 
+    /// Seite eines endlosen Notizbuchs (siehe [`ENDLESS_PAGE_SIZE`]).
+    pub fn is_endless(&self) -> bool {
+        self.size == ENDLESS_PAGE_SIZE
+    }
+
+    /// Bezugsgröße für Einfügen und Textumbruch: DIN A4 auf der endlosen Seite, sonst die Seite.
+    pub fn reference_size(&self) -> glam::Vec2 {
+        if self.is_endless() {
+            A4_SIZE
+        } else {
+            self.size
+        }
+    }
+
+    /// Rechter Rand für ein neues Textfeld bei `x`: auf der endlosen Seite eine A4-Breite
+    /// weiter, sonst der Seitenrand.
+    pub fn text_right_edge(&self, x: f32) -> f32 {
+        if self.is_endless() {
+            x + PAGE_WIDTH
+        } else {
+            self.size.x
+        }
+    }
+
+    /// Kopie der Seite als Ausschnitt ab `origin` mit Größe `size`: Alle Objekte werden um
+    /// `-origin` verschoben (für Export und Bilder einer Auswahl).
+    pub fn cropped(&self, origin: glam::Vec2, size: glam::Vec2) -> Page {
+        let mut page = self.clone();
+        for stroke in &mut page.strokes {
+            stroke.translate(-origin);
+        }
+        page.size = size;
+        page.is_dirty = true;
+        page
+    }
+
+    /// Exportausschnitt einer endlosen Seite: der Inhalt mit 10 mm Rand (leer: der
+    /// Startausschnitt). Die linke obere Ecke liegt auf dem Musterraster.
+    pub fn endless_export_bounds(&self) -> (glam::Vec2, glam::Vec2) {
+        let Some(content) = Self::selection_aabb(&self.strokes) else {
+            return (ENDLESS_HOME, A4_SIZE);
+        };
+        let max_width = self.strokes.iter().map(|s| s.width).fold(0.0, f32::max);
+        let content = content.expanded(max_width / 2.0 + ENDLESS_EXPORT_MARGIN);
+        let origin = (content.min / ENDLESS_EXPORT_SNAP).floor() * ENDLESS_EXPORT_SNAP;
+        let origin = origin.max(glam::Vec2::ZERO);
+        let end = content.max.min(self.size);
+        (origin, (end - origin).max(glam::Vec2::splat(100.0)))
+    }
+
     pub fn is_readonly(&self) -> bool {
         self.persist == PersistState::ReadOnlyAfterLoadError
     }
@@ -1194,6 +1260,61 @@ impl Notebook {
         )
     }
 
+    /// Endloses Notizbuch: eine einzige, praktisch unbegrenzte Seite (Issue #30).
+    pub fn is_endless(&self) -> bool {
+        self.pages.len() == 1 && self.pages[0].is_endless()
+    }
+
+    /// Macht aus einem Notizbuch mit einer einzigen Seite (ohne importiertes PDF) ein
+    /// endloses: Die Seite wird zur endlosen Fläche, ihr Inhalt landet im Startausschnitt.
+    /// Der Verlauf der Seite wird geleert (er kennt nur die alten Koordinaten).
+    pub fn make_endless(&mut self) -> bool {
+        if !self.can_make_endless() {
+            return false;
+        }
+        let page = &mut self.pages[0];
+        for stroke in &mut page.strokes {
+            stroke.translate(ENDLESS_HOME);
+        }
+        page.size = ENDLESS_PAGE_SIZE;
+        page.history.clear();
+        page.is_dirty = true;
+        true
+    }
+
+    /// Siehe [`Self::make_endless`].
+    pub fn can_make_endless(&self) -> bool {
+        matches!(self.pages.as_slice(), [page] if page.is_loaded
+            && !page.is_endless()
+            && page.pdf_background.is_none())
+    }
+
+    /// Siehe [`Self::make_paged`].
+    pub fn can_make_paged(&self) -> bool {
+        if !self.is_endless() || !self.pages[0].is_loaded {
+            return false;
+        }
+        Page::selection_aabb(&self.pages[0].strokes).is_none_or(|content| {
+            content.min.cmpge(ENDLESS_HOME).all() && content.max.cmple(ENDLESS_HOME + A4_SIZE).all()
+        })
+    }
+
+    /// Macht aus einem endlosen Notizbuch wieder eine DIN-A4-Seite – nur, wenn der Inhalt im
+    /// Startausschnitt liegt (sonst ginge er über den Seitenrand). Leert den Verlauf der Seite.
+    pub fn make_paged(&mut self) -> bool {
+        if !self.can_make_paged() {
+            return false;
+        }
+        let page = &mut self.pages[0];
+        for stroke in &mut page.strokes {
+            stroke.translate(-ENDLESS_HOME);
+        }
+        page.size = A4_SIZE;
+        page.history.clear();
+        page.is_dirty = true;
+        true
+    }
+
     /// Hängt eine neue Seite mit dem angegebenen Hintergrund und der Größe der aktuellen
     /// Seite an.
     pub fn add_page(&mut self, background: PageBackground) -> usize {
@@ -1399,6 +1520,16 @@ impl Notebook {
             dy
         };
         if dy.abs() < 1.0 {
+            return None;
+        }
+        // Endlose Seite: keine weiteren Seiten anlegen, nichts über den Rand schieben
+        let page = &self.pages[page_index];
+        if page.is_endless()
+            && page
+                .strokes
+                .iter()
+                .any(|s| s.aabb.min.y >= y && s.aabb.max.y + dy > page.size.y)
+        {
             return None;
         }
 
@@ -1688,6 +1819,32 @@ impl PageViewport {
             page_height: page_size.y * scale,
             scale,
             page_size,
+        }
+    }
+
+    /// Ansicht der endlosen Seite: Maßstab und Lage wie bei einer DIN-A4-Seite, die am
+    /// Startausschnitt ([`ENDLESS_HOME`]) der endlosen Seite liegt.
+    pub fn calculate_endless(
+        window_width: f32,
+        window_height: f32,
+        margin: f32,
+        insets: (f32, f32),
+    ) -> Self {
+        let a4 = Self::calculate_for(
+            window_width,
+            window_height,
+            margin,
+            insets,
+            A4_SIZE,
+            A4_SIZE,
+        );
+        Self {
+            page_x: a4.page_x - ENDLESS_HOME.x * a4.scale,
+            page_y: a4.page_y - ENDLESS_HOME.y * a4.scale,
+            page_width: ENDLESS_PAGE_SIZE.x * a4.scale,
+            page_height: ENDLESS_PAGE_SIZE.y * a4.scale,
+            page_size: ENDLESS_PAGE_SIZE,
+            ..a4
         }
     }
 
@@ -2046,13 +2203,13 @@ mod tests {
     fn test_place_image() {
         let center = glam::Vec2::new(PAGE_WIDTH / 2.0, PAGE_HEIGHT / 2.0);
         // Kleines Bild: Bildschirmgröße, zentriert
-        let [tl, tr, br, bl] = place_image(200, 100, center, A4_SIZE);
+        let [tl, tr, br, bl] = place_image(200, 100, center, A4_SIZE, A4_SIZE);
         assert!(((tr - tl).length() - 200.0 * IMAGE_UNITS_PER_PIXEL).abs() < 1e-3);
         assert!(((bl - tl).length() - 100.0 * IMAGE_UNITS_PER_PIXEL).abs() < 1e-3);
         assert!(((tl + br) / 2.0 - center).length() < 1e-3);
 
         // Großer Screenshot: auf 80 % der Breite verkleinert, Seitenverhältnis bleibt
-        let [tl, tr, br, _] = place_image(3840, 2160, center, A4_SIZE);
+        let [tl, tr, br, _] = place_image(3840, 2160, center, A4_SIZE, A4_SIZE);
         let size = br - tl;
         assert!((size.x - PAGE_WIDTH * 0.8).abs() < 1e-2);
         assert!((size.x / size.y - 3840.0 / 2160.0).abs() < 1e-3);
@@ -2063,6 +2220,7 @@ mod tests {
             400,
             400,
             glam::Vec2::new(-50.0, PAGE_HEIGHT + 50.0),
+            A4_SIZE,
             A4_SIZE,
         );
         for c in corners {
@@ -2533,5 +2691,91 @@ mod tests {
             page.strokes[0].points[0].position,
             glam::Vec2::new(30.0, 40.0)
         );
+    }
+
+    fn line(id: u64, from: glam::Vec2, to: glam::Vec2) -> Stroke {
+        let sample = |position, timestamp| StylusSample {
+            position,
+            pressure: 0.5,
+            timestamp,
+        };
+        Stroke::new(
+            id,
+            vec![sample(from, 0.0), sample(to, 0.01)],
+            Vec::new(),
+            [0.0, 0.0, 0.0, 1.0],
+        )
+    }
+
+    #[test]
+    fn test_endless_notebook_round_trip() {
+        let mut nb = Notebook::new();
+        nb.pages[0].add_stroke(line(
+            1,
+            glam::Vec2::new(100.0, 100.0),
+            glam::Vec2::new(500.0, 300.0),
+        ));
+        assert!(!nb.is_endless());
+        assert!(nb.make_endless());
+        assert!(nb.is_endless());
+        // Inhalt liegt im Startausschnitt, der Verlauf ist leer
+        let p = nb.pages[0].strokes[0].points[0].position;
+        assert!((p - (ENDLESS_HOME + glam::Vec2::new(100.0, 100.0))).length() < 1e-3);
+        assert!(!nb.pages[0].history.can_undo());
+        assert!(!nb.make_endless(), "schon endlos");
+
+        // Zurück zu Seiten: Inhalt wieder an der alten Stelle
+        assert!(nb.make_paged());
+        assert_eq!(nb.pages[0].size, A4_SIZE);
+        let p = nb.pages[0].strokes[0].points[0].position;
+        assert!((p - glam::Vec2::new(100.0, 100.0)).length() < 1e-2);
+
+        // Inhalt außerhalb des Startausschnitts: kein Zurück
+        assert!(nb.make_endless());
+        nb.pages[0].add_stroke(line(2, ENDLESS_HOME - 500.0, ENDLESS_HOME - 400.0));
+        assert!(!nb.can_make_paged());
+        assert!(!nb.make_paged());
+        assert!(nb.is_endless());
+
+        // Mehrere Seiten oder PDF-Seite: nicht endlos
+        let mut two = Notebook::new();
+        two.add_page(PageBackground::Blank);
+        assert!(!two.make_endless());
+    }
+
+    #[test]
+    fn test_endless_viewport_shows_home_like_a4() {
+        let a4 = PageViewport::calculate_for(1600.0, 900.0, 20.0, (0.0, 0.0), A4_SIZE, A4_SIZE);
+        let endless = PageViewport::calculate_endless(1600.0, 900.0, 20.0, (0.0, 0.0));
+        assert_eq!(endless.page_size, ENDLESS_PAGE_SIZE);
+        assert!((endless.scale - a4.scale).abs() < 1e-6);
+        // Die Ecke des Startausschnitts liegt dort, wo sonst die A4-Seite beginnt
+        let home = endless
+            .screen_to_page(a4.page_x + 1.0, a4.page_y + 1.0)
+            .unwrap();
+        assert!((home - ENDLESS_HOME - glam::Vec2::splat(1.0 / a4.scale)).length() < 0.05);
+        // Weit neben dem Startausschnitt lässt sich weiter schreiben
+        assert!(endless.screen_to_page(-5000.0, -5000.0).is_some());
+    }
+
+    #[test]
+    fn test_endless_export_bounds_follow_content() {
+        let mut page = Page::new(1, PageBackground::Grid5mm).with_size(ENDLESS_PAGE_SIZE);
+        // Leer: der Startausschnitt
+        assert_eq!(page.endless_export_bounds(), (ENDLESS_HOME, A4_SIZE));
+
+        let from = glam::Vec2::new(30_123.0, 40_456.0);
+        let to = glam::Vec2::new(36_000.0, 41_000.0);
+        page.add_stroke(line(1, from, to));
+        let (origin, size) = page.endless_export_bounds();
+        // Ecke auf dem Musterraster, Inhalt mit Rand vollständig enthalten
+        assert_eq!(origin % ENDLESS_EXPORT_SNAP, glam::Vec2::ZERO);
+        assert!(origin.cmple(from - ENDLESS_EXPORT_MARGIN).all());
+        assert!((origin + size).cmpge(to + ENDLESS_EXPORT_MARGIN).all());
+        assert!(size.x < 7_000.0 && size.y < 2_000.0, "{size:?}");
+
+        let cropped = page.cropped(origin, size);
+        assert_eq!(cropped.size, size);
+        assert!((cropped.strokes[0].points[0].position - (from - origin)).length() < 1e-2);
     }
 }

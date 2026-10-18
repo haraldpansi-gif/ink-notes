@@ -191,6 +191,28 @@ pub fn export_notebook_to_bytes(
     assets: Option<&AssetStore>,
     pattern: PatternColor,
 ) -> Result<Vec<u8>, Box<dyn Error>> {
+    // Endlose Seite: nur der beschriebene Ausschnitt wird zur PDF-Seite
+    if notebook.pages.iter().any(|p| p.is_endless()) {
+        let pages = notebook
+            .pages
+            .iter()
+            .map(|p| {
+                if p.is_endless() {
+                    let (origin, size) = p.endless_export_bounds();
+                    p.cropped(origin, size)
+                } else {
+                    p.clone()
+                }
+            })
+            .collect();
+        let cropped = Notebook::from_pages(
+            pages,
+            notebook.current_page_index,
+            notebook.next_stroke_id,
+            notebook.next_page_id,
+        );
+        return export_notebook_to_bytes(&cropped, strategy, assets, pattern);
+    }
     let doc = generate_pdf_document(notebook, strategy, assets, pattern)?;
     let bytes = add_alpha_states(fix_text_encoding(doc.save_to_bytes()?, notebook)?, notebook)?;
 
@@ -1770,6 +1792,49 @@ mod tests {
             PatternColor::default()
         )
         .is_ok());
+    }
+
+    #[test]
+    fn test_endless_page_exports_only_the_written_area() {
+        let mut notebook = Notebook::new();
+        assert!(notebook.make_endless());
+        let sample = |x: f32, y: f32| StylusSample {
+            position: glam::Vec2::new(x, y),
+            pressure: 0.5,
+            timestamp: 0.0,
+        };
+        let page = &mut notebook.pages[0];
+        page.add_stroke(Stroke::new(
+            1,
+            vec![sample(20_000.0, 30_000.0), sample(23_000.0, 31_000.0)],
+            vec![
+                InkVertex::new(20_000.0, 30_000.0, [0.0, 0.0, 0.0, 1.0]),
+                InkVertex::new(23_000.0, 31_000.0, [0.0, 0.0, 0.0, 1.0]),
+                InkVertex::new(23_000.0, 31_010.0, [0.0, 0.0, 0.0, 1.0]),
+            ],
+            [0.0, 0.0, 0.0, 1.0],
+        ));
+        let (_, size) = notebook.pages[0].endless_export_bounds();
+        let bytes = export_notebook_to_bytes(
+            &notebook,
+            ExportStrategy::FilledPolygon,
+            None,
+            PatternColor::default(),
+        )
+        .unwrap();
+        let sizes = crate::pdf_doc::page_sizes(bytes).unwrap();
+        assert_eq!(sizes.len(), 1);
+        // Seiteneinheiten (10 = 1 mm) in Punkt
+        let pt = |units: f32| units / 10.0 / 25.4 * 72.0;
+        assert!(
+            (sizes[0].0 - pt(size.x)).abs() < 1.0,
+            "{sizes:?} statt {size:?}"
+        );
+        assert!(
+            (sizes[0].1 - pt(size.y)).abs() < 1.0,
+            "{sizes:?} statt {size:?}"
+        );
+        assert!(sizes[0].0 < pt(4_000.0), "nicht die ganze endlose Seite");
     }
 
     #[test]

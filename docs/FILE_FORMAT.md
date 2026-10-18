@@ -1,6 +1,6 @@
 # Dateiformat von ink-notes
 
-Dieses Dokument beschreibt, wo und wie ink-notes Notizbücher speichert, und die Versionen des Dateiformats. Aktuell ist **Version 8**.
+Dieses Dokument beschreibt, wo und wie ink-notes Notizbücher speichert, und die Versionen des Dateiformats. Aktuell ist **Version 9**.
 
 ---
 
@@ -51,7 +51,7 @@ Ordner wie „3. Semester › Mathe“ sind rein logisch: Die Notizbücher bleib
 
 ```json
 {
-  "format_version": 8,
+  "format_version": 9,
   "id": "vorlesung_1775460000",
   "title": "Vorlesung",
   "created_at": 1775460000,
@@ -77,7 +77,9 @@ Ordner wie „3. Semester › Mathe“ sind rein logisch: Die Notizbücher bleib
 | `pages` | Seiten in ihrer Reihenfolge: `id`, `background`, optional `title` und `size` (siehe unten) – damit Seitenübersicht und Ansicht sie kennen, ohne jede Seite zu laden |
 | `page_ids` | dieselbe Reihenfolge als reine ID-Liste (für ältere Versionen) |
 | `next_stroke_id`, `next_page_id` | nächste freie IDs |
-| `layout` | Anordnung der Seiten: `Paged` (Seite für Seite) oder `Continuous` (durchgehend untereinander). Seit 0.28; fehlt das Feld, gilt die frühere globale Einstellung `continuous_scroll` aus `ui.json`. Ältere App-Versionen ignorieren es, daher keine neue Formatversion |
+| `layout` | Anordnung der Seiten: `Paged` (Seite für Seite), `Continuous` (durchgehend untereinander) oder `Endless` (endlose Fläche, siehe unten). Seit 0.28; fehlt das Feld, gilt die frühere globale Einstellung `continuous_scroll` aus `ui.json` |
+
+**Endlose Notizbücher** (Version 9) haben genau eine Seite der Größe `[100000.0, 100000.0]` (10 × 10 m). Der Startausschnitt ist ein DIN-A4-Rahmen in ihrer Mitte (ab `[48950, 48515]`); Koordinaten bleiben positiv. Beim Export wird nur der beschriebene Bereich mit 10 mm Rand zur PDF-Seite.
 
 ---
 
@@ -101,7 +103,7 @@ Jede Seite liegt in einer eigenen Datei (kompaktes JSON, hier zur Lesbarkeit umb
 | :--- | :--- |
 | `background` | Muster: `Blank`, `Grid5mm`, `Lined`, `DotGrid` |
 | `title` | Seitentitel (optional) |
-| `size` | Seitengröße `[breite, höhe]` in Seiteneinheiten (10 = 1 mm); fehlt bei DIN A4 hoch (`[2100, 2970]`) |
+| `size` | Seitengröße `[breite, höhe]` in Seiteneinheiten (10 = 1 mm); fehlt bei DIN A4 hoch (`[2100, 2970]`). Höchstens 2 × 2 m, außer der endlosen Seite `[100000, 100000]` |
 | `pdf_background` | importierte PDF-Seite als Hintergrund (optional): Datei, Seitennummer ab 0, Größe in Punkt |
 | `strokes` | alle Objekte der Seite, von unten nach oben |
 
@@ -184,6 +186,7 @@ Beim ersten Speichern einer unversionierten Datei (Version 0) wird vorher eine K
 | 6 | 0.7 | Seitentitel (`title` in Seite und Manifest) |
 | 7 | 0.10 | Textfelder (`text`) |
 | 8 | 0.11 | Seitengröße je Seite (`size` in Seite und Manifest) |
+| 9 | 0.29 | Seitenanordnung je Notizbuch (`layout` im Manifest), endlose Notizbücher |
 
 Jede neue Version ändert nur Ergänzungen; ältere Dateien werden ohne Umwandlung gelesen und beim nächsten Speichern mit der aktuellen Versionsnummer geschrieben.
 

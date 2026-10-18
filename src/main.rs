@@ -577,6 +577,7 @@ fn insert_image_on_page(
         imported.height,
         center,
         notebook.current_page().size,
+        notebook.current_page().reference_size(),
     );
     let page = notebook.current_page_mut();
     page.add_stroke(ink_notes::document::Stroke::new_image(
@@ -828,7 +829,7 @@ fn insert_text_on_page(
     let mut edit = ink_notes::text::TextEditing::new_at(
         notebook.current_page().id,
         position,
-        notebook.current_page().size.x,
+        notebook.current_page().text_right_edge(position.x),
         ui_state.text_size_pt * ink_notes::text::UNITS_PER_PT,
         ui_state.text_font,
         ui_state.text_color,
@@ -922,7 +923,7 @@ fn text_tool_click(
         None => Some(ink_notes::text::TextEditing::new_at(
             page.id,
             page_pt,
-            page.size.x,
+            page.text_right_edge(page_pt.x),
             ui_state.text_size_pt * ink_notes::text::UNITS_PER_PT,
             ui_state.text_font,
             ui_state.text_color,
@@ -1523,8 +1524,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     event_loop.run(move |event, target| {
         // Anordnung der Seiten gehört zum offenen Notizbuch (Issue #30)
-        ui_state.continuous_scroll =
-            manifest.layout_or(ui_settings.continuous_scroll) == NotebookLayout::Continuous;
+        // Endlos ist ein Notizbuch an seiner einzigen, endlosen Seite erkennbar
+        ui_state.endless = notebook.is_endless();
+        ui_state.continuous_scroll = !ui_state.endless
+            && manifest.layout_or(ui_settings.continuous_scroll) == NotebookLayout::Continuous;
+        ui_state.endless_switch_possible = if ui_state.endless {
+            notebook.can_make_paged()
+        } else {
+            notebook.can_make_endless()
+        };
         match event {
             Event::AboutToWait => {
                 let prev_status = autosave.status();
@@ -3301,6 +3309,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
                                     }
                                 }
+                                // Die endlose Fläche bleibt eine einzige Seite
+                                UiAction::AddPage if notebook.is_endless() => {}
                                 UiAction::AddPage => {
                                     // Leere Seite direkt nach der aktuellen (in PDFs: nach der Folie,
                                     // auf der man gerade ist) und dorthin wechseln
@@ -3568,9 +3578,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 UiAction::CreateNotebook { title, folder, layout } => {
                                     let _ = autosave.flush();
                                     match storage::create_new_notebook(&storage_base_dir, &title) {
-                                        Ok((new_nb, mut new_manifest, new_dir)) => {
+                                        Ok((mut new_nb, mut new_manifest, new_dir)) => {
                                             let id = new_manifest.id.clone();
                                             new_manifest.layout = Some(layout);
+                                            if layout == NotebookLayout::Endless {
+                                                new_nb.make_endless();
+                                            }
                                             change_library(&storage_base_dir, &mut ui_state, |library| {
                                                 library.move_notebook(&id, &folder)
                                             });
@@ -3580,7 +3593,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             notebook = new_nb;
                                             manifest = new_manifest;
                                             storage_dir = new_dir;
-                                            autosave.mark_manifest_dirty(&manifest);
+                                            autosave.mark_dirty(&notebook, &mut manifest);
+                                            canvas.reset_view();
                                             selection_state.clear();
                                             ui_state.current_notebook_id = manifest.id.clone();
                                             ui_state.document_title = manifest.title.clone();
@@ -3826,9 +3840,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     window.request_redraw();
                                 }
                                 UiAction::SetNotebookLayout(layout) => {
-                                    manifest.layout = Some(layout);
-                                    ui_state.continuous_scroll = layout == NotebookLayout::Continuous;
-                                    autosave.mark_manifest_dirty(&manifest);
+                                    // Von und zur endlosen Fläche nur mit einer Seite, deren Inhalt passt
+                                    let was_endless = notebook.is_endless();
+                                    let to_endless = layout == NotebookLayout::Endless;
+                                    let converted = match (was_endless, to_endless) {
+                                        (false, true) => notebook.make_endless(),
+                                        (true, false) => notebook.make_paged(),
+                                        _ => true,
+                                    };
+                                    if !converted {
+                                        ui_state.set_export_message(if to_endless {
+                                            t!("Endlos geht nur bei einem Notizbuch mit einer einzigen Seite ohne PDF").to_string()
+                                        } else {
+                                            t!("Zurück zu Seiten geht nur, solange alles im Startausschnitt liegt").to_string()
+                                        });
+                                    } else {
+                                        manifest.layout = Some(layout);
+                                        ui_state.endless = to_endless;
+                                        ui_state.continuous_scroll = layout == NotebookLayout::Continuous;
+                                        if was_endless != to_endless {
+                                            selection_state.clear();
+                                            canvas.sync_page(notebook.current_page_mut());
+                                            canvas.reset_view();
+                                            autosave.mark_dirty(&notebook, &mut manifest);
+                                        } else {
+                                            autosave.mark_manifest_dirty(&manifest);
+                                        }
+                                    }
                                     window.request_redraw();
                                 }
                                 UiAction::SaveStylusButtons => {
