@@ -1187,8 +1187,8 @@ fn color_editor(
     changed
 }
 
-/// Stift der Werkzeugleiste: ein Strich in Farbe und (angedeuteter) Stärke auf einem
-/// Stück Papier, damit auch schwarze Tinte auf der dunklen Leiste sichtbar ist.
+/// Stift der Werkzeugleiste: ein schräg liegender Stift in seiner Farbe; die Stärke steht
+/// im Tooltip.
 fn pen_preset_swatch(
     ui: &mut egui::Ui,
     preset: PenPreset,
@@ -1198,22 +1198,49 @@ fn pen_preset_swatch(
 ) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::click());
     if ui.is_rect_visible(rect) {
-        let paper = rect.shrink(2.0);
-        ui.painter().rect_filled(
-            paper,
-            egui::Rounding::same(5.0),
-            egui::Color32::from_gray(245),
-        );
+        // Schräg liegender Stift ganz in seiner Farbe, damit die Stifte auf einen Blick zu
+        // unterscheiden sind (Issue #31); die helle Kontur hält dunkle Farben sichtbar
         let [r, g, b, _] = preset.color.map(|c| (c.clamp(0.0, 1.0) * 255.0) as u8);
-        let width = (1.0 + preset.width_mm * 2.5).clamp(1.5, paper.height() * 0.35);
-        let inset = 3.0 + width / 2.0;
-        ui.painter().line_segment(
-            [
-                egui::pos2(paper.left() + inset, paper.bottom() - inset),
-                egui::pos2(paper.right() - inset, paper.top() + inset),
+        let ink = egui::Color32::from_rgb(r, g, b);
+        let c = rect.center();
+        let dir = egui::vec2(1.0, -1.0).normalized();
+        let perp = egui::vec2(dir.y, -dir.x);
+        let half_len = size * 0.44;
+        let half_w = size * 0.17;
+        let p = |along: f32, across: f32| c + dir * along + perp * across;
+        let tip_start = -half_len * 0.3;
+        let lead_start = -half_len * 0.72;
+        let lead_w = half_w * (lead_start + half_len) / (tip_start + half_len);
+        let outline = egui::Stroke::new(1.0_f32, egui::Color32::from_gray(200));
+        let painter = ui.painter();
+        painter.add(egui::Shape::convex_polygon(
+            vec![
+                p(tip_start, -half_w),
+                p(half_len, -half_w),
+                p(half_len, half_w),
+                p(tip_start, half_w),
             ],
-            egui::Stroke::new(width, egui::Color32::from_rgb(r, g, b)),
-        );
+            ink,
+            outline,
+        ));
+        painter.add(egui::Shape::convex_polygon(
+            vec![
+                p(-half_len, 0.0),
+                p(tip_start, -half_w),
+                p(tip_start, half_w),
+            ],
+            egui::Color32::from_rgb(235, 210, 170),
+            outline,
+        ));
+        painter.add(egui::Shape::convex_polygon(
+            vec![
+                p(-half_len, 0.0),
+                p(lead_start, -lead_w),
+                p(lead_start, lead_w),
+            ],
+            ink,
+            egui::Stroke::NONE,
+        ));
         if is_selected {
             ui.painter().rect_stroke(
                 rect.shrink(0.5),
