@@ -255,6 +255,8 @@ pub enum UiAction {
     /// Zwischenablage an dieser Stelle der aktuellen Seite einfügen (Kontextmenü)
     PasteAt(glam::Vec2),
     RotateSelected,
+    /// Seitenverhältnis beim Skalieren der Auswahl sperren bzw. freigeben
+    ToggleAspectLock,
     // Dokumenten- & Notizbuch-Verwaltung
     OpenNotebook(String),
     /// Neues Notizbuch im Ordner `folder` anlegen und öffnen
@@ -410,6 +412,8 @@ pub struct UiState {
     pub confirm_delete_page: bool,
     /// Seitenzahl der zuletzt gelöschten Seite, solange sie wiederhergestellt werden kann
     pub restorable_page: Option<usize>,
+    /// Seitenverhältnis-Schloss der Auswahl (`None`: nichts ausgewählt)
+    pub selection_aspect_lock: Option<bool>,
     /// Fehler beim Flushen vor dem Beenden
     pub shutdown_error: Option<crate::autosave::AutosaveError>,
     /// Fensterseite der Werkzeugleiste
@@ -508,6 +512,7 @@ impl Default for UiState {
             pressed_stylus_button: None,
             confirm_delete_page: false,
             restorable_page: None,
+            selection_aspect_lock: None,
             shutdown_error: None,
             sidebar_side: SidebarSide::Left,
             language: None,
@@ -3045,6 +3050,30 @@ pub fn render_ui(
                                         used += btn + spacing;
                                     }
                                 }
+                                // Auswahl: unter den 4 Stiftfarben ist Platz für das Schloss des
+                                // Seitenverhältnisses beim Skalieren (Bilder: gesperrt, Issue #29)
+                                if state.active_tool == ActiveTool::Select {
+                                    let locked = state.selection_aspect_lock;
+                                    let (icon, tooltip) = if locked == Some(true) {
+                                        ("🔒", t!("Seitenverhältnis gesperrt – tippen zum Freigeben"))
+                                    } else {
+                                        ("🔓", t!("Seitenverhältnis frei – tippen zum Sperren"))
+                                    };
+                                    if sidebar_button(
+                                        ui,
+                                        swatch,
+                                        SidebarIcon::Glyph(icon),
+                                        locked == Some(true),
+                                        locked.is_some(),
+                                        None,
+                                        tooltip,
+                                    )
+                                    .clicked()
+                                    {
+                                        actions.push(UiAction::ToggleAspectLock);
+                                    }
+                                    used += swatch + spacing;
+                                }
                                 let reserved =
                                     UiState::MAX_PALETTE_LEN as f32 * (swatch + spacing);
                                 if reserved > used {
@@ -5187,6 +5216,35 @@ mod tests {
                 "{tool:?} nicht per Klick erreichbar, gefunden: {found:?}"
             );
         }
+    }
+
+    #[test]
+    fn test_aspect_lock_button_only_with_selection() {
+        // Den Knopf in der Leiste des Auswahlwerkzeugs suchen: ohne Auswahl gesperrt
+        let notebook = Notebook::new();
+        let toggles = |lock: Option<bool>| {
+            let mut probe = UiState::new();
+            probe.active_tool = ActiveTool::Select;
+            render_frames(&mut probe, &notebook, 10);
+            let bar = probe.toolbar_rect.unwrap();
+            let mut found = 0;
+            let mut y = bar.min.y + 4.0;
+            while y < bar.max.y {
+                let mut state = UiState::new();
+                state.active_tool = ActiveTool::Select;
+                state.selection_aspect_lock = lock;
+                let ctx = render_frames(&mut state, &notebook, 10);
+                let actions = click_at(&ctx, &mut state, &notebook, egui::pos2(bar.center().x, y));
+                if actions.contains(&UiAction::ToggleAspectLock) {
+                    found += 1;
+                }
+                y += 4.0;
+            }
+            found
+        };
+        assert_eq!(toggles(None), 0);
+        assert!(toggles(Some(true)) > 0);
+        assert!(toggles(Some(false)) > 0);
     }
 
     #[test]

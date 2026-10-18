@@ -286,6 +286,8 @@ pub const EN: &[(&str, &str)] = &[
     ("Seite {number}", "Page {number}"),
     ("Seiten ({count})", "Pages ({count})"),
     ("Seiten durchgehend scrollen", "Scroll pages continuously"),
+    ("Seitenverhältnis frei – tippen zum Sperren", "Aspect ratio free – tap to lock"),
+    ("Seitenverhältnis gesperrt – tippen zum Freigeben", "Aspect ratio locked – tap to unlock"),
     ("Serialisierungsfehler: {e}", "Serialization error: {e}"),
     ("Server-Einstellungen gespeichert", "Server settings saved"),
     ("Server:", "Server:"),

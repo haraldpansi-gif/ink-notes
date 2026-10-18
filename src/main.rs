@@ -651,8 +651,8 @@ fn selection_press(
             _,
         ) => {
             let initial_strokes = page.get_strokes(&selection_state.selected_ids);
-            // Bilder nicht verzerren (Issue #29); Shift hält das Verhältnis auch bei Strichen
-            let keep_aspect = shift || initial_strokes.iter().any(|s| s.is_image());
+            // Schloss der Auswahl (Bilder: an, Issue #29); Shift sperrt zusätzlich
+            let keep_aspect = shift || selection_state.keeps_aspect(page);
             DragMode::Scale {
                 fixed_corner_page,
                 start_pos_page,
@@ -3101,6 +3101,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         // 3. Toolbar & Widgets rendern
                         updater.update();
                         ui_state.page_view = Some(page_view(&canvas, window.scale_factor() as f32));
+                        ui_state.selection_aspect_lock = (!selection_state.is_empty())
+                            .then(|| selection_state.keeps_aspect(notebook.current_page()));
                         ui_state.restorable_page = last_deleted_page
                             .as_ref()
                             .filter(|(id, _, _)| *id == manifest.id)
@@ -3200,6 +3202,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     );
                                     update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
                                     window.request_redraw();
+                                }
+                                UiAction::ToggleAspectLock => {
+                                    if !selection_state.is_empty() {
+                                        selection_state.toggle_aspect_lock(notebook.current_page());
+                                        window.request_redraw();
+                                    }
                                 }
                                 UiAction::RotateSelected => {
                                     if !selection_state.is_empty()

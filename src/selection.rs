@@ -36,7 +36,7 @@ pub enum DragMode {
         start_pos_page: Vec2,
         initial_box_size: Vec2,
         initial_strokes: Vec<Stroke>,
-        /// Seitenverhältnis beibehalten (Bilder in der Auswahl oder Shift gedrückt)
+        /// Seitenverhältnis beibehalten (Schloss der Auswahl oder Shift gedrückt)
         keep_aspect: bool,
     },
 }
@@ -89,6 +89,9 @@ pub struct SelectionState {
     pub selected_ids: Vec<u64>,
     pub drag_mode: DragMode,
     pub clipboard: Vec<Stroke>,
+    /// Von Hand umgeschaltetes Seitenverhältnis-Schloss und die Auswahl (IDs), für die es
+    /// gilt. Ändert sich die Auswahl, gilt wieder die Vorgabe (siehe [`Self::keeps_aspect`]).
+    aspect_lock: Option<(Vec<u64>, bool)>,
 }
 
 impl SelectionState {
@@ -97,7 +100,26 @@ impl SelectionState {
             selected_ids: Vec::new(),
             drag_mode: DragMode::None,
             clipboard: Vec::new(),
+            aspect_lock: None,
         }
+    }
+
+    /// Ob Skalieren an den Eckgriffen das Seitenverhältnis der Auswahl beibehält. Vorgabe:
+    /// ja, sobald ein Bild ausgewählt ist (Issue #29); per Knopf für diese Auswahl umschaltbar.
+    pub fn keeps_aspect(&self, page: &Page) -> bool {
+        match &self.aspect_lock {
+            Some((ids, locked)) if *ids == self.selected_ids => *locked,
+            _ => page
+                .get_strokes(&self.selected_ids)
+                .iter()
+                .any(|s| s.is_image()),
+        }
+    }
+
+    /// Schaltet das Seitenverhältnis-Schloss der aktuellen Auswahl um.
+    pub fn toggle_aspect_lock(&mut self, page: &Page) {
+        let locked = !self.keeps_aspect(page);
+        self.aspect_lock = Some((self.selected_ids.clone(), locked));
     }
 
     /// Prüft, ob aktuell Objekte ausgewählt sind.
@@ -575,6 +597,48 @@ mod tests {
             scale_factors(fixed, line, Vec2::new(30.0, 200.0), true),
             Vec2::splat(2.0)
         );
+    }
+
+    #[test]
+    fn test_aspect_lock_defaults_to_images_and_toggles_per_selection() {
+        let mut page = Page::new(1, PageBackground::Blank);
+        let corners = [
+            Vec2::new(0.0, 0.0),
+            Vec2::new(100.0, 0.0),
+            Vec2::new(100.0, 50.0),
+            Vec2::new(0.0, 50.0),
+        ];
+        page.add_stroke(Stroke::new_image(1, "a.png".into(), corners));
+        page.add_stroke(make_test_stroke(2, 200.0, 200.0, [0.1, 0.1, 0.1, 1.0]));
+        let mut sel = SelectionState::new();
+
+        // Vorgabe: Bilder gesperrt, Striche frei
+        sel.select_single(1);
+        assert!(sel.keeps_aspect(&page));
+        sel.select_single(2);
+        assert!(!sel.keeps_aspect(&page));
+
+        // Umschalten gilt für diese Auswahl
+        sel.toggle_aspect_lock(&page);
+        assert!(sel.keeps_aspect(&page));
+        sel.select_single(1);
+        sel.toggle_aspect_lock(&page);
+        assert!(!sel.keeps_aspect(&page));
+        sel.toggle_aspect_lock(&page);
+        assert!(sel.keeps_aspect(&page));
+        sel.toggle_aspect_lock(&page);
+
+        // Neue Auswahl: wieder die Vorgabe
+        sel.select_multiple(vec![1, 2]);
+        assert!(sel.keeps_aspect(&page));
+        sel.select_single(1);
+        assert!(
+            !sel.keeps_aspect(&page),
+            "gleiche Auswahl behält das Umschalten"
+        );
+        sel.clear();
+        sel.select_single(1);
+        assert!(!sel.keeps_aspect(&page));
     }
 
     #[test]
