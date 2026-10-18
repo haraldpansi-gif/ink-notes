@@ -84,6 +84,11 @@
   </branding>
   <content_rating type="oars-1.1" />
   <releases>
+    <release version="0.28.0" date="2026-10-18">
+      <description>
+        <p>Each notebook remembers whether it flips page by page or scrolls continuously. New notebooks start with fixed pages; the layout can be chosen when creating a notebook and changed later in the menu.</p>
+      </description>
+    </release>
     <release version="0.27.1" date="2026-10-18">
       <description>
         <p>The pens in the toolbar are shown as pencils in their own colour, so they are easy to tell apart.</p>
