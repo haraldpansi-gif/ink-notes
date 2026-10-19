@@ -616,12 +616,13 @@ impl Stroke {
     pub fn recompute_aabb(&mut self) {
         // Ohne Zwischenliste: läuft beim Ziehen einer Auswahl für jeden Strich und jede Bewegung
         let bounds = |mut pts: Box<dyn Iterator<Item = glam::Vec2> + '_>| {
-            pts.next().map_or(Aabb::new(glam::Vec2::ZERO, glam::Vec2::ZERO), |first| {
-                pts.fold(Aabb::new(first, first), |mut aabb, p| {
-                    aabb.expand_by_point(p);
-                    aabb
+            pts.next()
+                .map_or(Aabb::new(glam::Vec2::ZERO, glam::Vec2::ZERO), |first| {
+                    pts.fold(Aabb::new(first, first), |mut aabb, p| {
+                        aabb.expand_by_point(p);
+                        aabb
+                    })
                 })
-            })
         };
         self.aabb = if !self.points.is_empty() {
             bounds(Box::new(self.points.iter().map(|s| s.position)))
