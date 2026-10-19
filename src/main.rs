@@ -1422,6 +1422,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Langes Drücken mit einem Finger öffnet das Kontextmenü
     let mut long_press = ui::LongPress::default();
     let mut touch_pan_last_pos = (0.0_f32, 0.0_f32);
+    // Nachgleiten nach schnellem Wischen mit dem Finger (Issue #28)
+    let mut fling = ink_notes::viewport::Fling::default();
 
     // Stylus / Digitizer Zustand (Octotablet / Wayland Tablet Protocol)
     let mut is_stylus_drawing = false;
@@ -1961,6 +1963,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     window.request_redraw();
                 }
 
+                // Nachgleiten nach dem Wischen
+                if let Some(delta) = fling.step(Instant::now()) {
+                    canvas.pan(delta.x, delta.y);
+                    window.request_redraw();
+                }
+
                 // Von egui angefordertes, verzögertes Neuzeichnen (Tooltips, Animationen)
                 if let Some(at) = egui_repaint_at {
                     if Instant::now() >= at {
@@ -1976,6 +1984,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     || (is_drawing && !stroke_already_snapped)
                     || is_stylus_drawing
                     || is_stylus_in_proximity
+                    || fling.is_active()
                 {
                     target.set_control_flow(ControlFlow::wait_duration(Duration::from_millis(8)));
                 } else if let Some(at) = [egui_repaint_at, long_press.deadline()]
@@ -2080,6 +2089,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         pinch_prev_center = None;
                         is_touch_drawing = false;
                         is_touch_panning = false;
+                        fling.stop();
                         is_stylus_drawing = false;
                         is_stylus_selecting = false;
                         is_stylus_in_proximity = false;
@@ -2536,6 +2546,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     return;
                                 }
 
+                                fling.stop();
                                 // 1. Pan via mittlere Maustaste oder Leertaste + Linksklick
                                 if button == MouseButton::Middle || (button == MouseButton::Left && is_space_pressed) {
                                     is_panning = true;
@@ -2721,6 +2732,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
 
                     WindowEvent::MouseWheel { delta, .. } => {
+                        fling.stop();
                         if is_pointer_in_ui {
                             return;
                         }
@@ -2729,7 +2741,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         if (ui_state.continuous_scroll || ui_state.endless) && !modifiers.control_key() {
                             let (mut dx, mut dy) = match delta {
                                 MouseScrollDelta::LineDelta(x, y) => {
-                                    let line = 60.0 * window.scale_factor() as f32;
+                                    let line = 120.0 * window.scale_factor() as f32;
                                     (x * line, y * line)
                                 }
                                 MouseScrollDelta::PixelDelta(pos) => (pos.x as f32, pos.y as f32),
@@ -2802,6 +2814,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                         match touch.phase {
                             TouchPhase::Started => {
+                                // Jede neue Berührung hält ein gleitendes Blatt an
+                                fling.stop();
                                 // Event-Isolation für Touch-Eingaben
                                 let is_touch_in_ui = ui::is_screen_point_in_ui(
                                     &egui_ctx,
@@ -2957,6 +2971,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         let dy = ty - touch_pan_last_pos.1;
                                         touch_pan_last_pos = (tx, ty);
                                         canvas.pan(dx, dy);
+                                        fling.track(Vec2::new(dx, dy), Instant::now());
                                         window.request_redraw();
                                     } else if is_touch_drawing {
                                         current_pressure = pressure;
@@ -3003,6 +3018,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     is_pinch_gesturing = false;
                                     pinch_prev_distance = None;
                                     pinch_prev_center = None;
+                                    if is_touch_panning && touch.phase == TouchPhase::Ended {
+                                        fling.release(Instant::now());
+                                        window.request_redraw();
+                                    }
                                     is_touch_panning = false;
 
                                     if is_erasing {
@@ -3067,7 +3086,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         canvas.set_fit_box(notebook.fit_box());
                         if ui_state.continuous_scroll {
                             let stack = notebook.page_stack();
-                            canvas.clamp_scroll(&stack);
+                            if canvas.clamp_scroll(&stack) {
+                                // Am Anfang oder Ende des Notizbuchs angekommen
+                                fling.stop();
+                            }
                             // Unabhängig von der Bezugsseite: Lage bezogen auf die erste Seite
                             let scroll = [
                                 canvas.camera.zoom,
@@ -3844,6 +3866,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     canvas.set_pattern_color(pattern);
                                     ui_settings.pattern_color = pattern;
                                     save_ui_settings(&ui_settings, ui_settings_path.as_deref(), &mut ui_state);
+                                    window.request_redraw();
+                                }
+                                UiAction::ScrollTo(y) => {
+                                    fling.stop();
+                                    canvas.scroll_center_to(y);
                                     window.request_redraw();
                                 }
                                 UiAction::SetNotebookLayout(layout) => {

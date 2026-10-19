@@ -305,6 +305,84 @@ impl ViewportState {
     }
 }
 
+/// Schwung beim Scrollen mit dem Finger (Issue #28): Nach dem Abheben gleitet der
+/// Ausschnitt mit der zuletzt gewischten Geschwindigkeit weiter und bremst langsam ab.
+/// Geschwindigkeiten in Bildschirmpixeln je Sekunde.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Fling {
+    velocity: Vec2,
+    /// Zeit der letzten Fingerbewegung bzw. des letzten Gleitschritts
+    last: Option<std::time::Instant>,
+    active: bool,
+}
+
+impl Fling {
+    /// Abbremsen je Sekunde (Anteil der Geschwindigkeit, der nach 1 s bleibt: e^-FRICTION)
+    const FRICTION: f32 = 2.5;
+    /// Langsamer wischen gleitet nicht nach
+    const MIN_START_SPEED: f32 = 400.0;
+    /// Darunter hört das Gleiten auf
+    const MIN_SPEED: f32 = 40.0;
+    /// Liegt der Finger vor dem Abheben so lange still, gleitet nichts nach
+    const MAX_REST: std::time::Duration = std::time::Duration::from_millis(80);
+
+    /// Finger hat sich um `delta` verschoben.
+    pub fn track(&mut self, delta: Vec2, now: std::time::Instant) {
+        self.active = false;
+        let dt = self
+            .last
+            .map_or(0.0, |last| now.duration_since(last).as_secs_f32());
+        self.last = Some(now);
+        if dt <= 0.0 {
+            return;
+        }
+        // Geglättet: einzelne ungleichmäßige Touch-Ereignisse sollen nicht zählen
+        let sample = delta / dt.max(0.004);
+        self.velocity = self.velocity.lerp(sample, 0.4);
+    }
+
+    /// Finger abgehoben: gleitet weiter, wenn zuletzt schnell genug gewischt wurde.
+    pub fn release(&mut self, now: std::time::Instant) {
+        let resting = self
+            .last
+            .is_none_or(|last| now.duration_since(last) > Self::MAX_REST);
+        self.active = !resting && self.velocity.length() >= Self::MIN_START_SPEED;
+        self.last = Some(now);
+        if !self.active {
+            self.stop();
+        }
+    }
+
+    /// Hält an (neue Berührung, Mausklick, Mausrad).
+    pub fn stop(&mut self) {
+        *self = Self::default();
+    }
+
+    pub fn is_active(&self) -> bool {
+        self.active
+    }
+
+    /// Verschiebung (Bildschirmpixel) seit dem letzten Schritt; `None`, wenn nichts gleitet.
+    pub fn step(&mut self, now: std::time::Instant) -> Option<Vec2> {
+        if !self.active {
+            return None;
+        }
+        let dt = self
+            .last
+            .map_or(0.0, |last| now.duration_since(last).as_secs_f32())
+            .min(0.1);
+        self.last = Some(now);
+        // Exakt integriert, damit die Strecke nicht von der Bildrate abhängt
+        let decay = (-Self::FRICTION * dt).exp();
+        let delta = self.velocity * (1.0 - decay) / Self::FRICTION;
+        self.velocity *= decay;
+        if self.velocity.length() < Self::MIN_SPEED {
+            self.stop();
+        }
+        Some(delta)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -314,6 +392,46 @@ mod tests {
 
     fn a4_stack(count: usize, current: usize) -> PageStack {
         PageStack::new(vec![A4; count], current)
+    }
+
+    #[test]
+    fn test_fling_glides_and_slows_down() {
+        use std::time::{Duration, Instant};
+        let t0 = Instant::now();
+        let ms = |n: u64| t0 + Duration::from_millis(n);
+        let mut fling = Fling::default();
+        // Schnell nach oben wischen: 30 px alle 10 ms = 3000 px/s
+        for i in 0..=10 {
+            fling.track(Vec2::new(0.0, -30.0), ms(i * 10));
+        }
+        fling.release(ms(105));
+        assert!(fling.is_active());
+        let first = fling.step(ms(121)).unwrap();
+        assert!(first.y < -20.0, "{first:?}");
+        let mut total = first;
+        let mut t = 121;
+        while let Some(d) = fling.step(ms(t)) {
+            total += d;
+            t += 16;
+            assert!(t < 10_000, "gleitet endlos");
+        }
+        // Gleitet ungefähr v / FRICTION = 1200 px weiter, dann ist Schluss
+        assert!(total.y < -800.0 && total.y > -1300.0, "{total:?}");
+        assert!(!fling.is_active());
+
+        // Langsam schieben oder vor dem Abheben stillhalten: kein Nachgleiten
+        let mut slow = Fling::default();
+        for i in 0..=10 {
+            slow.track(Vec2::new(0.0, -2.0), ms(i * 10));
+        }
+        slow.release(ms(105));
+        assert!(!slow.is_active());
+        let mut rested = Fling::default();
+        for i in 0..=10 {
+            rested.track(Vec2::new(0.0, -30.0), ms(i * 10));
+        }
+        rested.release(ms(400));
+        assert!(!rested.is_active());
     }
 
     #[test]

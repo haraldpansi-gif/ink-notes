@@ -843,6 +843,18 @@ impl CanvasState {
         changed
     }
 
+    /// Durchgehende Ansicht: Scrollt senkrecht, bis die Fenstermitte auf Höhe `y`
+    /// (Koordinaten der aktuellen Seite) liegt.
+    pub fn scroll_center_to(&mut self, y: f32) {
+        let c = self.camera.screen_to_page_unclamped(
+            self.viewport.page_x + self.viewport.page_width / 2.0,
+            self.size.height as f32 / 2.0,
+            &self.viewport,
+        );
+        self.camera.pan_offset[1] += c.y - y;
+        self.update_uniforms();
+    }
+
     /// Durchgehende Ansicht: Die Seite mit der Ecke `origin` (Koordinaten der aktuellen Seite)
     /// wird zur Bezugsseite, ohne dass sich der Bildausschnitt bewegt. Danach ist die neue
     /// Seite mit [`Self::sync_page`] zu setzen.

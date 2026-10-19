@@ -330,7 +330,7 @@ impl NotebookManifest {
             page_ids: vec![1],
             next_stroke_id: 1,
             next_page_id: 2,
-            layout: Some(NotebookLayout::Paged),
+            layout: Some(NotebookLayout::Continuous),
         }
     }
 
@@ -1640,14 +1640,14 @@ mod tests {
     fn test_notebook_layout_is_saved_and_old_manifests_fall_back() {
         let temp_dir = tempfile::tempdir().unwrap();
         let (_nb, mut manifest, dir) = create_new_notebook(temp_dir.path(), "Layout").unwrap();
-        // Neue Notizbücher: feste Seiten, unabhängig von der früheren globalen Einstellung
-        assert_eq!(manifest.layout, Some(NotebookLayout::Paged));
-        assert_eq!(manifest.layout_or(true), NotebookLayout::Paged);
+        // Neue Notizbücher: durchgehend, unabhängig von der früheren globalen Einstellung
+        assert_eq!(manifest.layout, Some(NotebookLayout::Continuous));
+        assert_eq!(manifest.layout_or(false), NotebookLayout::Continuous);
 
-        manifest.layout = Some(NotebookLayout::Continuous);
+        manifest.layout = Some(NotebookLayout::Paged);
         save_manifest(&dir, &manifest).unwrap();
         let (_nb, loaded) = load_notebook(&dir).unwrap();
-        assert_eq!(loaded.layout, Some(NotebookLayout::Continuous));
+        assert_eq!(loaded.layout, Some(NotebookLayout::Paged));
 
         // Manifest von vor 0.28 ohne `layout`: es gilt die globale Einstellung
         let mut json: serde_json::Value =

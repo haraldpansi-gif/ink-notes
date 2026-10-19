@@ -320,6 +320,9 @@ pub enum UiAction {
     SavePressureCurve(PressureCurve),
     /// Anordnung der Seiten des offenen Notizbuchs (wird im Manifest gespeichert)
     SetNotebookLayout(NotebookLayout),
+    /// Durchgehende Ansicht: Fenstermitte auf diese Höhe (Koordinaten der aktuellen Seite)
+    /// scrollen – Bildlaufleiste, Issue #28
+    ScrollTo(f32),
     /// Farbe von Karos, Linien und Punkten (wird gespeichert, gilt auch für den Export)
     SetPatternColor(PatternColor),
     /// Bilddatei auf der aktuellen Seite einfügen
@@ -455,6 +458,8 @@ pub struct UiState {
     /// Eingeblendetes Lineal
     pub ruler: Option<Ruler>,
     pub ruler_drag: Option<RulerDrag>,
+    /// Bildlaufleiste wird gezogen: Abstand des Fingers von der Oberkante des Griffs
+    pub scrollbar_grab: Option<f32>,
     /// Aktuelle Abbildung Seite ↔ Bildschirm (für Lineal und Treffertests)
     pub page_view: Option<PageView>,
     /// Fenstergröße in logischen Punkten (vom letzten Bild)
@@ -491,7 +496,7 @@ impl Default for UiState {
             document_title: t!("Standard-Notizbuch").to_string(),
             available_notebooks: Vec::new(),
             new_notebook_title_input: String::new(),
-            new_notebook_layout: NotebookLayout::Paged,
+            new_notebook_layout: NotebookLayout::Continuous,
             renaming_notebook_id: None,
             library: crate::library::Library::default(),
             notebook_folder: String::new(),
@@ -543,6 +548,7 @@ impl Default for UiState {
             queued_actions: Vec::new(),
             ruler: None,
             ruler_drag: None,
+            scrollbar_grab: None,
             page_view: None,
             screen_size: egui::Vec2::ZERO,
             page_title_input: String::new(),
@@ -1653,8 +1659,14 @@ fn page_title_list(ui: &mut egui::Ui, notebook: &Notebook) -> Option<usize> {
 }
 
 /// Auswahl der Seitenanordnung eines Notizbuchs. Ohne `can_cross` lässt sich nicht zwischen
-/// Seiten und endloser Fläche wechseln. `true`, wenn sie geändert wurde.
-fn layout_picker(ui: &mut egui::Ui, layout: &mut NotebookLayout, can_cross: bool) -> bool {
+/// Seiten und endloser Fläche wechseln; ohne `offer_paged` fehlen feste Seiten (beim Anlegen,
+/// Issue #30 – umstellen geht im ☰-Menü). `true`, wenn sie geändert wurde.
+fn layout_picker(
+    ui: &mut egui::Ui,
+    layout: &mut NotebookLayout,
+    can_cross: bool,
+    offer_paged: bool,
+) -> bool {
     let mut changed = false;
     let endless_now = *layout == NotebookLayout::Endless;
     ui.horizontal_wrapped(|ui| {
@@ -1681,6 +1693,9 @@ fn layout_picker(ui: &mut egui::Ui, layout: &mut NotebookLayout, can_cross: bool
                 ),
             ),
         ] {
+            if option == NotebookLayout::Paged && !offer_paged {
+                continue;
+            }
             let enabled = can_cross || (option == NotebookLayout::Endless) == endless_now;
             if ui
                 .add_enabled(
@@ -2344,6 +2359,147 @@ fn page_separators(ctx: &egui::Context, state: &UiState, notebook: &Notebook) {
     }
 }
 
+/// Lage der Bildlaufleiste: Leiste (Trefferfläche) und Griff in logischen Punkten. Der Griff
+/// zeigt, wo die Fenstermitte `center` zwischen Ober- und Unterkante des Notizbuchs liegt;
+/// `visible` ist die sichtbare Höhe (Seiteneinheiten) und bestimmt seine Länge.
+fn scrollbar_layout(
+    screen: egui::Rect,
+    side: SidebarSide,
+    (top, bottom): (f32, f32),
+    center: f32,
+    visible: f32,
+) -> (egui::Rect, egui::Rect) {
+    const WIDTH: f32 = 28.0;
+    const MARGIN: f32 = 12.0;
+    // Gegenüber der Werkzeugleiste
+    let x = match side {
+        SidebarSide::Left => screen.right() - WIDTH,
+        SidebarSide::Right => screen.left(),
+    };
+    let track = egui::Rect::from_min_size(
+        egui::pos2(x, screen.top() + MARGIN),
+        egui::vec2(WIDTH, (screen.height() - 2.0 * MARGIN).max(1.0)),
+    );
+    let total = (bottom - top).max(1.0);
+    let thumb_h = (visible / (total + visible) * track.height())
+        .clamp(48.0_f32.min(track.height()), track.height());
+    let fraction = ((center - top) / total).clamp(0.0, 1.0);
+    let thumb = egui::Rect::from_min_size(
+        egui::pos2(
+            track.left(),
+            track.top() + fraction * (track.height() - thumb_h),
+        ),
+        egui::vec2(WIDTH, thumb_h),
+    );
+    (track, thumb)
+}
+
+/// Durchgehende Ansicht: Bildlaufleiste am Fensterrand gegenüber der Werkzeugleiste. Den
+/// Griff ziehen (oder auf die Leiste tippen) springt schnell durch lange Notizbücher und
+/// PDFs (Issue #28); beim Ziehen steht die Seitenzahl daneben.
+fn page_scrollbar(
+    ctx: &egui::Context,
+    state: &mut UiState,
+    notebook: &Notebook,
+    actions: &mut Vec<UiAction>,
+) {
+    let Some(view) = state.page_view.filter(|_| state.continuous_scroll) else {
+        state.scrollbar_grab = None;
+        return;
+    };
+    if notebook.pages.len() < 2 {
+        state.scrollbar_grab = None;
+        return;
+    }
+    let stack = notebook.page_stack();
+    let (min, max) = stack.bounds();
+    let screen = ctx.screen_rect();
+    let center = view.to_page(screen.center()).y;
+    let visible = screen.height() / view.scale.max(1e-6);
+    let (track, thumb) =
+        scrollbar_layout(screen, state.sidebar_side, (min.y, max.y), center, visible);
+
+    let dark = state.paper_theme.is_dark();
+    let response = egui::Area::new(egui::Id::new("page_scrollbar"))
+        .order(egui::Order::Middle)
+        .fixed_pos(track.min)
+        .show(ctx, |ui| {
+            let (_, response) = ui.allocate_exact_size(track.size(), egui::Sense::drag());
+            let active = response.hovered() || response.dragged();
+            let bar_w = if active { 10.0 } else { 6.0 };
+            let bar = egui::Rect::from_center_size(
+                egui::pos2(thumb.center().x, thumb.center().y),
+                egui::vec2(bar_w, thumb.height()),
+            );
+            let alpha = if active { 200 } else { 110 };
+            let color = if dark {
+                egui::Color32::from_white_alpha(alpha)
+            } else {
+                egui::Color32::from_black_alpha(alpha)
+            };
+            ui.painter()
+                .rect_filled(bar, egui::Rounding::same(bar_w / 2.0), color);
+            response
+        })
+        .inner;
+
+    if response.drag_started() {
+        let y = response
+            .interact_pointer_pos()
+            .map_or(thumb.center().y, |p| p.y);
+        // Auf den Griff: dort festhalten; daneben: Griff unter den Finger springen lassen
+        state.scrollbar_grab = Some(if thumb.y_range().contains(y) {
+            y - thumb.top()
+        } else {
+            thumb.height() / 2.0
+        });
+    }
+    if !response.dragged() {
+        state.scrollbar_grab = None;
+        return;
+    }
+    let (Some(grab), Some(pos)) = (state.scrollbar_grab, response.interact_pointer_pos()) else {
+        return;
+    };
+    let free = (track.height() - thumb.height()).max(1.0);
+    let fraction = ((pos.y - grab - track.top()) / free).clamp(0.0, 1.0);
+    let target = min.y + fraction * (max.y - min.y);
+    if (target - center).abs() > 0.5 {
+        actions.push(UiAction::ScrollTo(target));
+    }
+    if let Some(page) = stack.page_at(target) {
+        let label_x = match state.sidebar_side {
+            SidebarSide::Left => track.left() - 8.0,
+            SidebarSide::Right => track.right() + 8.0,
+        };
+        let anchor = match state.sidebar_side {
+            SidebarSide::Left => egui::Align2::RIGHT_CENTER,
+            SidebarSide::Right => egui::Align2::LEFT_CENTER,
+        };
+        let painter = ctx.layer_painter(egui::LayerId::new(
+            egui::Order::Foreground,
+            egui::Id::new("page_scrollbar_label"),
+        ));
+        let text = format!("{} / {}", page + 1, notebook.pages.len());
+        let galley =
+            painter.layout_no_wrap(text, egui::FontId::proportional(18.0), egui::Color32::WHITE);
+        let rect = anchor
+            .anchor_size(egui::pos2(label_x, pos.y), galley.size())
+            .expand2(egui::vec2(10.0, 6.0));
+        painter.rect_filled(
+            rect,
+            egui::Rounding::same(8.0),
+            egui::Color32::from_black_alpha(190),
+        );
+        painter.galley(
+            rect.min + egui::vec2(10.0, 6.0),
+            galley,
+            egui::Color32::WHITE,
+        );
+    }
+    ctx.request_repaint();
+}
+
 /// Zeichnet das Lineal über dem Blatt und bedient Verschieben und Drehen.
 fn ruler_overlay(ctx: &egui::Context, state: &mut UiState) {
     let (Some(mut ruler), Some(view)) = (state.ruler, state.page_view) else {
@@ -2751,6 +2907,7 @@ pub fn render_ui(
     let mut actions = std::mem::take(&mut state.queued_actions);
     state.screen_size = ctx.screen_rect().size();
     page_separators(ctx, state, notebook);
+    page_scrollbar(ctx, state, notebook, &mut actions);
     space_preview(ctx, state, notebook);
     ruler_overlay(ctx, state);
     text_edit_overlay(ctx, state);
@@ -3823,7 +3980,7 @@ pub fn render_ui(
                             } else {
                                 NotebookLayout::Paged
                             };
-                            if layout_picker(ui, &mut layout, state.endless_switch_possible) {
+                            if layout_picker(ui, &mut layout, state.endless_switch_possible, true) {
                                 actions.push(UiAction::SetNotebookLayout(layout));
                             }
 
@@ -4173,7 +4330,7 @@ pub fn render_ui(
                 });
                 ui.horizontal(|ui| {
                     ui.label(t!("Seiten:"));
-                    layout_picker(ui, &mut state.new_notebook_layout, true);
+                    layout_picker(ui, &mut state.new_notebook_layout, true, false);
                 });
 
                 ui.add_space(8.0);
@@ -5025,6 +5182,86 @@ mod tests {
             let _ = ctx.end_frame();
         }
         ctx
+    }
+
+    #[test]
+    fn test_page_scrollbar_jumps_through_the_notebook() {
+        // Layout: Griff oben am Anfang, unten am Ende, gegenüber der Werkzeugleiste
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 850.0));
+        let (track, top) =
+            scrollbar_layout(screen, SidebarSide::Left, (0.0, 80_000.0), 0.0, 1000.0);
+        assert_eq!(track.right(), screen.right());
+        assert_eq!(top.top(), track.top());
+        assert!(top.height() >= 48.0);
+        let (_, end) =
+            scrollbar_layout(screen, SidebarSide::Left, (0.0, 80_000.0), 80_000.0, 1000.0);
+        assert_eq!(end.bottom(), track.bottom());
+        let (left, _) = scrollbar_layout(screen, SidebarSide::Right, (0.0, 1.0), 0.0, 1.0);
+        assert_eq!(left.left(), screen.left());
+
+        // Notizbuch mit 80 Seiten, durchgehend, Ansicht auf Seite 1
+        let mut notebook = Notebook::new();
+        for _ in 1..80 {
+            notebook.add_page(PageBackground::Blank);
+        }
+        let mut state = UiState::new();
+        state.continuous_scroll = true;
+        state.page_view = Some(PageView {
+            origin: egui::pos2(300.0, 0.0),
+            scale: 0.25,
+        });
+        let ctx = render_frames(&mut state, &notebook, 2);
+        let updater = crate::updater::UpdaterController::new();
+        let x = screen.right() - 14.0;
+        let mut actions = Vec::new();
+        // Griff greifen und bis ans untere Ende ziehen
+        for (pos, pressed) in [
+            (egui::pos2(x, 30.0), Some(true)),
+            (egui::pos2(x, 400.0), None),
+            (egui::pos2(x, 845.0), None),
+            (egui::pos2(x, 845.0), Some(false)),
+        ] {
+            let mut events = vec![egui::Event::PointerMoved(pos)];
+            if let Some(pressed) = pressed {
+                events.push(egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::default(),
+                });
+            }
+            ctx.begin_frame(egui::RawInput {
+                screen_rect: Some(screen),
+                events,
+                ..Default::default()
+            });
+            actions.extend(render_ui(
+                &ctx,
+                &mut state,
+                &notebook,
+                AutosaveStatus::Saved,
+                &updater,
+            ));
+            let _ = ctx.end_frame();
+        }
+        let targets: Vec<f32> = actions
+            .iter()
+            .filter_map(|a| match a {
+                UiAction::ScrollTo(y) => Some(*y),
+                _ => None,
+            })
+            .collect();
+        let (_, max) = notebook.page_stack().bounds();
+        assert!(targets.len() >= 2, "{actions:?}");
+        assert!(targets.windows(2).all(|w| w[1] >= w[0]));
+        assert!((targets.last().unwrap() - max.y).abs() < 1.0, "{targets:?}");
+        assert!(state.scrollbar_grab.is_none());
+
+        // Feste Seiten: keine Leiste, Tippen an den Rand scrollt nicht
+        state.continuous_scroll = false;
+        let ctx = render_frames(&mut state, &notebook, 2);
+        let actions = click_at(&ctx, &mut state, &notebook, egui::pos2(x, 400.0));
+        assert!(!actions.iter().any(|a| matches!(a, UiAction::ScrollTo(_))));
     }
 
     #[test]
