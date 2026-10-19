@@ -691,62 +691,65 @@ fn selection_press(
         _ => return false,
     };
     selection_state.drag_mode = mode;
+    selection_state.pending_drag = None;
     true
 }
 
+/// Wendet die zuletzt gemeldete Zugposition der Auswahl an (siehe [`selection_drag`]).
+fn flush_selection_drag(
+    page: &mut ink_notes::document::Page,
+    canvas: &mut CanvasState,
+    selection_state: &mut SelectionState,
+) {
+    if let Some(page_pt) = selection_state.pending_drag.take() {
+        selection_drag(page_pt, page, canvas, selection_state);
+    }
+}
+
 /// Auswahlwerkzeug: Ziehen nach `page_pt` – Rahmen aufziehen oder die Auswahl verschieben,
-/// drehen bzw. skalieren (vorläufig, ohne Undo-Schritt).
+/// drehen bzw. skalieren (vorläufig, ohne Undo-Schritt). Bei Stiftbewegungen über
+/// `pending_drag` und [`flush_selection_drag`] nur einmal je Bild, weil das bei großen
+/// Auswahlen teuer ist.
 fn selection_drag(
     page_pt: Vec2,
     page: &mut ink_notes::document::Page,
     canvas: &mut CanvasState,
     selection_state: &mut SelectionState,
 ) {
-    let mut updated = match &mut selection_state.drag_mode {
+    match &mut selection_state.drag_mode {
         DragMode::BoxSelect { current_page, .. } => {
             *current_page = page_pt;
             return;
         }
         DragMode::None => return,
         DragMode::Move {
-            initial_strokes, ..
-        }
-        | DragMode::Rotate {
-            initial_strokes, ..
-        }
-        | DragMode::Scale {
-            initial_strokes, ..
-        } => initial_strokes.clone(),
-    };
-    match &selection_state.drag_mode {
-        DragMode::Move { start_page, .. } => {
+            start_page,
+            initial_strokes,
+        } => {
             let delta = page_pt - *start_page;
-            updated.iter_mut().for_each(|s| s.translate(delta));
+            page.transform_strokes_ephemeral(initial_strokes, |s| s.translate(delta));
         }
         DragMode::Rotate {
             center_page,
             start_angle,
-            ..
+            initial_strokes,
         } => {
-            let angle = (page_pt.y - center_page.y).atan2(page_pt.x - center_page.x) - start_angle;
-            updated
-                .iter_mut()
-                .for_each(|s| s.rotate(*center_page, angle));
+            let angle = (page_pt.y - center_page.y).atan2(page_pt.x - center_page.x) - *start_angle;
+            let center = *center_page;
+            page.transform_strokes_ephemeral(initial_strokes, |s| s.rotate(center, angle));
         }
         DragMode::Scale {
             fixed_corner_page,
             start_pos_page,
             keep_aspect,
+            initial_strokes,
             ..
         } => {
-            let factors = scale_factors(*fixed_corner_page, *start_pos_page, page_pt, *keep_aspect);
-            updated
-                .iter_mut()
-                .for_each(|s| s.scale(*fixed_corner_page, factors));
+            let fixed = *fixed_corner_page;
+            let factors = scale_factors(fixed, *start_pos_page, page_pt, *keep_aspect);
+            page.transform_strokes_ephemeral(initial_strokes, |s| s.scale(fixed, factors));
         }
-        DragMode::BoxSelect { .. } | DragMode::None => return,
     }
-    page.update_strokes_ephemeral(&updated);
     canvas.sync_page(page);
 }
 
@@ -759,7 +762,10 @@ fn selection_release(
     manifest: &mut NotebookManifest,
     autosave: &mut AutosaveController,
     selection_state: &mut SelectionState,
+    canvas: &mut CanvasState,
 ) -> bool {
+    // Die letzte Bewegung gehört noch zum Ziehen
+    flush_selection_drag(notebook.current_page_mut(), canvas, selection_state);
     match std::mem::take(&mut selection_state.drag_mode) {
         DragMode::BoxSelect {
             start_page,
@@ -1618,7 +1624,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             }
                                             if is_stylus_selecting {
                                                 is_stylus_selecting = false;
-                                                selection_release(false, &mut notebook, &mut manifest, &mut autosave, &mut selection_state);
+                                                selection_release(false, &mut notebook, &mut manifest, &mut autosave, &mut selection_state, &mut canvas);
                                                 window.request_redraw();
                                             }
                                             if let Some(tool) = tool_before_button.take() {
@@ -1714,7 +1720,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             }
                                         } else if is_stylus_selecting {
                                             if let Some(page_pt) = canvas.screen_to_page(sx, sy) {
-                                                selection_drag(page_pt, notebook.current_page_mut(), &mut canvas, &mut selection_state);
+                                                selection_state.pending_drag = Some(page_pt);
                                                 window.request_redraw();
                                             }
                                         } else if is_stylus_drawing && is_drawing {
@@ -1858,7 +1864,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                                         if is_stylus_selecting {
                                             is_stylus_selecting = false;
-                                            if selection_release(false, &mut notebook, &mut manifest, &mut autosave, &mut selection_state) {
+                                            if selection_release(false, &mut notebook, &mut manifest, &mut autosave, &mut selection_state, &mut canvas) {
                                                 window.request_redraw();
                                             }
                                         }
@@ -2626,7 +2632,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                                 if ui_state.active_tool == ActiveTool::Select
                                     && !is_stylus_selecting
-                                    && selection_release(modifiers.shift_key(), &mut notebook, &mut manifest, &mut autosave, &mut selection_state)
+                                    && selection_release(modifiers.shift_key(), &mut notebook, &mut manifest, &mut autosave, &mut selection_state, &mut canvas)
                                 {
                                     window.request_redraw();
                                 }
@@ -2682,7 +2688,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 window.request_redraw();
                             } else if ui_state.active_tool == ActiveTool::Select && selection_state.drag_mode != DragMode::None {
                                 if let Some(page_pt) = canvas.screen_to_page(sx, sy) {
-                                    selection_drag(page_pt, notebook.current_page_mut(), &mut canvas, &mut selection_state);
+                                    selection_state.pending_drag = Some(page_pt);
                                     window.request_redraw();
                                 }
                             } else if is_erasing {
@@ -2718,9 +2724,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         if is_pointer_in_ui {
                             return;
                         }
-                        // Durchgehende Ansicht: Mausrad scrollt (mit Umschalt waagerecht),
-                        // Strg + Mausrad zoomt
-                        if ui_state.continuous_scroll && !modifiers.control_key() {
+                        // Durchgehende Ansicht und endlose Fläche: Mausrad scrollt (mit Umschalt
+                        // waagerecht), Strg + Mausrad zoomt
+                        if (ui_state.continuous_scroll || ui_state.endless) && !modifiers.control_key() {
                             let (mut dx, mut dy) = match delta {
                                 MouseScrollDelta::LineDelta(x, y) => {
                                     let line = 60.0 * window.scale_factor() as f32;
@@ -2983,7 +2989,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         }
                                     } else if ui_state.active_tool == ActiveTool::Select && selection_state.drag_mode != DragMode::None {
                                         if let Some(page_pt) = canvas.screen_to_page(tx, ty) {
-                                            selection_drag(page_pt, notebook.current_page_mut(), &mut canvas, &mut selection_state);
+                                            selection_state.pending_drag = Some(page_pt);
                                             window.request_redraw();
                                         }
                                     }
@@ -3010,7 +3016,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     }
 
                                     if ui_state.active_tool == ActiveTool::Select
-                                        && selection_release(false, &mut notebook, &mut manifest, &mut autosave, &mut selection_state)
+                                        && selection_release(false, &mut notebook, &mut manifest, &mut autosave, &mut selection_state, &mut canvas)
                                     {
                                         window.request_redraw();
                                     }
@@ -3053,6 +3059,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
 
                     WindowEvent::RedrawRequested => {
+                        flush_selection_drag(notebook.current_page_mut(), &mut canvas, &mut selection_state);
                         // 0. Durchgehende Ansicht: Nach dem Scrollen oder Zoomen wird die Seite in
                         //    der Fenstermitte zur aktuellen (nicht während eines Strichs, einer
                         //    Auswahl oder beim Ziehen des Lineals). Wer auf einer Nachbarseite

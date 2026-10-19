@@ -1,5 +1,6 @@
 //! Notizbuch- und Seitenverwaltung mit DIN-A4-Koordinatensystem und Vektor-Stroke-Modell.
 
+use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 
 use crate::canvas::InkVertex;
@@ -613,18 +614,23 @@ impl Stroke {
 
     /// Berechnet die Bounding Box aus den aktuellen Punkten/Vertizes neu.
     pub fn recompute_aabb(&mut self) {
+        // Ohne Zwischenliste: läuft beim Ziehen einer Auswahl für jeden Strich und jede Bewegung
+        let bounds = |mut pts: Box<dyn Iterator<Item = glam::Vec2> + '_>| {
+            pts.next().map_or(Aabb::new(glam::Vec2::ZERO, glam::Vec2::ZERO), |first| {
+                pts.fold(Aabb::new(first, first), |mut aabb, p| {
+                    aabb.expand_by_point(p);
+                    aabb
+                })
+            })
+        };
         self.aabb = if !self.points.is_empty() {
-            let pts: Vec<glam::Vec2> = self.points.iter().map(|s| s.position).collect();
-            Aabb::from_points(&pts)
-        } else if !self.vertices.is_empty() {
-            let pts: Vec<glam::Vec2> = self
-                .vertices
-                .iter()
-                .map(|v| glam::Vec2::new(v.position[0], v.position[1]))
-                .collect();
-            Aabb::from_points(&pts)
+            bounds(Box::new(self.points.iter().map(|s| s.position)))
         } else {
-            Aabb::new(glam::Vec2::ZERO, glam::Vec2::ZERO)
+            bounds(Box::new(
+                self.vertices
+                    .iter()
+                    .map(|v| glam::Vec2::new(v.position[0], v.position[1])),
+            ))
         };
     }
 
@@ -1066,11 +1072,29 @@ impl Page {
 
     /// Liefert Klone der Striche mit den angegebenen IDs.
     pub fn get_strokes(&self, ids: &[u64]) -> Vec<Stroke> {
+        let ids: HashSet<u64> = ids.iter().copied().collect();
         self.strokes
             .iter()
             .filter(|s| ids.contains(&s.id))
             .cloned()
             .collect()
+    }
+
+    /// Ersetzt die Striche mit den IDs aus `modified` an ihrer Stelle. Über eine Tabelle
+    /// statt je Strich die ganze Seite zu durchsuchen: Beim Ziehen einer großen Auswahl
+    /// läuft das bei jeder Stiftbewegung.
+    fn replace_strokes(&mut self, modified: &[Stroke]) {
+        let index: HashMap<u64, usize> = self
+            .strokes
+            .iter()
+            .enumerate()
+            .map(|(i, s)| (s.id, i))
+            .collect();
+        for m in modified {
+            if let Some(&pos) = index.get(&m.id) {
+                self.strokes[pos] = m.clone();
+            }
+        }
     }
 
     /// Aktualisiert eine Menge geänderter Striche transaktional im History-Stack.
@@ -1079,18 +1103,8 @@ impl Page {
             return;
         }
         let ids: Vec<u64> = modified.iter().map(|s| s.id).collect();
-        let before: Vec<Stroke> = self
-            .strokes
-            .iter()
-            .filter(|s| ids.contains(&s.id))
-            .cloned()
-            .collect();
-
-        for m in modified.iter() {
-            if let Some(pos) = self.strokes.iter().position(|s| s.id == m.id) {
-                self.strokes[pos] = m.clone();
-            }
-        }
+        let before = self.get_strokes(&ids);
+        self.replace_strokes(&modified);
 
         self.history.push(HistoryAction::ModifyStrokes {
             before,
@@ -1101,9 +1115,33 @@ impl Page {
 
     /// Aktualisiert Striche flüchtig (z. B. während des Ziehens / Dragging), OHNE die History zu verändern.
     pub fn update_strokes_ephemeral(&mut self, modified: &[Stroke]) {
-        for m in modified {
-            if let Some(pos) = self.strokes.iter().position(|s| s.id == m.id) {
-                self.strokes[pos] = m.clone();
+        self.replace_strokes(modified);
+        self.is_dirty = true;
+    }
+
+    /// Wie [`Self::update_strokes_ephemeral`] für eine Transformation der Ausgangsstriche
+    /// `originals`: setzt die Striche auf der Seite auf ihren Ausgangszustand zurück und wendet
+    /// `transform` an. Verwendet die Puffer der Seitenstriche weiter, statt bei jeder
+    /// Stiftbewegung die ganze Auswahl zweimal zu kopieren.
+    pub fn transform_strokes_ephemeral(
+        &mut self,
+        originals: &[Stroke],
+        transform: impl Fn(&mut Stroke),
+    ) {
+        let index: HashMap<u64, usize> = self
+            .strokes
+            .iter()
+            .enumerate()
+            .map(|(i, s)| (s.id, i))
+            .collect();
+        for original in originals {
+            if let Some(&pos) = index.get(&original.id) {
+                let stroke = &mut self.strokes[pos];
+                // Nur was Verschieben, Drehen und Skalieren verändern
+                stroke.points.clone_from(&original.points);
+                stroke.vertices.clone_from(&original.vertices);
+                stroke.shape.clone_from(&original.shape);
+                transform(stroke);
             }
         }
         self.is_dirty = true;
@@ -1114,11 +1152,7 @@ impl Page {
         if before.is_empty() || after.is_empty() {
             return;
         }
-        for m in &after {
-            if let Some(pos) = self.strokes.iter().position(|s| s.id == m.id) {
-                self.strokes[pos] = m.clone();
-            }
-        }
+        self.replace_strokes(&after);
         self.history
             .push(HistoryAction::ModifyStrokes { before, after });
         self.is_dirty = true;
@@ -2671,6 +2705,13 @@ mod tests {
             glam::Vec2::new(30.0, 40.0)
         );
         // History should not have been updated yet
+        assert!(!page.history.can_redo());
+
+        // Ziehen über die Ausgangsstriche: jede Bewegung gilt ab dem Ausgangszustand
+        for delta in [glam::Vec2::new(5.0, 0.0), glam::Vec2::new(20.0, 30.0)] {
+            page.transform_strokes_ephemeral(std::slice::from_ref(&s), |st| st.translate(delta));
+        }
+        assert_eq!(page.strokes[0], moved);
         assert!(!page.history.can_redo());
 
         // Transactional commit (mouse release)

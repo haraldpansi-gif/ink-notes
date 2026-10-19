@@ -88,6 +88,9 @@ pub enum SelectionHandleHit {
 pub struct SelectionState {
     pub selected_ids: Vec<u64>,
     pub drag_mode: DragMode,
+    /// Letzte Zugposition, die noch nicht angewendet ist: Der Stift meldet sich öfter, als
+    /// gezeichnet wird; angewendet wird einmal je Bild (siehe `flush_selection_drag`).
+    pub pending_drag: Option<Vec2>,
     pub clipboard: Vec<Stroke>,
     /// Von Hand umgeschaltetes Seitenverhältnis-Schloss und die Auswahl (IDs), für die es
     /// gilt. Ändert sich die Auswahl, gilt wieder die Vorgabe (siehe [`Self::keeps_aspect`]).
@@ -99,6 +102,7 @@ impl SelectionState {
         Self {
             selected_ids: Vec::new(),
             drag_mode: DragMode::None,
+            pending_drag: None,
             clipboard: Vec::new(),
             aspect_lock: None,
         }
@@ -109,10 +113,11 @@ impl SelectionState {
     pub fn keeps_aspect(&self, page: &Page) -> bool {
         match &self.aspect_lock {
             Some((ids, locked)) if *ids == self.selected_ids => *locked,
+            // Läuft bei jedem Bild: erst die (wenigen) Bilder suchen, ohne Striche zu kopieren
             _ => page
-                .get_strokes(&self.selected_ids)
+                .strokes
                 .iter()
-                .any(|s| s.is_image()),
+                .any(|s| s.is_image() && self.selected_ids.contains(&s.id)),
         }
     }
 
@@ -159,8 +164,13 @@ impl SelectionState {
 
     /// Berechnet die gemeinsame AABB aller ausgewählten Objekte.
     pub fn get_selection_aabb(&self, page: &Page) -> Option<Aabb> {
-        let strokes = page.get_strokes(&self.selected_ids);
-        Page::selection_aabb(&strokes)
+        // Läuft bei jedem Bild: ohne die ausgewählten Striche zu kopieren
+        let ids: std::collections::HashSet<u64> = self.selected_ids.iter().copied().collect();
+        page.strokes
+            .iter()
+            .filter(|s| ids.contains(&s.id))
+            .map(|s| s.aabb)
+            .reduce(|a, b| a.union(&b))
     }
 
     /// Führt Hit-Testing auf die Auswahlgriffe (Drehen, Ecken, Körper) in Bildschirmkoordinaten
