@@ -17,7 +17,7 @@ Das Hauptrepository liegt auf **Gitea**: <https://gitea.pansi.eu/harald/ink-note
 ## Code beitragen
 
 1. Größere Änderungen am besten vorher in einem Issue absprechen.
-2. Bauen und testen, wie im [README](README.md#entwicklung) beschrieben. Vor dem Einreichen müssen diese Prüfungen durchlaufen (die CI prüft sie ebenfalls):
+2. Bauen und testen, wie im [README](README.de.md#entwicklung) beschrieben. Vor dem Einreichen müssen diese Prüfungen durchlaufen (die CI prüft sie ebenfalls):
    ```bash
    cargo fmt --check
    cargo clippy --all-targets -- -D warnings

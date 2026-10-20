@@ -20,7 +20,7 @@ Please do **not** report vulnerabilities in a public issue. Send an e-mail to **
 
 ## Besonders interessant / Areas of interest
 
-- **Updates:** Prüfung der Minisign-Signatur und der SHA-256-Prüfsummen, Download und Austausch der Pakete (siehe „Sicherheit der Updates“ im [README](README.md#sicherheit-der-updates)).
+- **Updates:** Prüfung der Minisign-Signatur und der SHA-256-Prüfsummen, Download und Austausch der Pakete (siehe „Sicherheit der Updates“ im [README](README.de.md#sicherheit-der-updates)).
 - **Dateien öffnen:** importierte PDFs und Bilder, Notizbuch-Dateien ([Dateiformat](docs/FILE_FORMAT.md)) – z. B. Abstürze oder Schreiben außerhalb des Datenordners durch präparierte Dateien.
 - **Updates:** verification of the Minisign signature and SHA-256 checksums, downloading and replacing packages.
 - **Opening files:** imported PDFs and images, notebook files – e.g. crashes or writes outside the data folder caused by crafted files.

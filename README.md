@@ -1,224 +1,228 @@
 <p align="center">
-  <img src="assets/ink-notes-banner.svg" alt="ink-notes Banner" width="100%">
+  <img src="assets/ink-notes-banner-en.svg" alt="ink-notes banner" width="100%">
 </p>
 
 <p align="center">
-  <strong>Eine moderne Notizbuch-App für Linux zum Schreiben mit Stift, Touch und Maus</strong><br>
-  Geschrieben in <strong>Rust</strong> mit <strong>wgpu</strong>, <strong>winit</strong> und <strong>egui</strong>.
+  <strong>A modern notebook app for Linux for writing with pen, touch and mouse</strong><br>
+  Written in <strong>Rust</strong> with <strong>wgpu</strong>, <strong>winit</strong> and <strong>egui</strong>.
 </p>
 
----
-
-ink-notes speichert Handschrift als Vektoren, erkennt auf Wunsch Formen, kann PDFs zum Beschriften importieren, Bilder und Textfelder einfügen und alles wieder als PDF, PNG oder SVG exportieren. Gespeichert wird automatisch im Hintergrund.
-
-Getestet wird vor allem unter Zorin OS 18 / Ubuntu 24.04 (Wayland und X11).
-
-Die Oberfläche gibt es auf Deutsch und Englisch; ink-notes folgt der Systemsprache, umstellen lässt sie sich im ☰-Menü unter „Sprache / Language“.
+<p align="center"><strong>English</strong> · <a href="README.de.md">Deutsch</a></p>
 
 ---
 
-## Funktionen
+ink-notes stores handwriting as vectors, can recognize shapes, imports PDFs for annotation, inserts images and text boxes, and exports everything again as PDF, PNG or SVG. Saving happens automatically in the background.
 
-### Schreiben und Zeichnen
-- **Vier Stifte** in der Werkzeugleiste, jeder mit eigener Farbe und Stärke (0,15–5 mm, mit Druckstärke). Ändert man Farbe oder Stärke, merkt sich der gewählte Stift das – auch über einen Neustart hinweg. **Textmarker** (halbtransparent, 4–8 mm) in vier Farben; innerhalb eines Strichs wird er nicht dunkler, erst ein neuer Strich deckt stärker.
-- **Eigene Farben:** Jede Farbe in der Werkzeugleiste (Stifte, Textmarker, Text) lässt sich anpassen – gewählte Farbe erneut antippen, eine Vorgabe oder mit 🎨 einen freien Farbton wählen. Die Leiste merkt sich die Farben. Am Bildschirm erscheinen sie genauso wie im PDF- und Bildexport.
-- **Glättung in zwei Stufen:** Während des Schreibens glättet ein 1€-Filter das Zittern, die Linie erscheint sofort. Beim Absetzen wird der Strich nachbearbeitet: Ecken (Knicke über 65°) bleiben erhalten, der Druckverlauf wird geglättet, überflüssige Punkte entfallen, die Enden werden rund.
-- **Druckkurve** im ☰-Menü an den eigenen Stift anpassen (weicher/härter, Schwelle gegen Grundrauschen).
-- **Tasten am Stift** im ☰-Menü belegen: Radieren (Standard), Auswählen, Textmarker, Stift oder nichts – gilt, solange die Taste gedrückt ist. Jede Taste erscheint dort nach dem ersten Drücken.
-- **Radierer** in drei Modi: ganze Striche, nur den überstrichenen Teil (Teilstrich) oder nur Textmarker. Die Stiftrückseite radiert ebenfalls.
-- **Virtuelles Lineal** (`L`): verschieben, am Griff drehen (rastet bei 15° ein); Striche entlang einer Kante werden gerade.
-- **Platz schaffen** (↕ in der Werkzeugleiste): aufs Blatt tippen und nach unten ziehen – alles darunter rutscht mit, auch auf den folgenden Seiten. Was über ein Seitenende rutschen würde, beginnt auf der nächsten Seite; fehlende Seiten werden angehängt. Nach oben ziehen schließt leeren Platz. Ein Schritt für Rückgängig.
+It is mainly tested on Zorin OS 18 / Ubuntu 24.04 (Wayland and X11).
 
-### Formerkennung
-- **Formen-Werkzeug** (`S`/`F`) oder **Halten** am Strichende (über 400 ms stillhalten): Die Skizze wird durch eine saubere Form ersetzt.
-- Erkannt werden Linien, Pfeile, Kreise, Ellipsen, Rechtecke, Dreiecke, Rauten, Vielecke, Koordinatensysteme (L-Form), Achsenkreuze (ein „+“ in einem Zug oder zwei gekreuzte Geraden, Pfeilspitzen an allen vier Enden) und Oktaeder (Skizze als 3D-Körper).
-- Die Erkennung arbeitet rein geometrisch (Bogenlänge, Douglas-Peucker, Kreis-Fit), ohne Machine Learning. Nicht alles wird erkannt – was nicht passt, bleibt Handschrift.
+The interface is available in English and German; ink-notes follows the system language, and you can switch it in the ☰ menu under "Sprache / Language".
 
-### Auswählen und Bearbeiten
-- **Auswahlwerkzeug** (`V`): antippen oder Rahmen aufziehen, dann verschieben, an den Ecken skalieren, am Griff drehen oder mit `R` um 90° drehen. Funktioniert mit Maus, Finger und Stift.
-- Auswahl über die Palette **umfärben**, **kopieren/einfügen** (`Strg + C/V`), **löschen** (`Entf`).
-- `Strg + C` legt die Auswahl zusätzlich als Bild in die Zwischenablage, z. B. für Chat oder Mail.
-- **Rückgängig/Wiederholen** (`Strg + Z/Y`) für alle Änderungen, je Seite.
+---
 
-### Text, Bilder und PDFs
-- **Text-Werkzeug** (`T`): ins Blatt tippen und schreiben – normale oder Code-Schrift (feste Zeichenbreite, Tab rückt ein), 8–36 pt, Zeilenumbruch am Feldrand. Vorhandenen Text antippen zum Ändern, `Esc` beendet. Textfelder lassen sich wie Bilder verschieben, drehen und skalieren. In anderen Programmen kopierter Text wird mit `Strg + V` zum Textfeld.
-- **Bilder** (PNG, JPEG, GIF, WebP, BMP) über `Strg + I`, aus der Zwischenablage oder per Ziehen ins Fenster einfügen.
-- **Einfügen per Finger:** Lange (½ s) mit dem Finger aufs Blatt drücken öffnet ein Menü „Einfügen“ – Screenshot, kopierter Text oder kopierte Objekte landen genau an dieser Stelle.
-- **PDF importieren** (☰-Menü): Jede PDF-Seite wird eine Notizbuchseite mit der PDF-Seite als Hintergrund. Hochformat-Seiten werden DIN A4, Querformat-Seiten (z. B. Folien) bekommen eine Querformat-Seite ohne leeren Streifen darunter. Beim Hineinzoomen werden PDF-Seiten schärfer nachgerendert.
+## Features
 
-### Seiten und Ansicht
-- **Hintergründe:** blanko, kariert (5 mm), liniert (7,5 mm), Punktraster (5 mm). Die **Farbe von Karos, Linien und Punkten** ist wählbar (hell, mittel, kräftig, blau, grün) und gilt auch im Export.
-- **Papierfarbe** der Anzeige: weiß, creme, dunkelgrau, schwarz; auf dunklem Papier werden dunkle Stiftfarben auf Wunsch aufgehellt. Gespeichert und exportiert wird immer auf weißem Papier.
-- **Durchgehendes Scrollen, endlose Fläche oder feste Seiten, je Notizbuch:** Beim Anlegen wählbar (Vorgabe: durchgehend; oder endlos), im ☰-Menü umschaltbar – dort auch auf feste Seiten (Seite für Seite blättern mit Pfeilen in der Werkzeugleiste). Durchgehend hängen die Seiten lückenlos untereinander, eine dunkle Linie markiert die Grenze; schnelles Wischen gleitet nach, und mit der Bildlaufleiste am Rand gegenüber der Werkzeugleiste springt man samt Seitenzahl durch lange PDFs; wer im unteren Fünftel der letzten Seite schreibt, bekommt automatisch eine neue Seite. Endlos ist eine einzige Fläche ohne Rand, auf der man in alle Richtungen schreibt; der PDF-Export enthält nur den beschriebenen Bereich.
-- **Seiten einfügen und löschen:** ➕ in der Werkzeugleiste fügt nach der aktuellen Seite eine leere Seite ein. Löschen im ☰-Menü (mit Rückfrage); die zuletzt gelöschte Seite lässt sich dort wiederherstellen, solange die App läuft.
-- **Zoom** von 25 % bis 1000 % (`Strg + Mausrad`, zwei Finger, `Strg + +/-/0`), Verschieben mit mittlerer Maustaste, `Leertaste + Ziehen` oder einem Finger.
-- **Seiten** anhängen oder direkt nach der aktuellen Seite einfügen, **Seitentitel** vergeben; die Seitenübersicht zeigt Vorschaubilder oder ein Inhaltsverzeichnis. Seitentitel werden im PDF zu Lesezeichen.
-- **Werkzeugleiste** links oder rechts andocken (für Links- und Rechtshänder).
+### Writing and drawing
+- **Four pens** in the toolbar, each with its own color and width (0.15–5 mm, pressure-sensitive). When you change a pen's color or width, it remembers that – also across restarts. **Highlighter** (semi-transparent, 4–8 mm) in four colors; it does not get darker within one stroke, only a new stroke covers more strongly.
+- **Custom colors:** Every color in the toolbar (pens, highlighter, text) can be changed – tap the selected color again and pick a preset or any shade with 🎨. The toolbar remembers the colors. They look the same on screen as in PDF and image exports.
+- **Two-stage smoothing:** While you write, a 1€ filter removes jitter and the line appears immediately. When you lift the pen, the stroke is refined: corners (bends over 65°) are kept and drawn round, the pressure curve is smoothed, redundant points are dropped and the ends become round.
+- **Pressure curve** adjustable to your pen in the ☰ menu (softer/harder, threshold against base noise).
+- **Pen buttons** can be assigned in the ☰ menu: erase (default), select, highlighter, pen or nothing – active while the button is held. Each button appears there after it is pressed for the first time.
+- **Eraser** with three modes: whole strokes, only the part you wipe over (partial stroke), or highlighter only. The back end of the pen erases too.
+- **Virtual ruler** (`L`): move it, rotate it by its handle (snaps to 15°); strokes along an edge become straight.
+- **Make space** (↕ in the toolbar): tap the page and drag down – everything below moves along, also on the following pages. Whatever would slide past the end of a page continues on the next one; missing pages are appended. Dragging up closes empty space. Undo reverts it in one step.
 
-### Notizbücher und Speichern
-- Mehrere **Notizbücher** anlegen, umbenennen, wechseln und löschen (gelöschte landen zunächst im Papierkorb und lassen sich wiederherstellen).
-- **Ordner** für Notizbücher, beliebig verschachtelt (z. B. 3. Semester › Mathe): anlegen, umbenennen, löschen (der Inhalt rückt eine Ebene nach oben) und Notizbücher wie Ordner (samt Inhalt) mit 📂 verschieben. Neue Notizbücher landen im gerade geöffneten Ordner.
-- **Automatisches Speichern** im Hintergrund: 1,5 Sekunden nach der letzten Änderung, bei ununterbrochenem Schreiben spätestens alle 10 Sekunden. Zeichnen wird dabei nicht unterbrochen.
-- Jede Datei wird erst vollständig in eine temporäre Datei geschrieben und dann ersetzt – ein Absturz beim Speichern hinterlässt keine halbe Datei.
-- **Beim Schließen** (Fenster oder `Strg + Q`) und beim Wechsel des Notizbuchs wird alles Ausstehende geschrieben, bevor es weitergeht. Schlägt das fehl, bleibt die App offen und bietet Wiederholen oder eine Notfall-Sicherung an.
-- `Strg + S` speichert sofort. Der Punkt am ☰-Knopf zeigt den Stand: grün = gespeichert, orange = Änderungen warten, gelb = speichert gerade, rot = Fehler.
+### Shape recognition
+- **Shape tool** (`S`/`F`) or **hold** at the end of a stroke (keep still for more than 400 ms): the sketch is replaced by a clean shape in the width of the current pen or highlighter.
+- Recognized shapes: lines, arrows, circles, ellipses, rectangles, triangles, rhombuses, polygons, coordinate systems (L shape), axis crosses (a "+" in one stroke or two crossing straight lines, arrowheads on all four ends) and octahedra (sketch as a 3D solid).
+- Recognition is purely geometric (arc length, Douglas-Peucker, circle fitting), without machine learning. Not everything is recognized – whatever does not fit stays handwriting.
+
+### Selecting and editing
+- **Selection tool** (`V`): tap or drag a frame, then move, scale by the corners, rotate by the handle, or rotate by 90° with `R`. Works with mouse, finger and pen.
+- **Recolor** the selection with the palette, **copy/paste** (`Ctrl + C/V`), **delete** (`Del`).
+- `Ctrl + C` also puts the selection on the clipboard as an image, e.g. for chat or email.
+- **Undo/redo** (`Ctrl + Z/Y`) for all changes, per page.
+
+### Text, images and PDFs
+- **Text tool** (`T`): tap the page and type – regular or code font (fixed character width, Tab indents), 8–36 pt, line wrapping at the box edge. Tap existing text to change it, `Esc` finishes. Text boxes can be moved, rotated and scaled like images. Text copied in other programs becomes a text box with `Ctrl + V`.
+- **Images** (PNG, JPEG, GIF, WebP, BMP) via `Ctrl + I`, from the clipboard, or by dragging them into the window.
+- **Paste with a finger:** Pressing the page with a finger for half a second opens a "Paste" menu – a screenshot, copied text or copied objects land exactly at that spot.
+- **Import PDF** (☰ menu): Every PDF page becomes a notebook page with the PDF page as background. Portrait pages become A4; landscape pages (e.g. slides) get a landscape page without an empty strip below. When you zoom in, PDF pages are re-rendered more sharply.
+
+### Pages and view
+- **Backgrounds:** blank, squared (5 mm), ruled (7.5 mm), dot grid (5 mm). The **color of squares, lines and dots** is selectable (light, medium, strong, blue, green) and also applies to exports.
+- **Paper color** on screen: white, cream, dark gray, black; on dark paper, dark pen colors can optionally be brightened. Saving and exporting always use white paper.
+- **Continuous scrolling, endless canvas or fixed pages, per notebook:** chosen when creating a notebook (default: continuous; or endless) and switchable in the ☰ menu – where fixed pages are available too (page by page with arrows in the toolbar). In continuous mode the pages hang seamlessly below each other with a dark line marking the boundary. A quick swipe keeps gliding, and the scrollbar on the edge opposite the toolbar jumps through long PDFs with the page number shown. Writing in the bottom fifth of the last page adds a new page automatically. Endless is a single borderless canvas you can write on in every direction; the PDF export only contains the area you used.
+- **Insert and delete pages:** ➕ in the toolbar inserts an empty page after the current one. Delete it in the ☰ menu (with confirmation); the most recently deleted page can be restored there while the app is running.
+- **Zoom** from 25 % to 1000 % (`Ctrl + mouse wheel`, two fingers, `Ctrl + +/-/0`), pan with the middle mouse button, `Space + drag` or one finger.
+- **Pages** can be appended or inserted right after the current page, and given **page titles**; the page overview shows thumbnails or a table of contents. Page titles become bookmarks in the PDF.
+- **Toolbar** can be docked left or right (for left- and right-handed use).
+
+### Notebooks and saving
+- Create, rename, switch and delete multiple **notebooks** (deleted ones go to the trash first and can be restored).
+- **Folders** for notebooks, nested as deep as you like (e.g. Semester 3 › Math): create, rename, delete (the content moves up one level), and move notebooks and folders (with their content) with 📂. New notebooks are created in the folder that is currently open.
+- **Automatic saving** in the background: 1.5 seconds after the last change, and at least every 10 seconds while you keep writing. Drawing is never interrupted.
+- Every file is first written completely to a temporary file and then replaced – a crash while saving never leaves a half-written file.
+- **When closing** (window or `Ctrl + Q`) and when switching notebooks, everything pending is written before continuing. If that fails, the app stays open and offers to retry or to make an emergency backup.
+- `Ctrl + S` saves immediately. The dot on the ☰ button shows the state: green = saved, orange = changes pending, yellow = saving, red = error.
 
 ### Export
-- **PDF** (`Strg + E`) nach `~/Documents/<Titel>.pdf`: Striche und Formen als Vektoren, Textfelder als echter, durchsuchbarer Text, importierte PDF-Seiten als Vektor-Unterlage, Seitentitel als Lesezeichen.
-- **Einzelne Seite** als PNG (mit oder ohne Hintergrund) oder SVG über das ☰-Menü.
+- **PDF** (`Ctrl + E`) to `~/Documents/<title>.pdf`: strokes and shapes as vectors, text boxes as real, searchable text, imported PDF pages as vector background, page titles as bookmarks.
+- **Single page** as PNG (with or without background) or SVG via the ☰ menu.
 
-### Eingabegeräte
-- Stifte über das Tablet-Protokoll von Wayland bzw. X11 (Druck, Stiftrückseite, Seitentaste).
-- Solange der Stift aufliegt oder in der Nähe ist, werden Berührungen mit der Hand ignoriert.
-- Finger: standardmäßig scrollen und zoomen; Zeichnen mit dem Finger lässt sich im ☰-Menü einschalten.
+### Input devices
+- Pens via the Wayland or X11 tablet protocol (pressure, eraser end, side button).
+- While the pen touches the screen or hovers nearby, touches by the hand are ignored.
+- Fingers: scroll and zoom by default; drawing with a finger can be enabled in the ☰ menu.
 
 ### Updates
-- Die App prüft auf neue Versionen auf Gitea und installiert sie auf Wunsch. Installiert wird nur, wenn die Minisign-Signatur und die SHA-256-Prüfsumme stimmen (Details unten).
-- Als Flatpak sucht ink-notes nicht selbst nach Updates; die kommen dann über die Software-Verwaltung (`flatpak update`).
+- The app checks Gitea for new versions and installs them on request. It only installs when the Minisign signature and the SHA-256 checksum match (details below).
+- As a Flatpak, ink-notes does not look for updates itself; they come through the software manager (`flatpak update`).
 
 ---
 
 ## Installation
 
-Pakete gibt es unter [Releases](https://gitea.pansi.eu/harald/ink-notes/releases) als `.deb` und `.AppImage` (x86_64). `<version>` steht für die Versionsnummer, z. B. `0.11.0`.
+Packages are available under [Releases](https://gitea.pansi.eu/harald/ink-notes/releases) as `.deb` and `.AppImage` (x86_64). `<version>` stands for the version number, e.g. `0.30.2`.
 
 ```bash
-# Debian-Paket (Zorin OS 18 / Ubuntu 24.04)
+# Debian package (Zorin OS 18 / Ubuntu 24.04)
 sudo apt install ./ink-notes_<version>_amd64.deb
 
-# oder AppImage
+# or AppImage
 chmod +x ink-notes_<version>_x86_64.AppImage
 ./ink-notes_<version>_x86_64.AppImage
 ```
 
-Hinweise:
-- Benötigt `glibc >= 2.39` (Ubuntu 24.04, Zorin OS 18) und einen Grafiktreiber mit Vulkan oder OpenGL.
-- Meldet das AppImage einen Fehler zu `libfuse.so.2`, entweder `sudo apt install libfuse2t64` installieren oder mit `--appimage-extract-and-run` starten.
+Notes:
+- Requires `glibc >= 2.39` (Ubuntu 24.04, Zorin OS 18) and a graphics driver with Vulkan or OpenGL.
+- If the AppImage reports an error about `libfuse.so.2`, either install `sudo apt install libfuse2t64` or start it with `--appimage-extract-and-run`.
 
 ---
 
-## Tastenkürzel
+## Keyboard shortcuts
 
-| Aktion | Taste / Geste |
+| Action | Key / gesture |
 | :--- | :--- |
-| Zeichnen | Stiftspitze, linke Maustaste (Finger, wenn eingeschaltet) |
-| Radieren | `E` umschalten, rechte Maustaste, Stiftrückseite oder Seitentaste |
-| Stift in Schwarz / Blau / Rot | `B` / `U` / `R` |
-| Formen-Werkzeug | `S` oder `F` |
-| Auswahlwerkzeug | `V` |
-| Text-Werkzeug | `T`, dann ins Blatt klicken; `Esc` beendet die Eingabe |
-| Lineal ein/aus | `L` |
-| Hintergrund wechseln | `G` |
-| Auswahl um 90° drehen | `R` (bei Auswahl) |
-| Kopieren / Einfügen | `Strg + C` / `Strg + V` |
-| Auswahl löschen | `Entf` oder `Rücktaste` |
-| Rückgängig / Wiederholen | `Strg + Z` / `Strg + Y` oder `Strg + Umschalt + Z` |
-| Bild einfügen | `Strg + I` |
-| Scrollen | Mausrad (`Umschalt` = waagerecht), ein Finger |
-| Zoomen | `Strg + Mausrad`, zwei Finger, `Strg + +` / `Strg + -` |
-| Zoom zurücksetzen | `Strg + 0` |
-| Verschieben | mittlere Maustaste oder `Leertaste + Ziehen` |
-| Nächste / vorherige Seite | `Bild ab` oder `N` / `Bild auf` |
-| Erste / letzte Seite | `Pos 1` / `Ende` |
-| Jetzt speichern | `Strg + S` |
-| PDF exportieren | `Strg + E` |
-| Menüs schließen, Auswahl aufheben | `Esc` |
-| Beenden (speichert vorher) | `Strg + Q` oder Fenster schließen |
+| Draw | Pen tip, left mouse button (finger, if enabled) |
+| Erase | toggle with `E`, right mouse button, pen eraser end or side button |
+| Pen in black / blue / red | `B` / `U` / `R` |
+| Shape tool | `S` or `F` |
+| Selection tool | `V` |
+| Text tool | `T`, then click on the page; `Esc` finishes typing |
+| Ruler on/off | `L` |
+| Change background | `G` |
+| Rotate selection by 90° | `R` (with a selection) |
+| Copy / paste | `Ctrl + C` / `Ctrl + V` |
+| Delete selection | `Del` or `Backspace` |
+| Undo / redo | `Ctrl + Z` / `Ctrl + Y` or `Ctrl + Shift + Z` |
+| Insert image | `Ctrl + I` |
+| Scroll | mouse wheel (`Shift` = horizontal), one finger |
+| Zoom | `Ctrl + mouse wheel`, two fingers, `Ctrl + +` / `Ctrl + -` |
+| Reset zoom | `Ctrl + 0` |
+| Pan | middle mouse button or `Space + drag` |
+| Next / previous page | `Page Down` or `N` / `Page Up` |
+| First / last page | `Home` / `End` |
+| Save now | `Ctrl + S` |
+| Export PDF | `Ctrl + E` |
+| Close menus, clear selection | `Esc` |
+| Quit (saves first) | `Ctrl + Q` or close the window |
 
 ---
 
-## Entwicklung
+## Development
 
-### Voraussetzungen
-- Rust 1.92 oder neuer (`rustup update stable`)
-- Vulkan- oder OpenGL-Treiber (z. B. `mesa-vulkan-drivers`)
-- X11-/Wayland-Bibliotheken: `libx11-dev`, `libxcursor-dev`, `libxrandr-dev`, `libxi-dev`, `libxkbcommon-dev`
+### Requirements
+- Rust 1.92 or newer (`rustup update stable`)
+- Vulkan or OpenGL driver (e.g. `mesa-vulkan-drivers`)
+- X11/Wayland libraries: `libx11-dev`, `libxcursor-dev`, `libxrandr-dev`, `libxi-dev`, `libxkbcommon-dev`
 
-### Bauen, starten, testen
+### Build, run, test
 
 ```bash
 git clone https://gitea.pansi.eu/harald/ink-notes.git
 cd ink-notes
-cargo run --release          # oder ./run.sh
-cargo test                   # Unit- und Integrationstests
+cargo run --release          # or ./run.sh
+cargo test                   # unit and integration tests
 ```
 
-Die CI prüft zusätzlich `cargo fmt --check` und `cargo clippy --all-targets -- -D warnings`.
+CI additionally checks `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings`.
 
-### Projektstruktur
+Code comments and commit messages are written in German.
+
+### Project structure
 
 ```text
 src/
-├── main.rs         # Event-Loop (winit), Eingaben von Maus, Touch und Stift, Ablaufsteuerung
-├── lib.rs          # Bibliotheks-Exporte (für Tests)
-├── canvas.rs       # wgpu-Rendering: Papier, Muster, Bilder, Tinte, Nachbarseiten
-├── shader.wgsl     # Vertex- und Fragment-Shader
-├── viewport.rs     # Kamera (Zoom, Verschieben), Seitenstapel der durchgehenden Ansicht
-├── filter.rs       # 1€-Filter gegen Zittern
-├── spline.rs       # Catmull-Rom-Splines, Ecken-Erhaltung, Dreiecksstreifen
-├── geometry.rs     # Formerkennung (Douglas-Peucker, Kreis-Fit, …)
-├── selection.rs    # Auswahl, Griffe, Verschieben/Drehen/Skalieren
-├── ruler.rs        # Virtuelles Lineal
-├── text.rs         # Textfelder: Satz, Zeilenumbruch, Rasterung
-├── background.rs   # Papierfarben, Musterfarben, Karo/Linien/Punkte
-├── image_layer.rs  # Texturen für Bilder, PDF-Seiten und Text
-├── assets.rs       # Bilder und PDFs im Notizbuchordner
-├── pdf_doc.rs      # PDF lesen und rendern (hayro)
-├── pdf_merge.rs    # Importierte PDF-Seiten beim Export unterlegen
-├── document.rs     # Datenmodell: Notizbuch, Seiten, Striche, Seitengrößen
-├── history.rs      # Rückgängig/Wiederholen
-├── storage.rs      # Laden/Speichern (atomar), Notizbücher, Papierkorb
-├── library.rs      # Ordner der Notizbücher (library.json)
-├── autosave.rs     # Speichern im Hintergrund
-├── export.rs       # PDF-Export (printpdf)
-├── page_export.rs  # Seite als PNG/SVG, Auswahl als Bild
-├── file_picker.rs  # Eingebaute Dateiauswahl
-├── settings.rs     # Einstellungen (~/.config/ink-notes/ui.json)
-├── platform.rs     # Wayland/X11-Erkennung
-├── updater.rs      # Updates von Gitea (Signatur- und Prüfsummenprüfung)
-└── ui.rs           # Oberfläche (egui): Werkzeugleiste, Menüs, Dialoge
+├── main.rs         # Event loop (winit), mouse, touch and pen input, control flow
+├── lib.rs          # Library exports (for tests)
+├── canvas.rs       # wgpu rendering: paper, patterns, images, ink, neighboring pages
+├── shader.wgsl     # Vertex and fragment shaders
+├── viewport.rs     # Camera (zoom, pan), page stack of the continuous view, swipe momentum
+├── filter.rs       # 1€ filter against jitter
+├── spline.rs       # Catmull-Rom splines, corner preservation, triangle strips
+├── geometry.rs     # Shape recognition (Douglas-Peucker, circle fitting, …)
+├── selection.rs    # Selection, handles, move/rotate/scale
+├── ruler.rs        # Virtual ruler
+├── text.rs         # Text boxes: layout, line wrapping, rasterization
+├── background.rs   # Paper colors, pattern colors, squares/lines/dots
+├── image_layer.rs  # Textures for images, PDF pages and text
+├── assets.rs       # Images and PDFs in the notebook folder
+├── pdf_doc.rs      # Reading and rendering PDFs (hayro)
+├── pdf_merge.rs    # Underlaying imported PDF pages on export
+├── document.rs     # Data model: notebook, pages, strokes, page sizes
+├── history.rs      # Undo/redo
+├── storage.rs      # Loading/saving (atomic), notebooks, trash
+├── library.rs      # Notebook folders (library.json)
+├── autosave.rs     # Saving in the background
+├── export.rs       # PDF export (printpdf)
+├── page_export.rs  # Page as PNG/SVG, selection as image
+├── file_picker.rs  # Built-in file picker
+├── settings.rs     # Settings (~/.config/ink-notes/ui.json)
+├── platform.rs     # Wayland/X11 detection
+├── updater.rs      # Updates from Gitea (signature and checksum verification)
+└── ui.rs           # Interface (egui): toolbar, menus, dialogs
 ```
 
-Mehr dazu in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md), das Speicherformat steht in [`docs/FILE_FORMAT.md`](docs/FILE_FORMAT.md).
+More in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md); the storage format is described in [`docs/FILE_FORMAT.md`](docs/FILE_FORMAT.md) (both in German).
 
 ---
 
-## Releases bauen und veröffentlichen
+## Building and publishing releases
 
 ```bash
-./scripts/build-release.sh          # .deb, .AppImage und SHA256SUMS.txt in target/
+./scripts/build-release.sh          # .deb, .AppImage and SHA256SUMS.txt in target/
 ```
 
-Veröffentlicht wird über Gitea Actions ([`.gitea/workflows/release.yaml`](.gitea/workflows/release.yaml)), sobald ein Tag `vX.Y.Z` gepusht wird: Tests, Pakete bauen, signieren, Release anlegen. Manuell geht es mit `GITEA_TOKEN=… ./scripts/publish-gitea-release.sh`.
+Releases are published by Gitea Actions ([`.gitea/workflows/release.yaml`](.gitea/workflows/release.yaml)) as soon as a tag `vX.Y.Z` is pushed: tests, build packages, sign, create the release. To do it manually: `GITEA_TOKEN=… ./scripts/publish-gitea-release.sh`.
 
 ### Flatpak
 
-Das Manifest liegt in [`packaging/flatpak/`](packaging/flatpak/) (Runtime `org.freedesktop.Platform` 26.08, Rust aus der SDK-Erweiterung `rust-stable`). Lokal bauen und installieren:
+The manifest is in [`packaging/flatpak/`](packaging/flatpak/) (runtime `org.freedesktop.Platform` 26.08, Rust from the SDK extension `rust-stable`). Build and install locally:
 
 ```bash
 flatpak-builder --user --install --force-clean target/flatpak-build packaging/flatpak/eu.pansi.ink-notes.yml
 flatpak run eu.pansi.ink-notes
 ```
 
-Nach jeder Änderung an `Cargo.lock` muss `packaging/flatpak/cargo-sources.json` mit dem [flatpak-cargo-generator](https://github.com/flatpak/flatpak-builder-tools/tree/master/cargo) neu erzeugt werden (`python3 flatpak-cargo-generator.py Cargo.lock -o packaging/flatpak/cargo-sources.json`). In der Sandbox darf ink-notes Bilder, Downloads und Schreibtisch lesen und in den Dokumente-Ordner exportieren; die Notizbücher liegen unter `~/.var/app/eu.pansi.ink-notes/`.
+After every change to `Cargo.lock`, `packaging/flatpak/cargo-sources.json` must be regenerated with the [flatpak-cargo-generator](https://github.com/flatpak/flatpak-builder-tools/tree/master/cargo) (`python3 flatpak-cargo-generator.py Cargo.lock -o packaging/flatpak/cargo-sources.json`). In the sandbox, ink-notes may read Pictures, Downloads and Desktop and export to the Documents folder; the notebooks live under `~/.var/app/eu.pansi.ink-notes/`.
 
-### Release-Signatur einrichten (einmalig)
+### Setting up the release signature (once)
 
-Updates werden in der App nur mit gültiger Minisign-Signatur installiert. Signiert wird mit [rsign2](https://crates.io/crates/rsign2) (`cargo install rsign2 --locked`). Schlüsselpaar ohne Passwort erzeugen (es wird nur als CI-Secret verwendet):
+The app only installs updates with a valid Minisign signature. Signing uses [rsign2](https://crates.io/crates/rsign2) (`cargo install rsign2 --locked`). Generate a key pair without a password (it is only used as a CI secret):
 
 ```bash
 rsign generate -W -p ink-notes.pub -s ink-notes.key
 ```
 
-1. Die zweite Zeile von `ink-notes.pub` (beginnt mit `RW`) in `src/updater.rs` als `UPDATE_SIGNING_PUBLIC_KEY` eintragen.
-2. Den Inhalt von `ink-notes.key` in Gitea unter *Repository → Einstellungen → Actions → Secrets* als `MINISIGN_SECRET_KEY` hinterlegen.
-3. `ink-notes.key` offline aufbewahren. Geht er verloren, können bestehende Installationen keine Updates mehr prüfen.
+1. Put the second line of `ink-notes.pub` (starting with `RW`) into `src/updater.rs` as `UPDATE_SIGNING_PUBLIC_KEY`.
+2. Store the content of `ink-notes.key` in Gitea under *Repository → Settings → Actions → Secrets* as `MINISIGN_SECRET_KEY`.
+3. Keep `ink-notes.key` offline. If it is lost, existing installations can no longer verify updates.
 
-`rsign generate -W` verschlüsselt den Schlüssel mit leerem Passwort; das `minisign`-Programm (z. B. Ubuntu-Paket 0.11) kann ihn ohne Terminal nicht lesen, deshalb signieren Skript und CI mit `rsign`. In der CI ist die Signatur Pflicht (`INK_NOTES_REQUIRE_SIGNATURE=1`), und das Skript prüft, dass der geheime Schlüssel zum eingebauten öffentlichen passt.
+`rsign generate -W` encrypts the key with an empty password; the `minisign` program (e.g. Ubuntu package 0.11) cannot read it without a terminal, which is why the script and CI sign with `rsign`. In CI the signature is mandatory (`INK_NOTES_REQUIRE_SIGNATURE=1`), and the script checks that the secret key matches the built-in public key.
 
-### CI-Runner (act_runner)
+### CI runner (act_runner)
 
-Der Workflow läuft auf dem Label `ubuntu-latest`. Im `config.yaml` des Runners muss es zugeordnet sein, z. B.:
+The workflow runs on the label `ubuntu-latest`. It must be mapped in the runner's `config.yaml`, e.g.:
 
 ```yaml
 runner:
@@ -226,26 +230,26 @@ runner:
     - "ubuntu-latest:docker://catthehacker/ubuntu:act-latest"
 ```
 
-Bleibt ein Job auf „Waiting to run“ stehen: Ist der Runner online (*Einstellungen → Aktionen → Runner*) und stimmt das Label mit `runs-on` überein? `sudo` verwendet der Workflow nur, wenn der Runner nicht als `root` läuft.
+If a job stays at "Waiting to run": is the runner online (*Settings → Actions → Runners*) and does the label match `runs-on`? The workflow only uses `sudo` when the runner does not run as `root`.
 
 ---
 
-## Sicherheit der Updates
+## Update security
 
-1. **Signatur:** Jedes Release enthält `SHA256SUMS.txt.minisig`. Die App lädt `SHA256SUMS.txt` und die Signatur vor dem Paket und prüft sie gegen den eingebauten öffentlichen Schlüssel (`minisign-verify`). Ohne gültige Signatur wird nicht installiert.
-2. **Prüfsumme:** Der SHA-256-Wert des heruntergeladenen Pakets muss zum Eintrag in der signierten Liste passen, sonst wird die Datei gelöscht.
-3. **Nur HTTPS:** Auch Download-Links und Weiterleitungen müssen HTTPS sein. Bei Weiterleitungen auf einen anderen Server wird der `Authorization`-Header nicht mitgeschickt.
-4. **Eigener Download-Ordner:** `~/.cache/ink-notes/updates` (Rechte `0700`); Dateinamen mit Pfadtrennern, `..` oder Steuerzeichen werden abgelehnt.
-5. **AppImage-Austausch:** Die neue Datei wird neben der alten angelegt, die alte als `.bak` gesichert und dann per `rename` ersetzt – die laufende Datei wird nie überschrieben.
-
----
-
-## Mitmachen
-
-Fehlermeldungen, Ideen und Beiträge sind willkommen – am liebsten als [Issue auf Gitea](https://gitea.pansi.eu/harald/ink-notes/issues); [GitHub](https://github.com/haraldpansi-gif/ink-notes) ist ein Spiegel. Details in [CONTRIBUTING.md](CONTRIBUTING.md), Sicherheitslücken bitte vertraulich wie in [SECURITY.md](SECURITY.md) beschrieben. Es gilt der [Code of Conduct](CODE_OF_CONDUCT.md).
+1. **Signature:** Every release contains `SHA256SUMS.txt.minisig`. The app downloads `SHA256SUMS.txt` and the signature before the package and verifies them against the built-in public key (`minisign-verify`). Without a valid signature, nothing is installed.
+2. **Checksum:** The SHA-256 of the downloaded package must match the entry in the signed list, otherwise the file is deleted.
+3. **HTTPS only:** Download links and redirects must be HTTPS too. On redirects to a different server, the `Authorization` header is not sent along.
+4. **Dedicated download folder:** `~/.cache/ink-notes/updates` (permissions `0700`); file names with path separators, `..` or control characters are rejected.
+5. **AppImage replacement:** The new file is created next to the old one, the old one is kept as `.bak` and then replaced with `rename` – the running file is never overwritten.
 
 ---
 
-## Lizenz
+## Contributing
+
+Bug reports, ideas and contributions are welcome – preferably as an [issue on Gitea](https://gitea.pansi.eu/harald/ink-notes/issues); [GitHub](https://github.com/haraldpansi-gif/ink-notes) is a mirror. Issues may be written in English or German. Details in [CONTRIBUTING.md](CONTRIBUTING.md); please report security vulnerabilities privately as described in [SECURITY.md](SECURITY.md). The [Code of Conduct](CODE_OF_CONDUCT.md) applies.
+
+---
+
+## License
 
 [MIT](LICENSE), Copyright © 2026 Harald Pansi.
