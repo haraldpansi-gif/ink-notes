@@ -84,6 +84,11 @@
   </branding>
   <content_rating type="oars-1.1" />
   <releases>
+    <release version="0.30.2" date="2026-10-20">
+      <description>
+        <p>Ctrl+Plus and Ctrl+Minus zoom only the page again, no longer the whole interface. Text boxes being edited now sit exactly where the text ends up.</p>
+      </description>
+    </release>
     <release version="0.30.1" date="2026-10-20">
       <description>
         <p>Snapped highlighter shapes keep the highlighter width. Sharp corners such as the tip of a "1" are drawn round instead of cut off, and strokes no longer jump when the pen lifts. Finger swipes glide more reliably.</p>
