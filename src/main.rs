@@ -1323,7 +1323,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 3. egui Context und State initialisieren
     let egui_ctx = egui::Context::default();
-    egui_ctx.set_visuals(egui::Visuals::dark());
+    ui::configure_context(&egui_ctx);
 
     // 4. In-App Gitea Updater initialisieren und im Hintergrund nach Releases fragen
     // Ergebnisse der PDF-Exporte aus dem Hintergrundthread

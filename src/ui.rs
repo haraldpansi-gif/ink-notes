@@ -2895,6 +2895,14 @@ pub fn is_screen_point_in_ui(
             .is_some_and(|layer| layer.order != egui::Order::Background)
 }
 
+/// Richtet den egui-Kontext ein. Strg+Plus/Minus/0 zoomen das Blatt; egui darf damit nicht
+/// zusätzlich die Oberfläche vergrößern, sonst passen Textfeld, Auswahl und Lineal nicht mehr
+/// zum Blatt (Issue #34).
+pub fn configure_context(ctx: &egui::Context) {
+    ctx.set_visuals(egui::Visuals::dark());
+    ctx.options_mut(|o| o.zoom_with_keyboard = false);
+}
+
 /// Rendert die schwebende Toolbar und alle zugehörigen UI-Komponenten mit `egui`.
 ///
 /// Gibt eine Liste von `UiAction`-Events zurück, die vom Hauptprogramm verarbeitet werden.
@@ -5263,6 +5271,32 @@ mod tests {
         let ctx = render_frames(&mut state, &notebook, 2);
         let actions = click_at(&ctx, &mut state, &notebook, egui::pos2(x, 400.0));
         assert!(!actions.iter().any(|a| matches!(a, UiAction::ScrollTo(_))));
+    }
+
+    #[test]
+    fn test_ctrl_plus_does_not_zoom_the_ui() {
+        let ctx = egui::Context::default();
+        configure_context(&ctx);
+        let ctrl = egui::Modifiers {
+            ctrl: true,
+            command: true,
+            ..Default::default()
+        };
+        for _ in 0..2 {
+            ctx.begin_frame(egui::RawInput {
+                events: vec![egui::Event::Key {
+                    key: egui::Key::Plus,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: ctrl,
+                }],
+                modifiers: ctrl,
+                ..Default::default()
+            });
+            let _ = ctx.end_frame();
+        }
+        assert_eq!(ctx.zoom_factor(), 1.0);
     }
 
     #[test]
