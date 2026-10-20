@@ -183,7 +183,7 @@ src/
 └── ui.rs           # Interface (egui): toolbar, menus, dialogs
 ```
 
-More in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md); the storage format is described in [`docs/FILE_FORMAT.md`](docs/FILE_FORMAT.md) (both in German).
+More in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md); the storage format is described in [`docs/FILE_FORMAT.md`](docs/FILE_FORMAT.md).
 
 ---
 

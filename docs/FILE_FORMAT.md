@@ -1,37 +1,39 @@
-# Dateiformat von ink-notes
+# ink-notes file format
 
-Dieses Dokument beschreibt, wo und wie ink-notes Notizbücher speichert, und die Versionen des Dateiformats. Aktuell ist **Version 9**.
+**English** · [Deutsch](FILE_FORMAT.de.md)
+
+This document describes where and how ink-notes stores notebooks, and the versions of the file format. The current version is **9**.
 
 ---
 
-## 1. Ordner
+## 1. Folders
 
 ```text
 ~/.local/share/ink-notes/              ($XDG_DATA_HOME/ink-notes)
 ├── notebooks/
-│   ├── library.json                   Ordner der Notizbücher (siehe unten)
-│   ├── <notizbuch-id>/
-│   │   ├── manifest.json              Metadaten und Seitenreihenfolge
-│   │   ├── manifest.json.bak          Kopie des vorherigen Manifests
-│   │   ├── page_1.json                eine Datei je Seite
+│   ├── library.json                   notebook folders (see below)
+│   ├── <notebook-id>/
+│   │   ├── manifest.json              metadata and page order
+│   │   ├── manifest.json.bak          copy of the previous manifest
+│   │   ├── page_1.json                one file per page
 │   │   ├── page_2.json
-│   │   ├── page_7.json.corrupt-<ts>   beiseitegelegte beschädigte Seite (falls vorgekommen)
-│   │   ├── assets/                    eingefügte Bilder und importierte PDFs
+│   │   ├── page_7.json.corrupt-<ts>   damaged page set aside (if it ever happened)
+│   │   ├── assets/                    inserted images and imported PDFs
 │   │   │   ├── <sha256>.png
 │   │   │   └── <sha256>.pdf
-│   │   └── .lock                      Sperrdatei, solange das Notizbuch geöffnet ist
-│   └── .trash/                        gelöschte Notizbücher (<id>_<zeitstempel>)
-└── recovery/                          Notfall-Sicherungen ungespeicherter Seiten
+│   │   └── .lock                      lock file while the notebook is open
+│   └── .trash/                        deleted notebooks (<id>_<timestamp>)
+└── recovery/                          emergency backups of unsaved pages
 
-~/.config/ink-notes/ui.json            ($XDG_CONFIG_HOME) Einstellungen der Oberfläche
+~/.config/ink-notes/ui.json            ($XDG_CONFIG_HOME) interface settings
 ```
 
-- **Notizbuch-IDs** werden aus dem Titel und dem Zeitpunkt gebildet (z. B. `mathematik_1775460000`); das erste Notizbuch heißt `default`.
-- **Assets** sind nach dem SHA-256-Hash ihres Inhalts benannt; dasselbe Bild wird nur einmal gespeichert. Bilder werden als PNG oder (unverändert) JPEG abgelegt, PDFs unverändert.
-- Alle Dateien werden mit Rechten `0600`, Ordner mit `0700` angelegt.
+- **Notebook IDs** are built from the title and the time (e.g. `mathematik_1775460000`); the first notebook is called `default`.
+- **Assets** are named after the SHA-256 hash of their content; the same image is stored only once. Images are stored as PNG or (unchanged) JPEG, PDFs unchanged.
+- All files are created with permissions `0600`, folders with `0700`.
 
-### Ordner (`library.json`)
-Ordner wie „3. Semester › Mathe“ sind rein logisch: Die Notizbücher bleiben in ihren Verzeichnissen, `library.json` hält nur fest, welcher Ordner welches Notizbuch enthält. Umbenennen, Verschieben (samt Inhalt) und Löschen von Ordnern ändern deshalb nie eine Notizbuch-Datei.
+### Folders (`library.json`)
+Folders such as "Semester 3 › Math" are purely logical: notebooks stay in their directories, and `library.json` only records which folder contains which notebook. Renaming, moving (with content) and deleting folders therefore never changes a notebook file.
 
 ```json
 {
@@ -40,10 +42,10 @@ Ordner wie „3. Semester › Mathe“ sind rein logisch: Die Notizbücher bleib
 }
 ```
 
-- Ordner sind Pfade mit `/` als Trenner; Namen enthalten selbst kein `/` und höchstens 80 Zeichen.
-- Notizbücher ohne Eintrag liegen auf der obersten Ebene.
-- Wird ein Ordner gelöscht, rücken seine Notizbücher und Unterordner eine Ebene nach oben.
-- Fehlt die Datei oder ist sie unlesbar, liegen alle Notizbücher auf der obersten Ebene; fehlende übergeordnete Ordner werden beim Laden ergänzt.
+- Folders are paths with `/` as separator; names themselves contain no `/` and at most 80 characters.
+- Notebooks without an entry are on the top level.
+- When a folder is deleted, its notebooks and subfolders move up one level.
+- If the file is missing or unreadable, all notebooks are on the top level; missing parent folders are added when loading.
 
 ---
 
@@ -68,24 +70,24 @@ Ordner wie „3. Semester › Mathe“ sind rein logisch: Die Notizbücher bleib
 }
 ```
 
-| Feld | Bedeutung |
+| Field | Meaning |
 | :--- | :--- |
-| `format_version` | Formatversion (siehe Abschnitt 5) |
-| `id`, `title` | ID (= Ordnername) und Anzeigename |
-| `created_at`, `modified_at` | UNIX-Zeit in Sekunden |
-| `current_page_index` | zuletzt geöffnete Seite |
-| `pages` | Seiten in ihrer Reihenfolge: `id`, `background`, optional `title` und `size` (siehe unten) – damit Seitenübersicht und Ansicht sie kennen, ohne jede Seite zu laden |
-| `page_ids` | dieselbe Reihenfolge als reine ID-Liste (für ältere Versionen) |
-| `next_stroke_id`, `next_page_id` | nächste freie IDs |
-| `layout` | Anordnung der Seiten: `Paged` (Seite für Seite), `Continuous` (durchgehend untereinander) oder `Endless` (endlose Fläche, siehe unten). Seit 0.28; fehlt das Feld, gilt die frühere globale Einstellung `continuous_scroll` aus `ui.json` |
+| `format_version` | format version (see section 5) |
+| `id`, `title` | ID (= folder name) and display name |
+| `created_at`, `modified_at` | UNIX time in seconds |
+| `current_page_index` | page opened last |
+| `pages` | pages in their order: `id`, `background`, optional `title` and `size` (see below) – so the page overview and the view know them without loading every page |
+| `page_ids` | the same order as a plain ID list (for older versions) |
+| `next_stroke_id`, `next_page_id` | next free IDs |
+| `layout` | page arrangement: `Paged` (page by page), `Continuous` (seamlessly below each other) or `Endless` (endless canvas, see below). Since 0.28; if the field is missing, the former global setting `continuous_scroll` from `ui.json` applies. Since 0.30, new notebooks are created as `Continuous` |
 
-**Endlose Notizbücher** (Version 9) haben genau eine Seite der Größe `[100000.0, 100000.0]` (10 × 10 m). Der Startausschnitt ist ein DIN-A4-Rahmen in ihrer Mitte (ab `[48950, 48515]`); Koordinaten bleiben positiv. Beim Export wird nur der beschriebene Bereich mit 10 mm Rand zur PDF-Seite.
+**Endless notebooks** (version 9) have exactly one page of size `[100000.0, 100000.0]` (10 × 10 m). The starting area is an A4 frame in its middle (from `[48950, 48515]`); coordinates stay positive. On export, only the used area plus a 10 mm margin becomes the PDF page.
 
 ---
 
-## 3. Seite (`page_<id>.json`)
+## 3. Page (`page_<id>.json`)
 
-Jede Seite liegt in einer eigenen Datei (kompaktes JSON, hier zur Lesbarkeit umbrochen):
+Each page is stored in its own file (compact JSON, wrapped here for readability):
 
 ```json
 {
@@ -99,19 +101,19 @@ Jede Seite liegt in einer eigenen Datei (kompaktes JSON, hier zur Lesbarkeit umb
 }
 ```
 
-| Feld | Bedeutung |
+| Field | Meaning |
 | :--- | :--- |
-| `background` | Muster: `Blank`, `Grid5mm`, `Lined`, `DotGrid` |
-| `title` | Seitentitel (optional) |
-| `size` | Seitengröße `[breite, höhe]` in Seiteneinheiten (10 = 1 mm); fehlt bei DIN A4 hoch (`[2100, 2970]`). Höchstens 2 × 2 m, außer der endlosen Seite `[100000, 100000]` |
-| `pdf_background` | importierte PDF-Seite als Hintergrund (optional): Datei, Seitennummer ab 0, Größe in Punkt |
-| `strokes` | alle Objekte der Seite, von unten nach oben |
+| `background` | pattern: `Blank`, `Grid5mm`, `Lined`, `DotGrid` |
+| `title` | page title (optional) |
+| `size` | page size `[width, height]` in page units (10 = 1 mm); omitted for A4 portrait (`[2100, 2970]`). At most 2 × 2 m, except for the endless page `[100000, 100000]` |
+| `pdf_background` | imported PDF page as background (optional): file, page number starting at 0, size in points |
+| `strokes` | all objects on the page, from bottom to top |
 
-### 3.1 Objekte (`strokes`)
+### 3.1 Objects (`strokes`)
 
-Jedes Objekt hat eine `id`, eine `color` (RGBA, linear, Werte 0–1) und `samples`: Punkte mit `x`, `y` (Seiteneinheiten), `p` (Druck 0–1) und `t` (Zeit in Sekunden). Die Dreiecke für die Anzeige werden beim Laden aus den Punkten berechnet und nicht gespeichert.
+Every object has an `id`, a `color` (RGBA, sRGB, values 0–1) and `samples`: points with `x`, `y` (page units), `p` (pressure 0–1) and `t` (time in seconds). The triangles for display are computed from the points when loading and are not stored.
 
-**Tinte**
+**Ink**
 
 ```json
 { "id": 7, "color": [0.12, 0.12, 0.14, 1.0],
@@ -119,79 +121,79 @@ Jedes Objekt hat eine `id`, eine `color` (RGBA, linear, Werte 0–1) und `sample
   "tool": "pen", "width": 5.0, "finalized": true }
 ```
 
-- `tool`: `pen`, `highlighter` oder `shape`
-- `width`: Strichbreite in Seiteneinheiten (5.0 = 0,5 mm)
-- `finalized`: Der Strich wurde nach dem Absetzen nachbearbeitet (Glättung, Ecken, Endkappen)
+- `tool`: `pen`, `highlighter` or `shape` (a highlighter snapped to a shape stays `highlighter` and also has `shape`)
+- `width`: stroke width in page units (5.0 = 0.5 mm)
+- `finalized`: the stroke was post-processed after the pen was lifted (smoothing, corners, end caps)
 
-**Formen** haben zusätzlich `shape`, z. B.:
+**Shapes** additionally have `shape`, e.g.:
 
 ```json
 "shape": { "Rectangle": { "corners": [[500, 600], [800, 600], [800, 800], [500, 800]] } }
 ```
 
-Mögliche Formen: `Line { start, end }`, `Arrow { start, end, double }`, `Circle { center, radius }`, `Ellipse { center, radius_x, radius_y, rotation }`, `Rectangle { corners }`, `Triangle { corners }`, `Rhombus { corners }`, `Polygon { vertices }`, `CoordinateSystem { origin, x_axis_end, y_axis_end, with_arrows, negative_ends? }`, `Octahedron { … }`. Punkte sind `[x, y]`. Beim Achsenkreuz enthält `negative_ends` die Enden der x- und der y-Achse auf der anderen Seite des Ursprungs; ältere Versionen ignorieren das Feld und zeigen ein L-förmiges Koordinatensystem.
+Possible shapes: `Line { start, end }`, `Arrow { start, end, double }`, `Circle { center, radius }`, `Ellipse { center, radius_x, radius_y, rotation }`, `Rectangle { corners }`, `Triangle { corners }`, `Rhombus { corners }`, `Polygon { vertices }`, `CoordinateSystem { origin, x_axis_end, y_axis_end, with_arrows, negative_ends? }`, `Octahedron { … }`. Points are `[x, y]`. For an axis cross, `negative_ends` contains the ends of the x and y axes on the other side of the origin; older versions ignore the field and show an L-shaped coordinate system.
 
-**Bilder** haben `image` (Dateiname in `assets/`); die vier `samples` sind die Ecken oben links, oben rechts, unten rechts, unten links:
-
-```json
-{ "id": 9, "color": [1, 1, 1, 1], "samples": [ …4 Ecken… ], "width": 0.0, "image": "<sha256>.png" }
-```
-
-**Textfelder** haben `text`; die vier `samples` sind wie bei Bildern die Ecken des Felds:
+**Images** have `image` (file name in `assets/`); the four `samples` are the corners top left, top right, bottom right, bottom left:
 
 ```json
-"text": { "content": "Überschrift\nzweite Zeile", "size": 42.3, "font": "Sans", "wrap_width": 1500.0 }
+{ "id": 9, "color": [1, 1, 1, 1], "samples": [ …4 corners… ], "width": 0.0, "image": "<sha256>.png" }
 ```
 
-- `size`: Schriftgröße (Em) in Seiteneinheiten (12 pt ≈ 42,3)
-- `font`: `Sans` (Ubuntu Light) oder `Mono` (Hack)
-- `wrap_width`: Umbruchbreite in Seiteneinheiten; die Ecken bilden das Feld dieser Breite (und der Höhe des gesetzten Texts) ab, Drehung und Skalierung stecken in den Ecken
+**Text boxes** have `text`; like for images, the four `samples` are the corners of the box:
+
+```json
+"text": { "content": "Heading\nsecond line", "size": 42.3, "font": "Sans", "wrap_width": 1500.0 }
+```
+
+- `size`: font size (em) in page units (12 pt ≈ 42.3)
+- `font`: `Sans` (Ubuntu Light) or `Mono` (Hack)
+- `wrap_width`: wrap width in page units; the corners map the box of this width (and the height of the laid-out text), rotation and scaling are contained in the corners
 
 ---
 
-## 4. Sicherheit beim Speichern
+## 4. Safe saving
 
-### Atomares Schreiben
-1. Der Inhalt wird in `<datei>.tmp.<pid>.<nanosekunden>` geschrieben und mit `fsync` auf den Datenträger gebracht.
-2. `rename` ersetzt die alte Datei in einem Schritt.
-3. Danach wird auch der Ordner mit `fsync` gesichert.
+### Atomic writes
+1. The content is written to `<file>.tmp.<pid>.<nanoseconds>` and flushed to disk with `fsync`.
+2. `rename` replaces the old file in one step.
+3. Afterwards the folder is synced with `fsync` too.
 
-Ein Absturz während des Speicherns hinterlässt deshalb entweder die alte oder die neue Datei, nie eine halbe.
+A crash while saving therefore leaves either the old or the new file, never a half-written one.
 
-### Beschädigte Dateien
-- Lässt sich eine Seite nicht lesen, wird sie nach `page_<id>.json.corrupt-<zeitstempel>` verschoben (nicht gelöscht) und die Seite schreibgeschützt angezeigt.
-- Ist `manifest.json` beschädigt oder fehlt, wird `manifest.json.bak` verwendet.
+### Damaged files
+- If a page cannot be read, it is moved to `page_<id>.json.corrupt-<timestamp>` (not deleted) and the page is shown read-only.
+- If `manifest.json` is damaged or missing, `manifest.json.bak` is used.
 
-### Gelöschte Seiten
-Eine gelöschte Seite verschwindet aus `manifest.json`; ihre Datei `page_<id>.json` bleibt im Ordner liegen. Seitenkennungen werden nie wiederverwendet (`next_page_id`), die Datei kann also mit keiner neuen Seite kollidieren. Wird die Seite in derselben Sitzung wiederhergestellt, schreibt die App sie neu.
+### Deleted pages
+A deleted page disappears from `manifest.json`; its file `page_<id>.json` stays in the folder. Page IDs are never reused (`next_page_id`), so the file cannot collide with a new page. If the page is restored in the same session, the app writes it again.
 
-### Neuere Versionen
-Dateien mit einer höheren `format_version` als der unterstützten werden nicht geöffnet – so kann eine ältere App-Version keine Inhalte verlieren, die sie nicht kennt.
+### Newer versions
+Files with a higher `format_version` than supported are not opened – this way an older app version cannot lose content it does not know.
 
 ### Migration
-Beim ersten Speichern einer unversionierten Datei (Version 0) wird vorher eine Kopie `*.v0.bak` angelegt.
+Before the first save of an unversioned file (version 0), a copy `*.v0.bak` is created.
 
 ---
 
-## 5. Versionen
+## 5. Versions
 
-| Version | App | Änderung |
+| Version | App | Change |
 | :--- | :--- | :--- |
-| 0 | – | ohne `format_version` |
-| 1 | – | `format_version`, Hintergründe im Manifest |
-| 2 | – | `tool`, `width`, `finalized` an Strichen; kompaktes JSON |
-| 3 | 0.3.7 | Formen `Ellipse` und `Arrow` |
-| 4 | 0.5 | Bilder (`image`, Ordner `assets/`) |
-| 5 | 0.6.1 | importierte PDF-Seiten (`pdf_background`) |
-| 6 | 0.7 | Seitentitel (`title` in Seite und Manifest) |
-| 7 | 0.10 | Textfelder (`text`) |
-| 8 | 0.11 | Seitengröße je Seite (`size` in Seite und Manifest) |
-| 9 | 0.29 | Seitenanordnung je Notizbuch (`layout` im Manifest), endlose Notizbücher |
+| 0 | – | without `format_version` |
+| 1 | – | `format_version`, backgrounds in the manifest |
+| 2 | – | `tool`, `width`, `finalized` on strokes; compact JSON |
+| 3 | 0.3.7 | shapes `Ellipse` and `Arrow` |
+| 4 | 0.5 | images (`image`, folder `assets/`) |
+| 5 | 0.6.1 | imported PDF pages (`pdf_background`) |
+| 6 | 0.7 | page titles (`title` in page and manifest) |
+| 7 | 0.10 | text boxes (`text`) |
+| 8 | 0.11 | page size per page (`size` in page and manifest) |
+| 9 | 0.29 | page arrangement per notebook (`layout` in the manifest), endless notebooks |
 
-Jede neue Version ändert nur Ergänzungen; ältere Dateien werden ohne Umwandlung gelesen und beim nächsten Speichern mit der aktuellen Versionsnummer geschrieben.
+Each new version only adds things; older files are read without conversion and written with the current version number on the next save.
 
 ---
 
-## 6. Warum JSON
+## 6. Why JSON
 
-Ein Binärformat (z. B. `postcard`) würde Dateien um weitere 20–30 % verkleinern. JSON bleibt trotzdem, weil es sich ansehen, vergleichen und im Notfall von Hand reparieren lässt und das Speichern einer Seite auch bei vielen Strichen deutlich unter einer Millisekunde dauert.
+A binary format (e.g. `postcard`) would make files another 20–30 % smaller. JSON stays anyway, because it can be inspected, diffed and repaired by hand in an emergency, and saving a page takes well under a millisecond even with many strokes.

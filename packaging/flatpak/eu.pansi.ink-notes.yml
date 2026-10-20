@@ -1,14 +1,14 @@
-# Flatpak-Manifest für ink-notes (Flathub).
+# Flatpak manifest for ink-notes (Flathub).
 #
-# Lokal bauen und installieren (aus dem Repository-Wurzelverzeichnis):
+# Build and install locally (from the repository root):
 #   flatpak-builder --user --install --force-clean target/flatpak-build \
 #       packaging/flatpak/eu.pansi.ink-notes.yml
 #
-# cargo-sources.json nach jeder Änderung an Cargo.lock neu erzeugen:
+# Regenerate cargo-sources.json after every change to Cargo.lock:
 #   python3 flatpak-cargo-generator.py Cargo.lock -o packaging/flatpak/cargo-sources.json
 # (flatpak-builder-tools, https://github.com/flatpak/flatpak-builder-tools/tree/master/cargo)
 #
-# Für die Einreichung bei Flathub die Quelle `type: dir` durch das Release-Tag ersetzen
+# For the Flathub submission, replace the `type: dir` source with the release tag
 # (type: git, url, tag, commit).
 id: eu.pansi.ink-notes
 runtime: org.freedesktop.Platform
@@ -22,9 +22,9 @@ finish-args:
   - --socket=fallback-x11
   - --share=ipc
   - --device=dri
-  # Die eingebaute Dateiauswahl (Bilder und PDFs einfügen) arbeitet ohne Desktop-Portal und
-  # bietet Bilder, Downloads und Schreibtisch an; Export (PDF, PNG, SVG) in den Dokumente-Ordner.
-  # Ziehen aus dem Dateimanager geht über das Dokumenten-Portal auch aus anderen Ordnern.
+  # The built-in file picker (inserting images and PDFs) works without a desktop portal and
+  # offers Pictures, Downloads and Desktop; exports (PDF, PNG, SVG) go to the Documents folder.
+  # Dragging from the file manager works from other folders too, via the document portal.
   - --filesystem=xdg-pictures:ro
   - --filesystem=xdg-download:ro
   - --filesystem=xdg-desktop:ro

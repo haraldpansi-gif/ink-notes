@@ -1,202 +1,206 @@
-# Architektur von ink-notes
+# ink-notes architecture
 
-Dieses Dokument beschreibt, wie ink-notes intern aufgebaut ist: Eingabe und Strichverarbeitung, Rendering, Seiten und Ansicht, Formerkennung, Speichern und Export. Das Speicherformat steht in [`FILE_FORMAT.md`](FILE_FORMAT.md).
+**English** · [Deutsch](ARCHITECTURE.de.md)
+
+This document describes how ink-notes is built internally: input and stroke processing, rendering, pages and view, shape recognition, saving and export. The storage format is described in [`FILE_FORMAT.md`](FILE_FORMAT.md).
 
 ---
 
-## 1. Überblick
+## 1. Overview
 
-ink-notes ist ein einzelnes Programm mit einem Event-Loop (`winit`) im Haupt-Thread. Dazu kommen drei Hintergrund-Threads:
+ink-notes is a single program with an event loop (`winit`) on the main thread, plus three background threads:
 
-| Thread | Aufgabe |
+| Thread | Task |
 | :--- | :--- |
-| Haupt-Thread | Eingaben, Datenmodell, Rendering (`wgpu`), Oberfläche (`egui`) |
-| Autosave | Seiten und Manifest auf die Festplatte schreiben (`autosave.rs`) |
-| PDF-Rendering | Importierte PDF-Seiten zu Texturen rendern (`pdf_doc.rs`, `hayro`) |
-| Export | PDF/PNG/SVG-Export, damit die Oberfläche nicht hängt (`main.rs`) |
+| Main thread | Input, data model, rendering (`wgpu`), interface (`egui`) |
+| Autosave | Writes pages and manifest to disk (`autosave.rs`) |
+| PDF rendering | Renders imported PDF pages to textures (`pdf_doc.rs`, `hayro`) |
+| Export | PDF/PNG/SVG export, so the interface does not freeze (`main.rs`) |
 
-Stifteingaben kommen über `octotablet` (Tablet-Protokoll von Wayland bzw. X11), Maus und Touch über `winit`. Die Oberfläche (Werkzeugleiste, Menüs, Dialoge, Textbearbeitung) ist mit `egui` gebaut und wird im selben Render-Durchgang über das Blatt gezeichnet.
+Pen input arrives via `octotablet` (the Wayland or X11 tablet protocol), mouse and touch via `winit`. The interface (toolbar, menus, dialogs, text editing) is built with `egui` and drawn over the page in the same render pass.
 
 ---
 
-## 2. Vom Stift zum Strich
+## 2. From pen to stroke
 
 ```
-[Stift / Touch / Maus]
-          │  Bildschirmposition, Druck, Zeit
+[Pen / touch / mouse]
+          │  screen position, pressure, time
           ▼
-[Bildschirm → Seitenkoordinaten]   (viewport.rs)
+[Screen → page coordinates]         (viewport.rs)
           │
           ▼
-[Druckkurve]                        (settings.rs, vom Nutzer einstellbar)
+[Pressure curve]                    (settings.rs, user-adjustable)
           │
           ▼
-[1€-Filter]                         (filter.rs)
+[1€ filter]                         (filter.rs)
           │
           ▼
-[Catmull-Rom-Spline + Dreiecksstreifen]   (spline.rs) → Live-Puffer auf der GPU
-          │  Stift abgehoben
+[Triangle strip as for the final stroke]   (spline.rs) → live buffer on the GPU
+          │  pen lifted
           ▼
-[Nachbearbeitung]                   (spline.rs: finalize_stroke)
+[Post-processing]                   (spline.rs: finalize_stroke)
           │
           ▼
-[Strich auf der Seite + Undo-Eintrag]   (document.rs, history.rs)
+[Stroke on the page + undo entry]   (document.rs, history.rs)
 ```
 
-### 2.1 1€-Filter
-Langsame Bewegungen zittern, schnelle sollen nicht nachhinken. Der 1€-Filter (`filter.rs`) passt seine Grenzfrequenz an die Geschwindigkeit an:
+### 2.1 1€ filter
+Slow movements jitter, fast ones should not lag behind. The 1€ filter (`filter.rs`) adapts its cutoff frequency to the speed:
 
 $$f_c = f_{c,\min} + \beta \cdot |\dot{x}|$$
 
-Bei langsamer Bewegung glättet er stark, bei schneller kaum.
+It smooths strongly during slow movement and hardly at all during fast movement.
 
-### 2.2 Zentripetaler Catmull-Rom-Spline
-Die gefilterten Punkte werden mit einem zentripetalen Catmull-Rom-Spline ($\alpha = 0{,}5$) interpoliert:
+### 2.2 Centripetal Catmull-Rom spline
+The filtered points are interpolated with a centripetal Catmull-Rom spline ($\alpha = 0.5$):
 
 $$t_{i+1} = t_i + \lVert P_{i+1} - P_i \rVert^{\alpha}$$
 
-Diese Parametrisierung erzeugt bei engen Kurven keine Schlaufen oder Spitzen und ist an den Stützstellen $C^1$-stetig.
+This parametrization does not create loops or cusps in tight curves and is $C^1$-continuous at the control points.
 
-### 2.3 Dreiecksstreifen
-Aus den Spline-Punkten mit Radius $r_i$ (aus Druck und Strichstärke) entsteht ein Dreiecksstreifen:
+### 2.3 Triangle strip
+From the spline points with radius $r_i$ (from pressure and stroke width), a triangle strip is built:
 
-$$V_{i,\text{links}} = P_i + N_i \cdot r_i, \qquad V_{i,\text{rechts}} = P_i - N_i \cdot r_i$$
+$$V_{i,\text{left}} = P_i + N_i \cdot r_i, \qquad V_{i,\text{right}} = P_i - N_i \cdot r_i$$
 
-$N_i$ ist die Normale der Laufrichtung; an inneren Punkten wird über benachbarte Segmente gemittelt.
+$N_i$ is the normal of the direction of travel; at inner points it is averaged over neighboring segments.
 
-### 2.4 Zwei Stufen
-1. **Während des Schreibens:** Filter und Spline arbeiten nur mit bisherigen Punkten; der Strich wird sofort in einen eigenen Live-Puffer geschrieben.
-2. **Beim Absetzen** wird der ganze Strich noch einmal bearbeitet (`finalize_stroke`):
-   - Druckverlauf mit dem Fenster $[0{,}25;\ 0{,}5;\ 0{,}25]$ glätten,
-   - Punkte mit Ramer-Douglas-Peucker ausdünnen ($\varepsilon = 0{,}75$ Einheiten $= 0{,}075$ mm),
-   - an Knicken über 65° den Spline auftrennen, damit Ecken nicht abgerundet werden,
-   - runde Endkappen anfügen.
+### 2.4 Two stages
+1. **While writing:** The filter only works with the points so far; with every new point the stroke is written into its own live buffer using the same tessellation as when the pen is lifted (thinning, corners, round caps), so it does not jump when the pen lifts.
+2. **When the pen is lifted**, the whole stroke is processed once more (`finalize_stroke`):
+   - smooth the pressure curve with the window $[0.25;\ 0.5;\ 0.25]$,
+   - thin out points with Ramer-Douglas-Peucker ($\varepsilon = 0.75$ units $= 0.075$ mm),
+   - split the spline at bends over 65° so corners stay sharp, and join the parts round (a circle around the bend) so the tip does not look cut off,
+   - add round end caps.
 
-   Danach wird der Live-Puffer geleert und der Strich in die Seite übernommen.
+   Then the live buffer is cleared and the stroke is added to the page.
 
-### 2.5 Lineal
-Beginnt ein Strich nahe einer Linealkante (`ruler.rs`), werden alle seine Punkte auf diese Kante projiziert, bis der Stift abgehoben wird.
-
----
-
-## 3. Koordinaten, Seiten und Ansicht
-
-### 3.1 Seitenkoordinaten
-Gerechnet wird in Seiteneinheiten: **10 Einheiten = 1 mm**. Eine DIN-A4-Seite ist 2100 × 2970 Einheiten groß. Jede Seite hat ihre eigene Größe (`Page::size`): Standard ist A4 hoch; beim PDF-Import bekommen Querformat-Seiten 2970 Einheiten Breite und eine Höhe nach Seitenverhältnis (`document::pdf_page_size`). Neue Seiten übernehmen die Größe der aktuellen.
-
-### 3.2 Maßstab und Kamera
-- `PageViewport` (`document.rs`) passt einen Rahmen, in den alle Seiten des Notizbuchs passen (`Notebook::fit_box`), ins Fenster ein. Daraus ergibt sich ein Maßstab (Bildschirmpixel je Einheit), der für alle Seiten gilt. Die aktuelle Seite liegt waagerecht zentriert und oben im Rahmen. Den Platz der Werkzeugleiste rechnet der Viewport heraus.
-- `ViewportState` (`viewport.rs`) ergänzt Zoom (25 % bis 1000 %) und Verschiebung (Pan). Beim Zoomen bleibt der Punkt unter dem Mauszeiger stehen:
-
-$$\vec{p}_{\text{neu}} = \vec{c} - (\vec{c} - \vec{p}_{\text{alt}}) \cdot \frac{z_{\text{neu}}}{z_{\text{alt}}}$$
-
-- Im Shader wird jeder Punkt mit `transform_scale` und `transform_offset` (aus `CameraUniforms`) direkt in Gerätekoordinaten umgerechnet.
-
-### 3.3 Durchgehende Ansicht
-Ob ein Notizbuch Seite für Seite, durchgehend oder als endlose Fläche angezeigt wird, steht in seinem Manifest (`layout`, siehe [`FILE_FORMAT.md`](FILE_FORMAT.md)).
-
-Alle Koordinaten beziehen sich auf die **aktuelle Seite**. `PageStack` (`viewport.rs`) legt die übrigen Seiten lückenlos darunter bzw. darüber (die Grenze zeichnet die Oberfläche als dunkle Linie), waagerecht zur aktuellen Seite zentriert. Jede sichtbare Nachbarseite wird mit einer eigenen Kamera gezeichnet, die um die Lage der Seite verschoben ist (höchstens 12 Nachbarseiten).
-
-Nach dem Scrollen wird die Seite in der Fenstermitte zur aktuellen Seite; die Kamera wird dabei so verschoben, dass sich das Bild nicht bewegt. Während eines Strichs, einer Auswahl, beim Ziehen des Lineals oder beim Schreiben von Text wird nicht gewechselt. Wer auf einer sichtbaren Nachbarseite zu zeichnen beginnt, wechselt zuerst auf diese Seite.
+### 2.5 Ruler
+If a stroke starts near a ruler edge (`ruler.rs`), all its points are projected onto that edge until the pen is lifted.
 
 ---
 
-### 3.4 Endlose Fläche
-Ein endloses Notizbuch hat eine einzige Seite von 10 × 10 m (`ENDLESS_PAGE_SIZE`). Damit bleibt alles wie bei jeder anderen Seite – Eingabe, Treffertests, Undo, Speichern –, nur der Rand ist praktisch unerreichbar. `PageViewport::calculate_endless` wählt Maßstab und Lage so, als läge eine DIN-A4-Seite am Startausschnitt (`ENDLESS_HOME`, ein A4-Rahmen in der Mitte); 100 % Zoom und „Ansicht zurücksetzen“ zeigen also diesen Rahmen. Bilder und Textfelder richten ihre Größe bzw. ihren Umbruch an DIN A4 aus (`Page::reference_size`, `Page::text_right_edge`).
+## 3. Coordinates, pages and view
 
-Beim Wechsel von und zu Seiten (`Notebook::make_endless`/`make_paged`) wird der Inhalt um `ENDLESS_HOME` verschoben und der Verlauf der Seite geleert. Zurück zu Seiten geht nur, solange alles im Startausschnitt liegt. Export und Bilder einer Auswahl rastern bzw. exportieren nur einen Ausschnitt (`Page::cropped`), beim Export auf das Musterraster gelegt (`Page::endless_export_bounds`).
+### 3.1 Page coordinates
+Everything is computed in page units: **10 units = 1 mm**. An A4 page is 2100 × 2970 units. Each page has its own size (`Page::size`): the default is A4 portrait; on PDF import, landscape pages get a width of 2970 units and a height according to the aspect ratio (`document::pdf_page_size`). New pages take over the size of the current one.
+
+### 3.2 Scale and camera
+- `PageViewport` (`document.rs`) fits a box that holds all pages of the notebook (`Notebook::fit_box`) into the window. This yields one scale (screen pixels per unit) that applies to all pages. The current page is centered horizontally and placed at the top of the box. The viewport subtracts the space taken by the toolbar.
+- `ViewportState` (`viewport.rs`) adds zoom (25 % to 1000 %) and panning. When zooming, the point under the mouse cursor stays in place:
+
+$$\vec{p}_{\text{new}} = \vec{c} - (\vec{c} - \vec{p}_{\text{old}}) \cdot \frac{z_{\text{new}}}{z_{\text{old}}}$$
+
+- In the shader, every point is converted directly to device coordinates with `transform_scale` and `transform_offset` (from `CameraUniforms`).
+
+### 3.3 Continuous view
+Whether a notebook is shown page by page, continuously or as an endless canvas is stored in its manifest (`layout`, see [`FILE_FORMAT.md`](FILE_FORMAT.md)).
+
+All coordinates refer to the **current page**. `PageStack` (`viewport.rs`) places the other pages seamlessly below and above it (the interface draws the boundary as a dark line), centered horizontally on the current page. Each visible neighboring page is drawn with its own camera, shifted by the page's position (at most 12 neighboring pages).
+
+After scrolling, the page in the middle of the window becomes the current page; the camera is shifted so that the picture does not move. There is no switch during a stroke, a selection, while dragging the ruler or while typing text. Starting to draw on a visible neighboring page switches to that page first.
+
+A quick finger swipe keeps gliding (`Fling` in `viewport.rs`): the speed is measured over the last 100 ms before the finger lifts and then decays exponentially. The scrollbar on the edge opposite the toolbar jumps directly to a position in the notebook.
+
+---
+
+### 3.4 Endless canvas
+An endless notebook has a single page of 10 × 10 m (`ENDLESS_PAGE_SIZE`). This keeps everything the same as with any other page – input, hit tests, undo, saving – only the edge is practically unreachable. `PageViewport::calculate_endless` chooses scale and position as if an A4 page lay at the starting area (`ENDLESS_HOME`, an A4 frame in the middle); 100 % zoom and "Reset view" therefore show this frame. Images and text boxes base their size and wrapping on A4 (`Page::reference_size`, `Page::text_right_edge`).
+
+When switching to and from pages (`Notebook::make_endless`/`make_paged`), the content is shifted by `ENDLESS_HOME` and the page's history is cleared. Switching back to pages is only possible while everything lies within the starting area. Export and images of a selection only rasterize or export a section (`Page::cropped`), aligned to the pattern grid on export (`Page::endless_export_bounds`).
 
 ## 4. Rendering
 
-Ein Frame besteht aus einem Render-Durchgang auf die Fensterfläche (`canvas.rs`):
+A frame consists of one render pass onto the window surface (`canvas.rs`):
 
-1. Für jede sichtbare Nachbarseite: Papier und Muster, Bilder/PDF-Seite/Text, Tinte.
-2. Für die aktuelle Seite: Papier, Muster (Karo, Linien, Punkte), Bildebene, gespeicherte Striche, Live-Strich.
-3. Die `egui`-Oberfläche: Werkzeugleiste, Menüs, Seitengrenzen, Auswahlrahmen und Griffe, Lineal, Textbearbeitung.
+1. For each visible neighboring page: paper and pattern, images/PDF page/text, ink.
+2. For the current page: paper, pattern (squares, lines, dots), image layer, stored strokes, live stroke.
+3. The `egui` interface: toolbar, menus, page boundaries, selection frame and handles, ruler, text editing.
 
-Jeder Strich ist ein eigener Draw-Call mit eigener Nummer im Stencil-Puffer: Ein Pixel, das der Strich schon gefärbt hat, wird kein zweites Mal gefärbt. So bleibt halbtransparente Tinte (Textmarker) gleichmäßig, auch wo sich der Strich selbst überlappt (Anfangskappe, Kehren, langsames Hin- und Herfahren); erst ein neuer Strich deckt stärker. Nach 255 Strichen setzt ein bildschirmfüllendes Dreieck den Stencil-Puffer zurück.
+Each stroke is its own draw call with its own number in the stencil buffer: a pixel the stroke has already colored is not colored a second time. This keeps semi-transparent ink (highlighter) even where the stroke overlaps itself (start cap, turns, slow back-and-forth); only a new stroke covers more strongly. After 255 strokes, a full-screen triangle resets the stencil buffer.
 
-### 4.1 Bildebene
-`image_layer.rs` zeichnet texturierte Vierecke unter der Tinte: importierte PDF-Seiten, eingefügte Bilder und Textfelder. Texturen werden beim ersten Bedarf geladen, bekommen Mipmaps und werden freigegeben, wenn mehr als 384 MB belegt sind.
-- **PDF-Seiten** rendert ein Hintergrund-Thread mit `hayro` (längste Kante 2560 Pixel, beim starken Hineinzoomen 5120 Pixel). Bis die schärfere Fassung fertig ist, bleibt die vorhandene sichtbar.
-- **Textfelder** werden mit `ab_glyph` gerastert, in einer Auflösung, die dem Zoom folgt (in Vierteln einer Zweierpotenz, höchstens 8 Pixel je Einheit). Der Texturschlüssel enthält einen Hash von Inhalt, Schrift und Farbe; jede Änderung erzeugt eine neue Textur.
+### 4.1 Image layer
+`image_layer.rs` draws textured quads below the ink: imported PDF pages, inserted images and text boxes. Textures are loaded when first needed, get mipmaps, and are released when more than 384 MB are in use.
+- **PDF pages** are rendered by a background thread with `hayro` (longest edge 2560 pixels, 5120 pixels when zoomed in strongly). Until the sharper version is ready, the existing one stays visible.
+- **Text boxes** are rasterized with `ab_glyph` at a resolution that follows the zoom (in quarters of a power of two, at most 8 pixels per unit). The texture key contains a hash of content, font and color; every change creates a new texture.
 
-### 4.2 Papier- und Musterfarben
-Papierfarbe (`PaperTheme`) und Musterfarbe (`PatternColor`) stehen in `background.rs`; sie sind linear angegeben und werden im Shader nach sRGB umgerechnet. Tintenfarben (Striche, Text) sind sRGB-Werte – dieselben Zahlen landen im PDF und in den Farbpunkten der Oberfläche. Gezeichnet wird ohne sRGB-Umrechnung der GPU (`render_format`), Texturen sind `Rgba8Unorm`: So wird halbtransparente Tinte wie im PDF in sRGB gemischt und sieht am Bildschirm genauso aus wie im Export. Auf dunklem Papier kann der Shader dunkle Tinte aufhellen (`ink_params` in `CameraUniforms`), gespeichert werden immer die Originalfarben.
-
----
-
-## 5. Objekte auf der Seite
-
-Alles auf einer Seite ist ein `Stroke` (`document.rs`):
-- **Tinte:** Abtastpunkte, Werkzeug (Stift, Textmarker, Form), Breite, Farbe; die Dreiecke werden beim Laden aus den Punkten neu berechnet.
-- **Formen:** zusätzlich eine `RecognizedShape` (siehe Abschnitt 6).
-- **Bilder und Textfelder:** vier Eckpunkte (oben links, oben rechts, unten rechts, unten links) plus Verweis auf die Bilddatei bzw. ein `TextBox`. Weil die Ecken normale Punkte sind, wirken Verschieben, Drehen und Skalieren der Auswahl ohne Sonderfälle.
-
-### 5.1 Textfelder
-`text.rs` setzt den Text selbst: Zeilenumbruch an Leerzeichen (zu lange Wörter zeichenweise), Unterschneidung, Tabulator = 4 Leerzeichen. Bildschirm-Textur, PDF-Export und Bearbeitung verwenden dieselben Schriften (Ubuntu Light und Hack aus den eingebauten `egui`-Schriften) und denselben Umbruch. Bearbeitet wird in einem `egui`-Textfeld an der Stelle des Felds; danach wird die Höhe des Felds an den Text angepasst, Lage, Drehung und Skalierung bleiben.
-
-### 5.2 Rückgängig
-Jede Seite hat einen eigenen Verlauf (`history.rs`): Hinzufügen, Entfernen, Ersetzen und Ändern von Strichen. Verschieben/Drehen/Skalieren einer Auswahl, ein Radierzug mit dem Teilstrich-Radierer und eine Textbearbeitung sind jeweils ein Schritt.
-
-**Platz schaffen** (`Notebook::make_space`) betrifft mehrere Seiten: Die Seite, auf der angesetzt wurde, und die folgenden bis vor die nächste PDF-Seite gelten als durchgehende Spalte. Alles unterhalb der Ansatzhöhe rutscht um denselben Betrag; ein Objekt, das über ein Seitenende ragen würde, beginnt 10 mm unter dem Anfang der nächsten Seite, und alles danach rutscht entsprechend weiter. Fehlende Seiten werden eingefügt. Der Schritt (`SpaceShift`: jeder verschobene Strich vorher/nachher mit Seite) landet im Verlauf der Seite, auf der angesetzt wurde; `Notebook::undo`/`redo` buchen ihn über alle Seiten zurück (später geänderte Striche bleiben unberührt) und entfernen dafür angelegte, leer gebliebene Seiten wieder.
+### 4.2 Paper and pattern colors
+Paper color (`PaperTheme`) and pattern color (`PatternColor`) are defined in `background.rs`; they are given in linear space and converted to sRGB in the shader. Ink colors (strokes, text) are sRGB values – the same numbers end up in the PDF and in the color dots of the interface. Drawing happens without the GPU's sRGB conversion (`render_format`), and textures are `Rgba8Unorm`: this way semi-transparent ink is blended in sRGB like in the PDF and looks the same on screen as in the export. On dark paper the shader can brighten dark ink (`ink_params` in `CameraUniforms`); the original colors are always what gets saved.
 
 ---
 
-## 6. Formerkennung
+## 5. Objects on the page
 
-`geometry.rs` erkennt Formen rein geometrisch, ohne Machine Learning. Zuerst wird auf ein Achsenkreuz geprüft (alle Teilstücke liegen auf einer waagerechten und einer senkrechten Linie, beide reichen auf beiden Seiten über den Schnittpunkt hinaus). Geschlossene Formen (Kreis, Ellipse, Dreieck, Rechteck, Raute) treten gegeneinander an; gewählt wird die, deren Umriss am besten zu den Punkten passt. Danach folgen Vielecke, Pfeile, Koordinatensysteme und Linien. Übernommen wird eine Form nur, wenn der Strich im Mittel höchstens 4 % seiner Diagonale von ihr abweicht – sonst bleibt er Handschrift.
+Everything on a page is a `Stroke` (`document.rs`):
+- **Ink:** sample points, tool (pen, highlighter, shape), width, color; the triangles are recomputed from the points when loading.
+- **Shapes:** additionally a `RecognizedShape` (see section 6).
+- **Images and text boxes:** four corner points (top left, top right, bottom right, bottom left) plus a reference to the image file or a `TextBox`. Because the corners are ordinary points, moving, rotating and scaling a selection work without special cases.
 
-- **Linie:** Verhältnis von Abstand Anfang–Ende zur Strichlänge über 0,92.
-- **Kreis, Ellipse:** Kreis- bzw. Ellipsen-Fit über die Punkte.
-- **Rechteck, Dreieck, Raute, Vieleck, Pfeil:** Analyse der mit Douglas-Peucker vereinfachten Kontur (Eckenzahl, Winkel, Seitenverhältnisse).
-- **Koordinatensystem:** zwei etwa rechtwinklige Achsen; der Winkel wird auf 90° gesetzt.
-- **Achsenkreuz:** ein „+“ in einem Zug; die Achsen werden waagerecht und senkrecht ausgerichtet und bekommen an allen vier Enden Pfeilspitzen.
-- **Oktaeder:** Skizze einer Doppelpyramide als 3D-Kantenmodell; nur, wenn kein einfacher Umriss passt.
+### 5.1 Text boxes
+`text.rs` lays out the text itself: line wrapping at spaces (overlong words character by character), kerning, tab = 4 spaces. The screen texture, the PDF export and editing use the same fonts (Ubuntu Light and Hack from the fonts built into `egui`) and the same wrapping. Editing happens in an `egui` text field at the position of the box; afterwards the box height is adapted to the text, while position, rotation and scaling stay.
 
-**Halten am Strichende:** Bleibt der Stift über 400 ms innerhalb von 3 Pixeln ruhig, wird die erkannte Form schon vor dem Absetzen angezeigt und beim Absetzen übernommen. Mit dem Formen-Werkzeug wird jeder Strich beim Absetzen geprüft.
+### 5.2 Undo
+Each page has its own history (`history.rs`): adding, removing, replacing and modifying strokes. Moving/rotating/scaling a selection, one stroke of the partial-stroke eraser and one text edit are each a single step.
+
+**Make space** (`Notebook::make_space`) affects several pages: the page where you started and the following ones up to the next PDF page count as one continuous column. Everything below the starting height moves by the same amount; an object that would extend past the end of a page starts 10 mm below the top of the next page, and everything after it moves further accordingly. Missing pages are inserted. The step (`SpaceShift`: every moved stroke before/after, with its page) goes into the history of the page where you started; `Notebook::undo`/`redo` apply it back across all pages (strokes changed later stay untouched) and remove pages that were created for it and stayed empty.
 
 ---
 
-## 7. Speichern
+## 6. Shape recognition
+
+`geometry.rs` recognizes shapes purely geometrically, without machine learning. It first checks for an axis cross (all segments lie on one horizontal and one vertical line, both extending past the intersection on both sides). Closed shapes (circle, ellipse, triangle, rectangle, rhombus) compete with each other; the one whose outline fits the points best wins. Then polygons, arrows, coordinate systems and lines follow. A shape is only accepted if the stroke deviates from it by at most 4 % of its diagonal on average – otherwise it stays handwriting.
+
+- **Line:** ratio of start–end distance to stroke length above 0.92.
+- **Circle, ellipse:** circle or ellipse fit through the points.
+- **Rectangle, triangle, rhombus, polygon, arrow:** analysis of the contour simplified with Douglas-Peucker (number of corners, angles, aspect ratios).
+- **Coordinate system:** two roughly perpendicular axes; the angle is set to 90°.
+- **Axis cross:** a "+" in one stroke; the axes are aligned horizontally and vertically and get arrowheads at all four ends.
+- **Octahedron:** sketch of a double pyramid as a 3D edge model; only if no simple outline fits.
+
+**Holding at the end of a stroke:** If the pen stays within 3 pixels for more than 400 ms, the recognized shape is shown before lifting and taken over when the pen is lifted. It uses the width of the selected pen or highlighter; a snapped highlighter stays a highlighter. With the shape tool, every stroke is checked when the pen is lifted.
+
+---
+
+## 7. Saving
 
 ```
-[Änderung]
+[Change]
     │  mark_page_dirty / mark_manifest_dirty
     ▼
-[AutosaveController]  ── 1,5 s nach der letzten Änderung, spätestens nach 10 s ──►  [Autosave-Thread]
+[AutosaveController]  ── 1.5 s after the last change, at the latest after 10 s ──►  [Autosave thread]
                                                                                         │
                                                                                         ▼
-                                                                 [temporäre Datei schreiben + fsync]
+                                                                 [write temporary file + fsync]
                                                                                         │
                                                                                         ▼
-                                                                 [rename über die alte Datei, Ordner-fsync]
+                                                                 [rename over the old file, folder fsync]
 ```
 
-- Der Haupt-Thread schreibt nie selbst; er übergibt fertige Seitendaten an den Autosave-Thread.
-- Schlägt ein Schreibvorgang fehl, wird die Seite mit wachsendem Abstand (1 s bis 30 s) erneut versucht; der Status wird rot.
-- `flush()` schreibt alles Ausstehende und wartet darauf. Es läuft bei `Strg + S`, beim Wechsel des Notizbuchs und beim Beenden. Schlägt es beim Beenden fehl, bleibt die App offen und bietet Wiederholen oder einen Notfall-Export der ungespeicherten Seiten an (`~/.local/share/ink-notes/recovery/`).
-- Seiten werden erst beim Anzeigen geladen (Lazy Loading); Titel, Hintergrund und Größe stehen im Manifest, damit Seitenübersicht und durchgehende Ansicht sie vorher kennen.
-- Ein zweites Fenster mit demselben Notizbuch öffnet es schreibgeschützt (Sperrdatei).
+- The main thread never writes itself; it hands finished page data to the autosave thread.
+- If a write fails, the page is retried with increasing delay (1 s to 30 s); the status turns red.
+- `flush()` writes everything pending and waits for it. It runs on `Ctrl + S`, when switching notebooks and when quitting. If it fails when quitting, the app stays open and offers to retry or to make an emergency export of the unsaved pages (`~/.local/share/ink-notes/recovery/`).
+- Pages are only loaded when shown (lazy loading); title, background and size are in the manifest, so the page overview and the continuous view know them in advance.
+- A second window with the same notebook opens it read-only (lock file).
 
 ---
 
 ## 8. Export
 
-`export.rs` erzeugt das PDF mit `printpdf`. Jede Seite bekommt ihre eigene Größe und diese Ebenen:
+`export.rs` creates the PDF with `printpdf`. Each page gets its own size and these layers:
 
-1. **Background:** Karo, Linien oder Punkte in der gewählten Musterfarbe (immer auf weißem Papier).
-2. **PDF** (nur im Notfall): importierte PDF-Seite als Bild, falls sie sich nicht als Vektor übernehmen lässt.
-3. **Images:** eingefügte Bilder (höchstens 300 dpi).
-4. **Text:** Textfelder als echter Text mit eingebetteter Schrift (durchsuchbar, kopierbar). Jedes Feld liegt in einem eigenen Koordinatensystem, das eine Transformationsmatrix auf seine Ecken abbildet.
-5. **Ink:** Striche als gefüllte Polygone, Formen als Pfade. Halbtransparente Striche (Textmarker) bekommen einen Grafikzustand mit Deckkraft (`ca`/`CA`); printpdf kann solche Zustände nicht anlegen, deshalb trägt `add_alpha_states` sie nach dem Speichern mit `lopdf` in die Seitenressourcen ein. Jeder Strich ist ein einziger Pfad und deckt sich daher nicht selbst doppelt.
+1. **Background:** squares, lines or dots in the chosen pattern color (always on white paper).
+2. **PDF** (fallback only): imported PDF page as an image, if it cannot be taken over as vectors.
+3. **Images:** inserted images (at most 300 dpi).
+4. **Text:** text boxes as real text with embedded font (searchable, copyable). Each box lives in its own coordinate system that a transformation matrix maps onto its corners.
+5. **Ink:** strokes as filled polygons, shapes as paths. Semi-transparent strokes (highlighter) get a graphics state with opacity (`ca`/`CA`); printpdf cannot create such states, so `add_alpha_states` adds them to the page resources with `lopdf` after saving. Each stroke is a single path and therefore does not cover itself twice.
 
-Importierte PDF-Seiten werden anschließend als Form-XObject unter die Seite gelegt (`pdf_merge.rs`), bleiben also Vektorgrafik. Seitentitel werden zu Lesezeichen.
+Imported PDF pages are then placed under the page as a form XObject (`pdf_merge.rs`), so they stay vector graphics. Page titles become bookmarks.
 
-PNG und SVG einer Seite (`page_export.rs`) entstehen aus diesem PDF: `hayro` rastert es bzw. wandelt es in SVG um. So sehen alle Exporte gleich aus.
+PNG and SVG of a page (`page_export.rs`) are created from this PDF: `hayro` rasterizes it or converts it to SVG. This way all exports look the same.
 
 ---
 
 ## 9. Updates
 
-`updater.rs` fragt die Gitea-Releases ab, vergleicht die Version (SemVer) und lädt auf Wunsch das passende Paket. Vor der Installation prüft er die Minisign-Signatur von `SHA256SUMS.txt` gegen den eingebauten Schlüssel und danach die SHA-256-Prüfsumme des Pakets. Ein AppImage wird per `rename` ersetzt; ein `.deb`-Paket wird mit `xdg-open` an die Softwareinstallation des Systems übergeben. Details im README unter „Sicherheit der Updates“.
+`updater.rs` queries the Gitea releases, compares the version (SemVer) and downloads the matching package on request. Before installing, it verifies the Minisign signature of `SHA256SUMS.txt` against the built-in key and then the SHA-256 checksum of the package. An AppImage is replaced via `rename`; a `.deb` package is handed to the system's software installer with `xdg-open`. Details in the [README](../README.md#update-security) under "Update security".

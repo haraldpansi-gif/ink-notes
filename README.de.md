@@ -181,7 +181,7 @@ src/
 └── ui.rs           # Oberfläche (egui): Werkzeugleiste, Menüs, Dialoge
 ```
 
-Mehr dazu in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md), das Speicherformat steht in [`docs/FILE_FORMAT.md`](docs/FILE_FORMAT.md).
+Mehr dazu in [`docs/ARCHITECTURE.de.md`](docs/ARCHITECTURE.de.md), das Speicherformat steht in [`docs/FILE_FORMAT.de.md`](docs/FILE_FORMAT.de.md).
 
 ---
 
@@ -244,7 +244,7 @@ Bleibt ein Job auf „Waiting to run“ stehen: Ist der Runner online (*Einstell
 
 ## Mitmachen
 
-Fehlermeldungen, Ideen und Beiträge sind willkommen – am liebsten als [Issue auf Gitea](https://gitea.pansi.eu/harald/ink-notes/issues); [GitHub](https://github.com/haraldpansi-gif/ink-notes) ist ein Spiegel. Details in [CONTRIBUTING.md](CONTRIBUTING.md), Sicherheitslücken bitte vertraulich wie in [SECURITY.md](SECURITY.md) beschrieben. Es gilt der [Code of Conduct](CODE_OF_CONDUCT.md).
+Fehlermeldungen, Ideen und Beiträge sind willkommen – am liebsten als [Issue auf Gitea](https://gitea.pansi.eu/harald/ink-notes/issues); [GitHub](https://github.com/haraldpansi-gif/ink-notes) ist ein Spiegel. Details in [CONTRIBUTING.de.md](CONTRIBUTING.de.md), Sicherheitslücken bitte vertraulich wie in [SECURITY.de.md](SECURITY.de.md) beschrieben. Es gilt der [Code of Conduct](CODE_OF_CONDUCT.md).
 
 ---
 
