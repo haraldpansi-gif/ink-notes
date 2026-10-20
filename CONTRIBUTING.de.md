@@ -27,7 +27,7 @@ Das Hauptrepository liegt auf **Gitea**: <https://gitea.pansi.eu/harald/ink-note
    ```
 3. Neue Funktionen und behobene Fehler bekommen einen Test, wo das sinnvoll geht.
 4. Änderungen am Dateiformat bitte in [docs/FILE_FORMAT.de.md](docs/FILE_FORMAT.de.md) nachtragen; ältere Notizbücher müssen weiter lesbar bleiben.
-5. Commit-Nachrichten im Stil von [Conventional Commits](https://www.conventionalcommits.org/), z. B. `fix: …`, `feat: …`, `perf: …`, `docs: …`; ein Bezug auf ein Issue als `(Issue #28)`.
+5. Commit-Nachrichten im Stil von [Conventional Commits](https://www.conventionalcommits.org/), z. B. `fix: …`, `feat: …`, `perf: …`, `docs: …`; ein Bezug auf ein Issue als `(Issue #28)`. Neue Code-Kommentare werden auf Englisch geschrieben (älterer Code hat noch deutsche Kommentare); Commit-Nachrichten auf Deutsch.
 6. Texte der Oberfläche gibt es auf Deutsch und Englisch: Neue Texte mit `t!("…")` schreiben und die englische Übersetzung unter `src/i18n/` ergänzen.
 
 Mit dem Einreichen stimmst du zu, dass dein Beitrag unter der [MIT-Lizenz](LICENSE) des Projekts steht. Für den Umgang miteinander gilt der [Code of Conduct](CODE_OF_CONDUCT.md).

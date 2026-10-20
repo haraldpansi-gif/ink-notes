@@ -1,71 +1,71 @@
 ## ink-notes {{TAG_NAME}}
 
-Notizbuch-App für Stift, Touch und Maus unter Linux (getestet mit Zorin OS 18 / Ubuntu 24.04).
+Notebook app for pen, touch and mouse on Linux (tested on Zorin OS 18 / Ubuntu 24.04).
 
 ### Highlights:
-- **Fehlerbehebung Textfelder**: Strg+Plus/Minus vergrößert nur noch das Blatt, nicht mehr zusätzlich die Oberfläche – dadurch sprang Text beim Verlassen eines Textfelds an eine andere Stelle
-- **Fehlerbehebungen Schreiben**: Ein eingerasteter Textmarker behält seine Breite; Spitzen (etwa einer „1“ oder von Hochzahlen) werden rund statt abgeschnitten gezeichnet, und der Strich springt beim Absetzen nicht mehr. Wischen mit dem Finger gleitet zuverlässiger nach
-- **Schneller scrollen**: Schnelles Wischen mit dem Finger gleitet nach; in der durchgehenden Ansicht springt eine Bildlaufleiste (gegenüber der Werkzeugleiste, mit Seitenzahl beim Ziehen) durch lange Notizbücher und PDFs; das Mausrad scrollt doppelt so weit. Neue Notizbücher sind durchgehend, feste Seiten gibt es weiter im ☰-Menü
-- **Fehlerbehebung Auswahl**: Verschieben, Drehen und Skalieren großer Auswahlen ist wieder flüssig und lastet den Prozessor nicht mehr aus (seit 0.27 wurde die Auswahl bei jedem Bild mehrfach kopiert). Auf der endlosen Fläche scrollt das Mausrad (Strg+Mausrad zoomt)
-- **Endlose Fläche**: Neue Seitenanordnung „♾ Endlos“ – eine Fläche ohne Rand, auf der man in alle Richtungen schreibt, verschiebt und zoomt. Wählbar beim Anlegen oder im ☰-Menü (bei Notizbüchern mit einer Seite); der PDF-Export enthält nur den beschriebenen Bereich. Neue Dateiformatversion 9: ältere App-Versionen öffnen Notizbücher dieser Version nicht mehr
-- **Seitenanordnung je Notizbuch**: Beim Anlegen wählbar – „Feste Seiten“ (Vorgabe) oder „Durchgehend“ –, später im ☰-Menü umschaltbar. Bestehende Notizbücher behalten die bisherige Einstellung
-- **Stifte in ihrer Farbe**: Die Stifte in der Werkzeugleiste erscheinen als Stifte in ihrer eigenen Farbe statt als dünner Strich und sind so auf einen Blick zu unterscheiden
-- **Bilder ohne Verzerren skalieren**: Beim Auswahlwerkzeug schaltet ein Schloss unter den Stiftfarben zwischen gleichmäßigem (🔒) und freiem Skalieren (🔓) um. Bilder sind zu Beginn gesperrt, Striche und Formen frei; am Rechner sperrt zusätzlich die Umschalttaste
-- **Flüssigeres Scrollen in großen PDFs**: Neu gerenderte PDF-Seiten halten die Anzeige nicht mehr an, und Seiten, über die man schnell hinwegscrollt, werden übersprungen statt der Reihe nach gerendert
-- **Screenshots für Flathub**: Die App-Beschreibung (Metainfo) zeigt jetzt drei Screenshots; an der App selbst ändert sich nichts
-- **Auswählen mit dem Finger**: Im Auswahlwerkzeug wählt und verschiebt ein Finger Objekte (auf leerer Fläche scrollt er weiter); Text und Platz schaffen gehen ebenfalls mit dem Finger
-- **Flatpak**: Manifest unter packaging/flatpak (Vorbereitung für Flathub); Exporte landen im Dokumente-Ordner aus den Benutzerordnern (z. B. ~/Dokumente)
-- **Englische Oberfläche / English interface**: ink-notes folgt der Systemsprache (Deutsch oder Englisch); umstellen im ☰-Menü unter „Sprache / Language“
-- **Halten zum Einrasten**: verträgt jetzt das leichte Zittern eines ruhenden Stifts, damit Formen auch im normalen Stift-Modus einrasten
-- **Achsenkreuz aus zwei Strichen**: Eine waagerechte und eine senkrechte Gerade über Kreuz zeichnen – die zweite mit Halten oder dem Formen-Werkzeug – und beide werden zum Achsenkreuz mit Pfeilspitzen an allen vier Enden; Rückgängig stellt die erste Gerade wieder her
-- **Bildschirmtastatur**: Unter GNOME/Zorin (Wayland) erscheint die Bildschirmtastatur jetzt beim Antippen eines Namensfelds – mit Finger oder Stift; Tippen und Rücktaste funktionieren. Außerdem geht der erste Fingertipp nach Mausbenutzung nicht mehr verloren
-- **App-Symbol**: Das Fenster meldet sich als eu.pansi.ink-notes – Dock und Taskleiste zeigen das ink-notes-Symbol statt eines allgemeinen Symbols (unter X11 auch als Fenstersymbol)
-- **Platz schaffen**: Neues Werkzeug ↕ – aufs Blatt tippen und nach unten ziehen, alles darunter rutscht mit, auch auf den folgenden Seiten (über das Seitenende hinaus geht es auf der nächsten Seite weiter, fehlende Seiten werden angehängt); nach oben ziehen schließt leeren Platz; ein Schritt für Rückgängig
-- **Achsenkreuz**: Ein „+“ in einem Zug (mit Halten oder dem Formen-Werkzeug) wird zum Achsenkreuz mit Pfeilspitzen an allen vier Enden; auch im PDF-/Bildexport
-- **Fehlerbehebung Stift**: Das erste Antippen mit dem Stift trifft jetzt – Knöpfe und Notizbücher reagieren sofort statt erst beim zweiten Tippen; Striche beginnen nicht mehr mit einer Linie von der vorherigen Stiftposition
-- **Tasten am Stift belegen**: Im ☰-Menü unter Eingabe jede Stifttaste mit Radieren, Auswählen, Textmarker, Stift oder Nichts belegen (gilt, solange die Taste gedrückt ist); Tasten erscheinen nach dem ersten Drücken und leuchten beim Drücken grün
-- **Ordner verschieben**: Ordner lassen sich jetzt wie Notizbücher mit 📂 samt Inhalt in andere Ordner oder auf die oberste Ebene verschieben
-- **Ordner für Notizbücher**: Beliebig verschachtelte Ordner (z. B. 3. Semester › Mathe) im Dokumenten-Manager anlegen, umbenennen und löschen, Notizbücher mit 📂 verschieben; neue Notizbücher landen im geöffneten Ordner. Die Notizbuch-Dateien bleiben unverändert (Zuordnung in library.json)
-- **Einfügen per Finger**: Lange (½ s) mit dem Finger aufs Blatt drücken öffnet ein Menü „Einfügen“ – Screenshot, kopierter Text oder kopierte Objekte landen genau an dieser Stelle (wie in Rnote)
-- **Eigene Farben**: Jede Farbe der Werkzeugleiste (Stifte, Textmarker, Text) lässt sich anpassen – erneut antippen, Vorgabe oder mit 🎨 frei wählen; die Leiste merkt sich die Farben. Farben am Bildschirm wie im PDF-/Bildexport (Schwarz ist schwarz, Textmarker mischt wie im PDF); Karos und Linien im PDF so hell wie am Bildschirm
-- **Beta-Feedback II**: Vier Stifte mit eigener Farbe und Stärke, die sich Änderungen merken; Textmarker wird innerhalb eines Strichs nicht dunkler und ist jetzt auch im PDF-/PNG-/SVG-Export durchsichtig; Seiten lückenlos untereinander mit Trennlinie; neue Seite per ➕ in der Werkzeugleiste; Seite löschen im ☰-Menü (wiederherstellbar); Koordinatensystem ohne Loch am Ursprung
-- **Fehlerbehebungen**: Umbenennen und Löschen in der Notizbuchverwaltung reagieren wieder; Karos, Linien und Punkte werden pro Pixel berechnet und liegen in jedem Zoom gleichmäßig (mindestens ein Pixel breit, kantengeglättet)
-- **Strichqualität**: Kleine Schleifen wie in „o“, „a“ oder „e“ bleiben rund (der fertige Strich entsteht aus den ungefilterten Stiftpunkten); Strichkanten werden kantengeglättet (4× Multisampling), runde Strichenden sind feiner unterteilt
-- **Musterfarbe**: Karos, Linien und Punkte in hell, mittel, kräftig, blau oder grün (☰-Menü, gilt auch im Export); Punkte des Punktrasters am Bildschirm so groß wie im Export (0,4 mm). README und Dokumentation überarbeitet
-- **Beta-Feedback**: Querformat-PDFs (z. B. PowerPoint-Folien) bekommen Querformat-Seiten ohne leeren Streifen (Dateiformat-Version 8); neue Seiten direkt nach der aktuellen einfügen; Auswahlwerkzeug funktioniert mit dem Stift; Zoom bis 1000 % mit schärfer nachgerenderten PDF-Seiten
-- **Text-Werkzeug**: Mit T ins Blatt tippen und schreiben – normale oder Code-Schrift, 8–36 pt, Zeilenumbruch am Feldrand; Textfelder verschieben, drehen und skalieren wie Bilder; im PDF echter, durchsuchbarer Text; kopierter Text wird mit Strg+V zum Textfeld (Dateiformat-Version 7)
-- **Durchgehendes Scrollen**: Seiten untereinander mit Mausrad, Finger oder Touchpad scrollen (Strg+Mausrad zoomt); Schreiben im unteren Fünftel der letzten Seite hängt automatisch eine neue an; abschaltbar unter ☰ → Ansicht
-- **Virtuelles Lineal**: Ein- und ausblenden mit L oder über die Werkzeugleiste; verschieben, am Griff drehen (rastet bei 15° ein); Striche entlang einer Kante werden exakt gerade – mit Stift, Textmarker und Formwerkzeug
-- **Teilstrich-Radierer**: Nur den überstrichenen Teil eines Strichs entfernen – ein Radierzug ist ein Undo-Schritt
-- **Export & Zwischenablage**: Aktuelle Seite als PNG (auch transparent) oder SVG; Strg+C legt die Auswahl zusätzlich als Bild in die Zwischenablage für Chat, Mail oder Office
-- **Seitentitel & Inhaltsverzeichnis**: Seiten benennen, Inhaltsansicht in der Seitenübersicht, Titel werden zu PDF-Lesezeichen (Dateiformat-Version 6)
-- **PDF importieren & annotieren**: Vorlesungsfolien, Übungsblätter oder Formulare als neues Notizbuch öffnen (☰-Menü oder Drag & Drop), darauf schreiben und markieren; beim Export liegen die Originalseiten verlustfrei als Vektor unter den Notizen (Dateiformat-Version 5: ältere Versionen öffnen solche Notizbücher nicht)
-- **Bilder einfügen**: Screenshots per Strg+V, Bilddateien über die eingebaute Dateiauswahl (Strg+I) oder per Drag & Drop; verschieben, drehen, skalieren und darauf schreiben – auch im PDF-Export (Dateiformat-Version 4: ältere Versionen öffnen solche Notizbücher nicht)
-- **Dunkelmodus & Papierfarben**: Weiß, Creme, Dunkelgrau oder Schwarz; auf dunklem Papier werden dunkle Stiftfarben automatisch aufgehellt (nur Anzeige – Dateien und PDF-Export bleiben unverändert)
-- **Nur Textmarker radieren**: Markierungen korrigieren, ohne die Handschrift darunter zu löschen – auch mit Stiftrückseite und Seitentaste
-- **Einstellbare Druckkurve**: Kennlinie weich bis hart und Mindestdruck mit Vorschau, zum Anpassen an den eigenen Stift
-- **Neue Formen**: Ellipsen sowie in einem Zug gezeichnete Pfeile und Doppelpfeile werden erkannt (Dateiformat-Version 3: ältere Versionen öffnen solche Notizbücher nicht)
-- **Stabiler Start**: Kein Absturz mehr, wenn die Grafikkarte nicht nutzbar ist (z. B. fehlende Rechte auf /dev/dri); Software-Renderer als Ausweichlösung und verständliche Fehlermeldung
-- **WSL (WSLg)**: Läuft unter WSL automatisch über X11 statt Wayland, da WSLg die Wayland-Verbindung abbricht; übersteuerbar mit `INK_NOTES_DISPLAY=x11|wayland`
-- **Wichtige Fehlerbehebung**: Nach einem Neustart auf einer späteren Seite konnte Weiterschreiben den bisherigen Inhalt dieser Seite überschreiben (betrifft v0.2.3 – v0.3.2)
-- **Neue Werkzeugleiste**: Schmale senkrechte Leiste mit Symbol-Knöpfen, links oder rechts andockbar; selten genutzte Funktionen im ☰-Menü, das Blatt wird daneben zentriert
-- **Einheitliche Dialoge**: Deckende Fenster ohne doppelte Titel, Seitenauswahl mit Vorschaubildern, größere Bedienelemente in allen Popovern
-- **UI per Stift und Touch bedienbar**: Werkzeugleiste, Popover und Dialoge reagieren jetzt auch auf Stift und Finger, auch bei Display-Skalierung
-- **Aktive Stylus-Unterstützung (Lazarite / MPP / AES)**: Stifteingabe über das Tablet-Protokoll von Wayland bzw. X11, mit Druckstärke
-- **Touchscreen Multi-Touch**: Zoomen mit zwei Fingern, Verschieben mit einem; Zeichnen mit dem Finger zuschaltbar
-- **Zwei-Stufen-Inking-Modell**: Glättung während des Schreibens (1€-Filter), beim Absetzen Nachbearbeitung mit Ecken-Erhaltung
-- **Geometrie- und Formerkennung**: Geraden, Pfeile & Doppelpfeile, Rechtecke, Kreise, Ellipsen, Dreiecke, Rauten, Vielecke & Koordinatensysteme mit spitzen Pfeilspitzen (Draw-and-Hold); Freiformen bleiben unverändert
-- **Mehrere Notizbücher**: Anlegen, umbenennen, löschen (mit Papierkorb); automatisches Speichern im Hintergrund
-- **Datensicherheit**: Versioniertes Dateiformat mit Migration, beschädigte Seiten werden beiseitegelegt statt überschrieben, Schutz vor gleichzeitigem Öffnen, atomares Speichern
-- **In-App Updater**: Prüft auf neue Versionen auf Gitea und installiert sie auf Wunsch – nur mit gültiger Minisign-Signatur und über HTTPS
-- **PDF-Export**: Striche und Formen als Vektoren, für Druck und Weitergabe
+- **Text box fix**: Ctrl+Plus/Minus now only zooms the page, no longer the whole interface as well – that made text jump to another place when leaving a text box
+- **Writing fixes**: A snapped highlighter keeps its width; tips (e.g. of a "1" or of exponents) are drawn round instead of cut off, and the stroke no longer jumps when the pen lifts. Finger swipes glide more reliably
+- **Faster scrolling**: A quick finger swipe keeps gliding; in the continuous view a scrollbar (opposite the toolbar, with the page number while dragging) jumps through long notebooks and PDFs; the mouse wheel scrolls twice as far. New notebooks are continuous; fixed pages are still available in the ☰ menu
+- **Selection fix**: Moving, rotating and scaling large selections is smooth again and no longer maxes out the CPU (since 0.27 the selection was copied several times per frame). On the endless canvas the mouse wheel scrolls (Ctrl+wheel zooms)
+- **Endless canvas**: New page arrangement "♾ Endless" – a borderless canvas to write, pan and zoom in every direction. Selectable when creating a notebook or in the ☰ menu (for notebooks with one page); the PDF export only contains the used area. New file format version 9: older app versions no longer open notebooks of this version
+- **Page arrangement per notebook**: Selectable when creating a notebook – "Fixed pages" (default) or "Continuous" – and switchable later in the ☰ menu. Existing notebooks keep their previous setting
+- **Pens in their color**: The pens in the toolbar appear as pens in their own color instead of a thin stroke, so they can be told apart at a glance
+- **Scale images without distortion**: With the selection tool, a lock below the pen colors switches between uniform (🔒) and free scaling (🔓). Images start locked, strokes and shapes free; on a computer, the Shift key also locks
+- **Smoother scrolling in large PDFs**: Newly rendered PDF pages no longer pause the display, and pages you scroll past quickly are skipped instead of rendered one after another
+- **Screenshots for Flathub**: The app description (metainfo) now shows three screenshots; nothing changes in the app itself
+- **Selecting with a finger**: In the selection tool, a finger selects and moves objects (on empty space it keeps scrolling); text and make space work with a finger too
+- **Flatpak**: Manifest under packaging/flatpak (preparation for Flathub); exports go to the Documents folder from the user directories (e.g. ~/Documents)
+- **English interface**: ink-notes follows the system language (German or English); switch it in the ☰ menu under "Sprache / Language"
+- **Hold to snap**: now tolerates the slight jitter of a resting pen, so shapes also snap in the normal pen mode
+- **Axis cross from two strokes**: Draw a horizontal and a vertical line crossing each other – the second one with hold or the shape tool – and both become an axis cross with arrowheads at all four ends; undo restores the first line
+- **On-screen keyboard**: On GNOME/Zorin (Wayland) the on-screen keyboard now appears when tapping a name field – with finger or pen; typing and backspace work. Also, the first finger tap after using the mouse is no longer lost
+- **App icon**: The window identifies itself as eu.pansi.ink-notes – the dock and taskbar show the ink-notes icon instead of a generic one (on X11 also as window icon)
+- **Make space**: New tool ↕ – tap the page and drag down, everything below moves along, also on the following pages (past the end of a page it continues on the next one, missing pages are appended); dragging up closes empty space; one step for undo
+- **Axis cross**: A "+" in one stroke (with hold or the shape tool) becomes an axis cross with arrowheads at all four ends; also in PDF/image export
+- **Pen fix**: The first tap with the pen now registers – buttons and notebooks react immediately instead of on the second tap; strokes no longer start with a line from the previous pen position
+- **Assign pen buttons**: In the ☰ menu under input, assign each pen button to erase, select, highlighter, pen or nothing (active while the button is held); buttons appear after the first press and light up green when pressed
+- **Move folders**: Folders can now be moved with 📂 including their content into other folders or to the top level, like notebooks
+- **Folders for notebooks**: Create, rename and delete nested folders (e.g. Semester 3 › Math) in the document manager and move notebooks with 📂; new notebooks are created in the open folder. The notebook files stay unchanged (assignment in library.json)
+- **Paste with a finger**: Pressing the page with a finger for half a second opens a "Paste" menu – a screenshot, copied text or copied objects land exactly at that spot (like in Rnote)
+- **Custom colors**: Every toolbar color (pens, highlighter, text) can be changed – tap it again, pick a preset or any color with 🎨; the toolbar remembers the colors. Colors on screen match the PDF/image export (black is black, the highlighter blends like in the PDF); squares and lines in the PDF are as light as on screen
+- **Beta feedback II**: Four pens with their own color and width that remember changes; the highlighter no longer gets darker within one stroke and is now transparent in PDF/PNG/SVG exports too; pages seamlessly below each other with a separator line; new page via ➕ in the toolbar; delete a page in the ☰ menu (restorable); coordinate system without a gap at the origin
+- **Fixes**: Renaming and deleting in the notebook manager respond again; squares, lines and dots are computed per pixel and are even at every zoom level (at least one pixel wide, anti-aliased)
+- **Stroke quality**: Small loops as in "o", "a" or "e" stay round (the final stroke is built from the unfiltered pen points); stroke edges are anti-aliased (4× multisampling), round stroke ends are subdivided more finely
+- **Pattern color**: Squares, lines and dots in light, medium, strong, blue or green (☰ menu, also applies to exports); dots of the dot grid on screen are as large as in the export (0.4 mm). README and documentation revised
+- **Beta feedback**: Landscape PDFs (e.g. PowerPoint slides) get landscape pages without an empty strip (file format version 8); insert new pages right after the current one; the selection tool works with the pen; zoom up to 1000 % with PDF pages re-rendered more sharply
+- **Text tool**: Tap the page with T and type – regular or code font, 8–36 pt, line wrapping at the box edge; move, rotate and scale text boxes like images; real, searchable text in the PDF; copied text becomes a text box with Ctrl+V (file format version 7)
+- **Continuous scrolling**: Scroll through pages below each other with mouse wheel, finger or touchpad (Ctrl+wheel zooms); writing in the bottom fifth of the last page appends a new one automatically; can be turned off under ☰ → View
+- **Virtual ruler**: Show and hide with L or via the toolbar; move it, rotate it by the handle (snaps to 15°); strokes along an edge become exactly straight – with pen, highlighter and shape tool
+- **Partial-stroke eraser**: Remove only the part of a stroke you wipe over – one erase stroke is one undo step
+- **Export & clipboard**: Current page as PNG (also transparent) or SVG; Ctrl+C also puts the selection on the clipboard as an image for chat, email or office apps
+- **Page titles & table of contents**: Name pages, table of contents view in the page overview, titles become PDF bookmarks (file format version 6)
+- **Import & annotate PDFs**: Open lecture slides, exercise sheets or forms as a new notebook (☰ menu or drag & drop), write and highlight on them; on export the original pages lie losslessly as vectors under the notes (file format version 5: older versions do not open such notebooks)
+- **Insert images**: Screenshots via Ctrl+V, image files via the built-in file picker (Ctrl+I) or drag & drop; move, rotate, scale and write on them – also in the PDF export (file format version 4: older versions do not open such notebooks)
+- **Dark mode & paper colors**: White, cream, dark gray or black; on dark paper, dark pen colors are brightened automatically (display only – files and PDF export stay unchanged)
+- **Erase highlighter only**: Correct highlights without deleting the handwriting underneath – also with the pen's eraser end and side button
+- **Adjustable pressure curve**: Curve from soft to hard and minimum pressure with preview, to match your own pen
+- **New shapes**: Ellipses as well as arrows and double arrows drawn in one stroke are recognized (file format version 3: older versions do not open such notebooks)
+- **Stable start**: No more crash when the graphics card cannot be used (e.g. missing permissions on /dev/dri); software renderer as fallback and an understandable error message
+- **WSL (WSLg)**: Runs via X11 instead of Wayland under WSL automatically, because WSLg drops the Wayland connection; override with `INK_NOTES_DISPLAY=x11|wayland`
+- **Important fix**: After a restart on a later page, continuing to write could overwrite the previous content of that page (affects v0.2.3 – v0.3.2)
+- **New toolbar**: Narrow vertical bar with icon buttons, dockable left or right; rarely used functions in the ☰ menu, the page is centered next to it
+- **Consistent dialogs**: Opaque windows without duplicate titles, page picker with thumbnails, larger controls in all popovers
+- **UI usable with pen and touch**: Toolbar, popovers and dialogs now also respond to pen and finger, also with display scaling
+- **Active stylus support (Lazarite / MPP / AES)**: Pen input via the Wayland or X11 tablet protocol, with pressure
+- **Multi-touch touchscreen**: Zoom with two fingers, pan with one; drawing with a finger can be enabled
+- **Two-stage inking model**: Smoothing while writing (1€ filter), post-processing with corner preservation when the pen is lifted
+- **Geometry and shape recognition**: Lines, arrows & double arrows, rectangles, circles, ellipses, triangles, rhombuses, polygons & coordinate systems with sharp arrowheads (draw and hold); freeform strokes stay unchanged
+- **Multiple notebooks**: Create, rename, delete (with trash); automatic saving in the background
+- **Data safety**: Versioned file format with migration, damaged pages are set aside instead of overwritten, protection against opening twice, atomic saving
+- **In-app updater**: Checks Gitea for new versions and installs them on request – only with a valid Minisign signature and over HTTPS
+- **PDF export**: Strokes and shapes as vectors, for printing and sharing
 
 ### Installation:
 - **Zorin OS / Ubuntu / Debian (.deb)**:
   ```bash
   sudo dpkg -i ink-notes_{{VERSION}}_amd64.deb
   ```
-- **AppImage (andere Distributionen mit glibc ≥ 2.39)**:
+- **AppImage (other distributions with glibc ≥ 2.39)**:
   ```bash
   chmod +x ink-notes_{{VERSION}}_x86_64.AppImage
   ./ink-notes_{{VERSION}}_x86_64.AppImage

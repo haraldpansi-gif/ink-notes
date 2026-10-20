@@ -27,7 +27,7 @@ The main repository is on **Gitea**: <https://gitea.pansi.eu/harald/ink-notes>.
    ```
 3. New features and bug fixes get a test where that makes sense.
 4. Document changes to the file format in [docs/FILE_FORMAT.md](docs/FILE_FORMAT.md) (and its German version); older notebooks must remain readable.
-5. Commit messages follow [Conventional Commits](https://www.conventionalcommits.org/), e.g. `fix: …`, `feat: …`, `perf: …`, `docs: …`; refer to an issue as `(Issue #28)`. Code comments and commit messages in this project are written in German.
+5. Commit messages follow [Conventional Commits](https://www.conventionalcommits.org/), e.g. `fix: …`, `feat: …`, `perf: …`, `docs: …`; refer to an issue as `(Issue #28)`. New code comments are written in English (older code still has German comments); commit messages are in German.
 6. The interface is available in German and English: write new texts with `t!("…")` (the German text is the key) and add the English translation in `src/i18n/`.
 
 By contributing you agree that your contribution is licensed under the project's [MIT License](LICENSE). Everyone taking part is expected to follow the [Code of Conduct](CODE_OF_CONDUCT.md).

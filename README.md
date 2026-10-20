@@ -147,7 +147,7 @@ cargo test                   # unit and integration tests
 
 CI additionally checks `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings`.
 
-Code comments and commit messages are written in German.
+New code comments are written in English; older code still has German comments.
 
 ### Project structure
 
