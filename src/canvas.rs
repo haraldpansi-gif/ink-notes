@@ -1324,9 +1324,13 @@ impl CanvasState {
             return;
         }
 
+        // Gleiche Tessellierung wie beim Absetzen (runde Kappen und Ecken), damit der Strich
+        // beim Abheben nicht sichtbar springt (Issue #33)
         let color = self.current_ink_color;
+        let points = spline::rdp_filter_samples(&self.live_samples, spline::RDP_TOLERANCE_UNITS);
+        let corners = spline::detect_corners(&points, spline::CORNER_ANGLE_THRESHOLD_DEG);
         let raw_strip =
-            spline::generate_triangle_strip(&self.live_control_points, &self.spline_config);
+            spline::generate_finalized_triangle_strip(&points, &corners, &self.spline_config);
         self.live_vertices = raw_strip
             .into_iter()
             .map(|v| InkVertex::new(v.position[0], v.position[1], color))

@@ -308,9 +308,11 @@ impl ViewportState {
 /// Schwung beim Scrollen mit dem Finger (Issue #28): Nach dem Abheben gleitet der
 /// Ausschnitt mit der zuletzt gewischten Geschwindigkeit weiter und bremst langsam ab.
 /// Geschwindigkeiten in Bildschirmpixeln je Sekunde.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct Fling {
     velocity: Vec2,
+    /// Fingerweg (aufsummiert) der letzten [`Self::WINDOW`] mit Zeitpunkt
+    trail: std::collections::VecDeque<(std::time::Instant, Vec2)>,
     /// Zeit der letzten Fingerbewegung bzw. des letzten Gleitschritts
     last: Option<std::time::Instant>,
     active: bool,
@@ -320,37 +322,53 @@ impl Fling {
     /// Abbremsen je Sekunde (Anteil der Geschwindigkeit, der nach 1 s bleibt: e^-FRICTION)
     const FRICTION: f32 = 2.5;
     /// Langsamer wischen gleitet nicht nach
-    const MIN_START_SPEED: f32 = 400.0;
+    const MIN_START_SPEED: f32 = 250.0;
     /// Darunter hört das Gleiten auf
     const MIN_SPEED: f32 = 40.0;
     /// Liegt der Finger vor dem Abheben so lange still, gleitet nichts nach
-    const MAX_REST: std::time::Duration = std::time::Duration::from_millis(80);
+    const MAX_REST: std::time::Duration = std::time::Duration::from_millis(120);
+    /// Die Geschwindigkeit ergibt sich aus dem Weg in dieser Zeit vor dem Abheben. Über
+    /// mehrere Ereignisse gemessen, weil Touchscreens kurz vor dem Abheben oft nur noch
+    /// winzige Bewegungen melden und Ereignisse gebündelt ankommen, wenn ein Bild länger
+    /// zum Zeichnen braucht.
+    const WINDOW: std::time::Duration = std::time::Duration::from_millis(100);
 
     /// Finger hat sich um `delta` verschoben.
     pub fn track(&mut self, delta: Vec2, now: std::time::Instant) {
         self.active = false;
-        let dt = self
-            .last
-            .map_or(0.0, |last| now.duration_since(last).as_secs_f32());
-        self.last = Some(now);
-        if dt <= 0.0 {
-            return;
+        let pos = self.trail.back().map_or(Vec2::ZERO, |&(_, p)| p) + delta;
+        self.trail.push_back((now, pos));
+        // Einen Punkt vor dem Fenster behalten, damit es ganz abgedeckt ist
+        while self.trail.len() > 2 && now.duration_since(self.trail[1].0) > Self::WINDOW {
+            self.trail.pop_front();
         }
-        // Geglättet: einzelne ungleichmäßige Touch-Ereignisse sollen nicht zählen
-        let sample = delta / dt.max(0.004);
-        self.velocity = self.velocity.lerp(sample, 0.4);
+        if delta != Vec2::ZERO {
+            self.last = Some(now);
+        }
     }
 
-    /// Finger abgehoben: gleitet weiter, wenn zuletzt schnell genug gewischt wurde.
-    pub fn release(&mut self, now: std::time::Instant) {
+    /// Finger abgehoben: gleitet weiter, wenn zuletzt schnell genug gewischt wurde. Gibt die
+    /// gemessene Geschwindigkeit zurück (für die Fehlersuche).
+    pub fn release(&mut self, now: std::time::Instant) -> Vec2 {
         let resting = self
             .last
             .is_none_or(|last| now.duration_since(last) > Self::MAX_REST);
-        self.active = !resting && self.velocity.length() >= Self::MIN_START_SPEED;
+        self.velocity = match (self.trail.front(), self.trail.back()) {
+            (Some(&(t0, p0)), Some(&(_, p1))) => {
+                // Bis zum Abheben gemessen; gebündelte Ereignisse zählen mindestens 10 ms
+                let dt = now.duration_since(t0).as_secs_f32().max(0.01);
+                (p1 - p0) / dt
+            }
+            _ => Vec2::ZERO,
+        };
+        self.trail.clear();
+        let velocity = self.velocity;
+        self.active = !resting && velocity.length() >= Self::MIN_START_SPEED;
         self.last = Some(now);
         if !self.active {
             self.stop();
         }
+        velocity
     }
 
     /// Hält an (neue Berührung, Mausklick, Mausrad).
@@ -432,6 +450,24 @@ mod tests {
         }
         rested.release(ms(400));
         assert!(!rested.is_active());
+
+        // Touchscreens melden kurz vor dem Abheben oft nur noch winzige Bewegungen
+        let mut lifted = Fling::default();
+        for i in 0..=8 {
+            lifted.track(Vec2::new(0.0, -30.0), ms(i * 10));
+        }
+        lifted.track(Vec2::new(0.0, -1.0), ms(90));
+        lifted.track(Vec2::new(0.0, 0.0), ms(100));
+        lifted.release(ms(104));
+        assert!(lifted.is_active());
+
+        // Gebündelt ankommende Ereignisse (ein Bild brauchte 50 ms)
+        let mut batched = Fling::default();
+        for t in [0, 50, 50, 50, 50, 100, 100, 100, 100] {
+            batched.track(Vec2::new(0.0, -20.0), ms(t));
+        }
+        batched.release(ms(100));
+        assert!(batched.is_active());
     }
 
     #[test]

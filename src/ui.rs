@@ -60,8 +60,9 @@ impl ActiveTool {
     /// Werkzeug, das ein mit diesem Werkzeug gezeichneter Strich erhält.
     pub fn stroke_tool(&self, has_shape: bool) -> StrokeTool {
         match self {
-            _ if has_shape => StrokeTool::Shape,
+            // Ein eingerasteter Textmarker bleibt Textmarker (durchscheinend, eigener Radierer)
             ActiveTool::Highlighter => StrokeTool::Highlighter,
+            _ if has_shape => StrokeTool::Shape,
             _ => StrokeTool::Pen,
         }
     }
@@ -5806,6 +5807,11 @@ mod tests {
         // Eingerastete Form (Formwerkzeug oder Halten am Strichende)
         assert_eq!(ActiveTool::Shape.stroke_tool(true), StrokeTool::Shape);
         assert_eq!(ActiveTool::Pen.stroke_tool(true), StrokeTool::Shape);
+        // Eingerasteter Textmarker (Issue #32)
+        assert_eq!(
+            ActiveTool::Highlighter.stroke_tool(true),
+            StrokeTool::Highlighter
+        );
     }
 
     #[test]

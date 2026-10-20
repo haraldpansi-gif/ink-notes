@@ -601,6 +601,7 @@ pub fn generate_finalized_triangle_strip(
 
     // Runde Kappen fein genug unterteilt, dass sie auch stark vergrößert rund wirken
     const CAP_STEPS: usize = 10;
+    const CORNER_STEPS: usize = 24;
     let mut vertices = Vec::new();
 
     // 3. Runde Start-Kappe vor dem ersten Run
@@ -622,12 +623,22 @@ pub fn generate_finalized_triangle_strip(
     // 4. Runs und Ecken-Übergänge verbinden
     for (run_idx, run) in runs.iter().enumerate() {
         if run_idx > 0 {
-            // Ecken-Verbindung: Nahtlose C0-Verbindung am Knick
+            // Runde Ecken-Verbindung: Ein voller Kreis um den Knick füllt die Außenseite, sonst
+            // enden beide Abschnitte stumpf und die Spitze (etwa einer „1“) wirkt abgeschnitten.
+            // Alle Dreiecke liegen im Kreis, auch die Übergänge zum vorigen und nächsten Run.
             let s_corner = &run[0];
             let p_c = s_corner.position;
             let pr_c = s_corner.pressure;
-            vertices.push(Vertex::new(p_c.x, p_c.y, pr_c, 0.0));
-            vertices.push(Vertex::new(p_c.x, p_c.y, pr_c, 0.0));
+            let r = s_corner.radius;
+            let prev_right = runs[run_idx - 1].last().map_or(s_corner.right, |s| s.right);
+            let d = prev_right - p_c;
+            let a0 = d.y.atan2(d.x);
+            for k in 0..=CORNER_STEPS {
+                let a = a0 + (k as f32 / CORNER_STEPS as f32) * std::f32::consts::TAU;
+                let rim = p_c + glam::Vec2::new(a.cos(), a.sin()) * r;
+                vertices.push(Vertex::new(p_c.x, p_c.y, pr_c, 0.0));
+                vertices.push(Vertex::new(rim.x, rim.y, pr_c, 1.0));
+            }
             vertices.push(Vertex::new(s_corner.left.x, s_corner.left.y, pr_c, -1.0));
             vertices.push(Vertex::new(s_corner.right.x, s_corner.right.y, pr_c, 1.0));
         }
@@ -898,6 +909,56 @@ mod tests {
         let corner_pt = stroke.points[corner_idx];
         assert!((corner_pt.position.x - 100.0).abs() < 1e-3);
         assert!((corner_pt.position.y - 0.0).abs() < 1e-3);
+    }
+
+    /// Liegt `p` in einem der Dreiecke des Triangle-Strips?
+    fn strip_covers(vertices: &[InkVertex], p: glam::Vec2) -> bool {
+        let pos = |v: &InkVertex| glam::Vec2::new(v.position[0], v.position[1]);
+        let cross = |a: glam::Vec2, b: glam::Vec2, c: glam::Vec2| (b - a).perp_dot(c - a);
+        vertices.windows(3).any(|t| {
+            let (a, b, c) = (pos(&t[0]), pos(&t[1]), pos(&t[2]));
+            let (d1, d2, d3) = (cross(a, b, p), cross(b, c, p), cross(c, a, p));
+            let neg = d1 < 0.0 || d2 < 0.0 || d3 < 0.0;
+            let pos = d1 > 0.0 || d2 > 0.0 || d3 > 0.0;
+            !(neg && pos)
+        })
+    }
+
+    #[test]
+    fn test_sharp_corner_tip_is_not_cut_off() {
+        // „1“: schräg hinauf bis (100, 0), dann senkrecht hinunter (Issue #33)
+        let mut raw = Vec::new();
+        for i in 0..=20 {
+            let u = i as f32 / 20.0;
+            raw.push(StylusSample {
+                position: glam::Vec2::new(60.0 + 40.0 * u, 80.0 - 80.0 * u),
+                pressure: 0.5,
+                timestamp: i as f64 * 0.01,
+            });
+        }
+        for i in 1..=30 {
+            raw.push(StylusSample {
+                position: glam::Vec2::new(100.0, i as f32 * 5.0),
+                pressure: 0.5,
+                timestamp: (20 + i) as f64 * 0.01,
+            });
+        }
+        let config = SplineConfig::from_width_units(10.0);
+        let stroke = finalize_stroke_with_config(1, &raw, [0.0; 4], &config);
+        assert_eq!(
+            detect_corners(&stroke.points, CORNER_ANGLE_THRESHOLD_DEG).len(),
+            1
+        );
+        // Die Spitze reicht rund um den Knick so weit wie die Strichbreite
+        let r = calculate_radius(0.5, config.min_radius, config.max_radius) * 0.95;
+        for deg in [-150.0_f32, -120.0, -90.0, -60.0, -30.0, 0.0] {
+            let a = deg.to_radians();
+            let p = glam::Vec2::new(100.0, 0.0) + glam::Vec2::new(a.cos(), a.sin()) * r;
+            assert!(
+                strip_covers(&stroke.vertices, p),
+                "Spitze bei {deg}° abgeschnitten"
+            );
+        }
     }
 
     #[test]

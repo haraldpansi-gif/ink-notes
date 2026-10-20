@@ -326,9 +326,12 @@ fn commit_stroke_to_notebook(
 ) {
     // Zweite Gerade über Kreuz mit dem vorigen Strich: beide werden zum Achsenkreuz; der
     // vorige Strich wird ersetzt, ein Rückgängig stellt ihn wieder her
-    if let Some(shape) = &snapped_shape {
+    let stroke_width = ui_state.current_stroke_width_mm() * ink_notes::document::UNITS_PER_MM;
+    if let Some(shape) = snapped_shape
+        .as_ref()
+        .filter(|_| ui_state.active_tool != ActiveTool::Highlighter)
+    {
         if let Some((previous_id, cross)) = axis_cross_with_previous(notebook, shape) {
-            let stroke_width = ui_state.pen_stroke_width_mm * ink_notes::document::UNITS_PER_MM;
             canvas.cancel_stroke();
             let stroke = geometry::shape_to_stroke(
                 cross,
@@ -347,7 +350,6 @@ fn commit_stroke_to_notebook(
 
     let new_id = notebook.next_stroke_id();
     let stroke_opt = if let Some(shape) = snapped_shape {
-        let stroke_width = ui_state.pen_stroke_width_mm * ink_notes::document::UNITS_PER_MM;
         let color = canvas.current_ink_color;
         canvas.cancel_stroke();
         Some(geometry::shape_to_stroke(
@@ -1931,9 +1933,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             stroke_snapped_shape = Some(shape.clone());
                             // Kreuzt die Gerade den vorigen Strich, zeigt die Vorschau schon das
                             // Achsenkreuz (übernommen wird es beim Absetzen)
-                            let shape = axis_cross_with_previous(&notebook, &shape)
-                                .map_or(shape, |(_, cross)| cross);
-                            let width_units = ui_state.pen_stroke_width_mm * ink_notes::document::UNITS_PER_MM;
+                            // Textmarker bilden kein Achsenkreuz
+                            let shape = if ui_state.active_tool == ActiveTool::Highlighter {
+                                shape
+                            } else {
+                                axis_cross_with_previous(&notebook, &shape)
+                                    .map_or(shape, |(_, cross)| cross)
+                            };
+                            let width_units = ui_state.current_stroke_width_mm() * ink_notes::document::UNITS_PER_MM;
                             let (samples, vertices) = geometry::shape_to_mesh(&shape, width_units, canvas.current_ink_color);
                             canvas.set_live_shape_mesh(samples, vertices);
                             ui_state.set_export_message(t!("{shape} eingerastet!", shape = shape.name()));
@@ -3019,7 +3026,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     pinch_prev_distance = None;
                                     pinch_prev_center = None;
                                     if is_touch_panning && touch.phase == TouchPhase::Ended {
-                                        fling.release(Instant::now());
+                                        // Letztes Stück bis zum Abheben noch mitnehmen
+                                        let (dx, dy) = (tx - touch_pan_last_pos.0, ty - touch_pan_last_pos.1);
+                                        canvas.pan(dx, dy);
+                                        fling.track(Vec2::new(dx, dy), Instant::now());
+                                        let velocity = fling.release(Instant::now());
+                                        if std::env::var_os("INK_NOTES_DEBUG_FLING").is_some() {
+                                            eprintln!(
+                                                "[Nachgleiten] {:.0} px/s beim Abheben, gleitet: {}",
+                                                velocity.length(),
+                                                fling.is_active()
+                                            );
+                                        }
                                         window.request_redraw();
                                     }
                                     is_touch_panning = false;
