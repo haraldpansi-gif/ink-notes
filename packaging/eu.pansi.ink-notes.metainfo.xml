@@ -84,6 +84,11 @@
   </branding>
   <content_rating type="oars-1.1" />
   <releases>
+    <release version="0.33.0" date="2026-10-21">
+      <description>
+        <p>The hand is ignored while the pen is near the screen, also on the title bar. The eraser comes in four sizes. The page overview shows imported PDF pages. Snapped triangles and other shapes have the same width on every side. A selection made with the pen's select button can be moved with the pen.</p>
+      </description>
+    </release>
     <release version="0.32.0" date="2026-10-21">
       <description>
         <p>The endless canvas starts at the top left and grows to the right and down. New text fields start short and grow with the text. The toolbar buttons are larger again on small screens. On Wayland, the title bar buttons work with a finger.</p>
