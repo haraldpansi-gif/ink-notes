@@ -84,6 +84,11 @@
   </branding>
   <content_rating type="oars-1.1" />
   <releases>
+    <release version="0.32.0" date="2026-10-21">
+      <description>
+        <p>The endless canvas starts at the top left and grows to the right and down. New text fields start short and grow with the text. The toolbar buttons are larger again on small screens. On Wayland, the title bar buttons work with a finger.</p>
+      </description>
+    </release>
     <release version="0.31.0" date="2026-10-21">
       <description>
         <p>New view-only mode: with 👁 in the toolbar, pen, finger and mouse only scroll and zoom, and nothing can be changed by accident.</p>
