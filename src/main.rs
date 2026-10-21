@@ -1440,6 +1440,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Platz schaffen läuft mit dem Stift bzw. dem Finger (sonst mit der Maus)
     let mut is_stylus_spacing = false;
     let mut is_touch_spacing = false;
+    // View only: the pen moves the page and remembers its last screen position (Issue #35)
+    let mut stylus_pan_last: Option<(f32, f32)> = None;
     let mut stylus_screen_pos = (0.0_f32, 0.0_f32);
     // Stift hat auf der UI aufgesetzt: alle Ereignisse bis zum Abheben gehen an egui
     let mut stylus_ui_capture = false;
@@ -1605,6 +1607,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         }
                                         if stylus_tool_id == Some(tool.id()) {
                                             stylus_tool_id = None;
+                                            stylus_pan_last = None;
                                             if is_stylus_drawing {
                                                 is_stylus_drawing = false;
                                                 is_drawing = false;
@@ -1685,7 +1688,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                                         // Stiftbewegung an egui weitergeben (Hover, Schieberegler ziehen),
                                         // solange nicht auf dem Blatt gezeichnet oder radiert wird
-                                        if stylus_ui_capture || (!is_stylus_drawing && !is_erasing && !is_stylus_selecting) {
+                                        if stylus_ui_capture
+                                            || (!is_stylus_drawing && !is_erasing && !is_stylus_selecting && stylus_pan_last.is_none())
+                                        {
                                             let ui_pos = egui::pos2(sx / scale, sy / scale);
                                             egui_winit_state
                                                 .egui_input_mut()
@@ -1701,7 +1706,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             continue;
                                         }
 
-                                        if is_stylus_spacing {
+                                        if let Some((lx, ly)) = stylus_pan_last {
+                                            let delta = Vec2::new(sx - lx, sy - ly);
+                                            stylus_pan_last = Some((sx, sy));
+                                            canvas.pan(delta.x, delta.y);
+                                            fling.track(delta, Instant::now());
+                                            window.request_redraw();
+                                        } else if is_stylus_spacing {
                                             space_move((sx, sy), &canvas, &mut ui_state);
                                             window.request_redraw();
                                         } else if is_erasing {
@@ -1766,6 +1777,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             });
                                             stylus_ui_capture = true;
                                             window.request_redraw();
+                                            continue;
+                                        }
+
+                                        if ui_state.view_mode {
+                                            // View only: the pen moves the page like a finger
+                                            fling.stop();
+                                            stylus_pan_last = Some((sx, sy));
                                             continue;
                                         }
 
@@ -1854,6 +1872,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             );
                                             window.request_redraw();
                                             continue;
+                                        }
+
+                                        if stylus_pan_last.take().is_some() {
+                                            fling.release(Instant::now());
+                                            window.request_redraw();
                                         }
 
                                         if is_erasing {
@@ -2158,6 +2181,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let ctrl = modifiers.control_key();
                         let shift = modifiers.shift_key();
 
+                        if ui_state.view_mode && !ui::key_allowed_in_view_mode(&logical_key, ctrl) {
+                            return;
+                        }
+
                         match &logical_key {
                             Key::Named(NamedKey::Escape) => {
                                 let mut changed = false;
@@ -2395,6 +2422,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
 
                             // Nächste Seite: PageDown oder N (mit Lazy Loading)
+                            // View only: never append a new page at the end
+                            Key::Named(NamedKey::PageDown)
+                                if ui_state.view_mode && notebook.current_page_index + 1 >= notebook.pages.len() => {}
                             Key::Named(NamedKey::PageDown) => {
                                 selection_state.clear();
                                 notebook.next_page();
@@ -2544,7 +2574,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             ElementState::Pressed => {
                                 // Palm-Rejection: Keine Mausevents verarbeiten, wenn der Stift aktiv
                                 // zeichnet oder auswählt (manche Systeme melden ihn zusätzlich als Maus)
-                                if is_stylus_drawing || is_stylus_selecting {
+                                if is_stylus_drawing || is_stylus_selecting || stylus_pan_last.is_some() {
                                     return;
                                 }
 
@@ -2555,7 +2585,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                                 fling.stop();
                                 // 1. Pan via mittlere Maustaste oder Leertaste + Linksklick
-                                if button == MouseButton::Middle || (button == MouseButton::Left && is_space_pressed) {
+                                // In view-only mode the left and right buttons move the page too (Issue #35)
+                                if button == MouseButton::Middle
+                                    || (button == MouseButton::Left && is_space_pressed)
+                                    || (ui_state.view_mode && matches!(button, MouseButton::Left | MouseButton::Right))
+                                {
                                     is_panning = true;
                                     pan_last_screen_pos = cursor_screen_pos;
                                     return;
@@ -2638,7 +2672,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                             }
                             ElementState::Released => {
-                                if button == MouseButton::Middle || (button == MouseButton::Left && is_panning) {
+                                if button == MouseButton::Middle
+                                    || (matches!(button, MouseButton::Left | MouseButton::Right) && is_panning)
+                                {
                                     is_panning = false;
                                 }
                                 if is_erasing {
@@ -2842,6 +2878,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 // beim Radieren, Auswählen oder Text (dort hält man auch mal still)
                                 if active_touches.len() == 1
                                     && !is_pinch_gesturing
+                                    && !ui_state.view_mode
                                     && (!ui_state.touch_draw_enabled
                                         || ui_state.active_tool.is_drawing()
                                         || ui_state.active_tool == ActiveTool::Shape)
@@ -2882,6 +2919,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     // Finger immer, Auswählen, wenn er ein Objekt oder die Auswahl trifft
                                     // (Issue #26)
                                     let finger_uses_tool = match ui_state.active_tool {
+                                        _ if ui_state.view_mode => false,
                                         ActiveTool::Text | ActiveTool::Space => true,
                                         ActiveTool::Select => {
                                             focus_page_at!((tx, ty));
@@ -2899,7 +2937,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         // Halten soll hier kein Kontextmenü öffnen
                                         long_press.cancel();
                                     }
-                                    if !ui_state.touch_draw_enabled && !finger_uses_tool {
+                                    if (!ui_state.touch_draw_enabled || ui_state.view_mode) && !finger_uses_tool {
                                         // Standard: 1 Finger scrollt / verschiebt den Canvas (Pan)
                                         is_touch_panning = true;
                                         touch_pan_last_pos = (tx, ty);
@@ -3184,6 +3222,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 UiAction::SetTool(tool) => {
                                     activate_tool(tool, &mut ui_state, &mut canvas);
                                     update_window_title(&window, &notebook, &manifest, tool, autosave.status());
+                                    window.request_redraw();
+                                }
+                                UiAction::SetViewMode(on) => {
+                                    ui_state.view_mode = on;
+                                    if on {
+                                        // Nothing may stay half-edited while only viewing
+                                        finish_text_edit(&mut canvas, &mut notebook, &mut manifest, &mut autosave, &mut ui_state);
+                                        selection_state.clear();
+                                        ui_state.ruler = None;
+                                        ui_state.ruler_drag = None;
+                                        canvas.ruler = None;
+                                        ui_state.set_export_message(t!("Nur ansehen – 👁 erneut tippen, um zu schreiben"));
+                                    }
+                                    update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
                                     window.request_redraw();
                                 }
                                 UiAction::SetColor(color) => {

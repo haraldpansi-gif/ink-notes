@@ -231,6 +231,8 @@ pub enum PageExportKind {
 #[derive(Debug, Clone, PartialEq)]
 pub enum UiAction {
     SetTool(ActiveTool),
+    /// Switch the view-only mode on or off (Issue #35)
+    SetViewMode(bool),
     SetColor([f32; 4]),
     SetStrokeWidthMm(f32),
     Undo,
@@ -441,6 +443,8 @@ pub struct UiState {
     pub continuous_scroll: bool,
     /// Offenes Notizbuch ist eine endlose Fläche (eine Seite ohne Rand, Issue #30)
     pub endless: bool,
+    /// View only: pen, finger and mouse just move the page, nothing gets changed (Issue #35)
+    pub view_mode: bool,
     /// Wechsel zur bzw. von der endlosen Fläche ist gerade möglich (eine Seite ohne PDF bzw.
     /// Inhalt im Startausschnitt)
     pub endless_switch_possible: bool,
@@ -538,6 +542,7 @@ impl Default for UiState {
             pattern_color: PatternColor::Light,
             continuous_scroll: true,
             endless: false,
+            view_mode: false,
             endless_switch_possible: true,
             text_color: PEN_COLOR_PRESETS[0].0,
             text_size_pt: crate::text::DEFAULT_TEXT_SIZE_PT,
@@ -645,22 +650,23 @@ impl UiState {
     /// Blätterpfeile).
     pub fn sidebar_button_size(tool: ActiveTool, max_height: f32, continuous: bool) -> f32 {
         let select = matches!(tool, ActiveTool::Select | ActiveTool::Text);
-        // Notizbücher, 7 Werkzeuge, Lineal, Undo/Redo, Seitenzahl und neue Seite (einzeln
-        // blättern: dazu zwei Pfeile), Menü (+ 4 Auswahl-Aktionen bzw. Schriftknöpfe)
+        // Notizbücher, Nur ansehen, 7 Werkzeuge, Lineal, Undo/Redo, Seitenzahl und neue Seite
+        // (einzeln blättern: dazu zwei Pfeile), Menü (+ 4 Auswahl-Aktionen bzw. Schriftknöpfe)
         let page_buttons = if continuous { 2 } else { 4 };
-        let buttons = 11 + page_buttons + if select { 4 } else { 0 };
+        let buttons = 12 + page_buttons + if select { 4 } else { 0 };
         let dividers = 5 + usize::from(select);
         let spacing = 3.0;
         let needed = |b: f32| {
             buttons as f32 * (b + spacing)
                 + Self::MAX_PALETTE_LEN as f32 * (Self::sidebar_swatch_size(b) + spacing)
                 + dividers as f32 * (7.0 + spacing)
-                + 12.0
+                // frame, margins and the spacing egui adds (measured with the selection tool)
+                + 40.0
         };
-        [Self::SIDEBAR_BUTTON, 36.0, 32.0, 30.0, 28.0]
+        [Self::SIDEBAR_BUTTON, 36.0, 32.0, 30.0, 28.0, 26.0]
             .into_iter()
             .find(|&b| needed(b) <= max_height)
-            .unwrap_or(28.0)
+            .unwrap_or(26.0)
     }
 
     /// Von der Werkzeugleiste belegte Breite (logische Punkte, inkl. Randabstand),
@@ -2903,6 +2909,29 @@ pub fn configure_context(ctx: &egui::Context) {
     ctx.options_mut(|o| o.zoom_with_keyboard = false);
 }
 
+/// Keys that still work in view-only mode: moving through the notebook, zoom, saving,
+/// exporting and quitting. Everything that would change the notebook is ignored (Issue #35).
+pub fn key_allowed_in_view_mode(key: &winit::keyboard::Key, ctrl: bool) -> bool {
+    use winit::keyboard::{Key, NamedKey};
+    match key {
+        Key::Named(named) => matches!(
+            named,
+            NamedKey::Escape
+                | NamedKey::Space
+                | NamedKey::PageUp
+                | NamedKey::PageDown
+                | NamedKey::Home
+                | NamedKey::End
+        ),
+        Key::Character(c) => {
+            ctrl && ["0", "+", "=", "-", "_", "s", "e", "q"]
+                .iter()
+                .any(|k| c.eq_ignore_ascii_case(k))
+        }
+        _ => false,
+    }
+}
+
 /// Rendert die schwebende Toolbar und alle zugehörigen UI-Komponenten mit `egui`.
 ///
 /// Gibt eine Liste von `UiAction`-Events zurück, die vom Hauptprogramm verarbeitet werden.
@@ -3013,387 +3042,409 @@ pub fn render_ui(
                                     }
                                 }
 
-                                sidebar_divider(ui, btn);
-
-                                // --- Werkzeuge ---
-                                let pen_resp = sidebar_button(
-                                    ui,
-                                    btn,
-                                    SidebarIcon::Glyph("✏"),
-                                    state.active_tool == ActiveTool::Pen,
-                                    true,
-                                    Some(state.pen_color),
-                                    if state.is_pen_menu_open {
-                                        ""
-                                    } else {
-                                        t!("Stift (B/U/R für Farben) – erneut tippen für Farbe & Stärke")
-                                    },
-                                );
-                                pen_btn_rect = Some(pen_resp.rect);
-                                if pen_resp.clicked() {
-                                    state.is_highlighter_menu_open = false;
-                                    state.is_more_menu_open = false;
-                                    if state.active_tool != ActiveTool::Pen {
-                                        state.active_tool = ActiveTool::Pen;
-                                        state.is_pen_menu_open = false;
-                                        actions.push(UiAction::SetTool(ActiveTool::Pen));
-                                        actions.push(UiAction::SetColor(state.pen_color));
-                                        actions.push(UiAction::SetStrokeWidthMm(
-                                            state.pen_stroke_width_mm,
-                                        ));
-                                    } else {
-                                        let open = !state.is_pen_menu_open;
-                                        state.close_overlays();
-                                        state.is_pen_menu_open = open;
-                                    }
-                                }
-
-                                let high_resp = sidebar_button(
-                                    ui,
-                                    btn,
-                                    SidebarIcon::Glyph("🖊"),
-                                    state.active_tool == ActiveTool::Highlighter,
-                                    true,
-                                    Some(state.highlighter_color),
-                                    if state.is_highlighter_menu_open {
-                                        ""
-                                    } else {
-                                        t!("Textmarker – erneut tippen für Farbe & Stärke")
-                                    },
-                                );
-                                high_btn_rect = Some(high_resp.rect);
-                                if high_resp.clicked() {
-                                    state.is_pen_menu_open = false;
-                                    state.is_more_menu_open = false;
-                                    if state.active_tool != ActiveTool::Highlighter {
-                                        state.active_tool = ActiveTool::Highlighter;
-                                        state.is_highlighter_menu_open = false;
-                                        actions.push(UiAction::SetTool(ActiveTool::Highlighter));
-                                        actions.push(UiAction::SetColor(state.highlighter_color));
-                                        actions.push(UiAction::SetStrokeWidthMm(
-                                            state.highlighter_stroke_width_mm,
-                                        ));
-                                    } else {
-                                        let open = !state.is_highlighter_menu_open;
-                                        state.close_overlays();
-                                        state.is_highlighter_menu_open = open;
-                                    }
-                                }
-
-                                for (tool, icon, tooltip) in [
-                                    (
-                                        ActiveTool::Shape,
-                                        SidebarIcon::Glyph("📐"),
-                                        t!("Formen: Striche werden zu Linien, Rechtecken, Kreisen … (S/F)"),
-                                    ),
-                                    (
-                                        ActiveTool::Eraser,
-                                        SidebarIcon::Eraser,
-                                        t!("Radierer (E oder rechte Maustaste) – darunter: ganze Striche, Teilstrich oder nur Textmarker"),
-                                    ),
-                                    (
-                                        ActiveTool::Select,
-                                        SidebarIcon::Lasso,
-                                        t!("Auswählen: verschieben, drehen, skalieren, kopieren (V)"),
-                                    ),
-                                    (
-                                        ActiveTool::Space,
-                                        SidebarIcon::Glyph("↕"),
-                                        t!("Platz schaffen: auf das Blatt tippen und nach unten ziehen – alles \
-                                         darunter rutscht mit, auch auf die folgenden Seiten; nach oben \
-                                         schließt leeren Platz"),
-                                    ),
-                                    (
-                                        ActiveTool::Text,
-                                        SidebarIcon::Glyph("T"),
-                                        t!("Text (T): ins Blatt tippen und schreiben, vorhandenen Text \
-                                         antippen zum Ändern; Esc beendet"),
-                                    ),
-                                ] {
-                                    if sidebar_button(
-                                        ui,
-                                        btn,
-                                        icon,
-                                        state.active_tool == tool,
-                                        true,
-                                        None,
-                                        tooltip,
-                                    )
-                                    .clicked()
-                                    {
-                                        state.active_tool = tool;
-                                        state.is_pen_menu_open = false;
-                                        state.is_highlighter_menu_open = false;
-                                        state.is_more_menu_open = false;
-                                        actions.push(UiAction::SetTool(tool));
-                                    }
-                                }
-
-                                // --- Lineal (ein-/ausblenden) ---
+                                // --- View only (Issue #35) ---
                                 if sidebar_button(
                                     ui,
                                     btn,
-                                    SidebarIcon::Ruler,
-                                    state.ruler.is_some(),
+                                    SidebarIcon::Glyph("👁"),
+                                    state.view_mode,
                                     true,
                                     None,
-                                    t!("Lineal (L): Fläche ziehen = verschieben, Griff ⟳ = drehen; \
-                                     Striche an einer Kante werden gerade"),
+                                    if state.view_mode {
+                                        t!("Nur ansehen – tippen, um wieder zu schreiben")
+                                    } else {
+                                        t!("Nur ansehen: Stift, Finger und Maus verschieben nur das Blatt, nichts wird verändert")
+                                    },
                                 )
                                 .clicked()
                                 {
-                                    state.toggle_ruler();
+                                    state.close_overlays();
+                                    actions.push(UiAction::SetViewMode(!state.view_mode));
                                 }
 
-                                // --- Stifte bzw. Farben des aktiven Werkzeugs ---
-                                let pens = matches!(state.active_tool, ActiveTool::Pen | ActiveTool::Shape);
-                                // Fester Platz für die längste Palette, damit die Knöpfe darunter
-                                // beim Werkzeugwechsel nicht springen
                                 sidebar_divider(ui, btn);
-                                let swatch = UiState::sidebar_swatch_size(btn);
-                                let mut shown = 0;
-                                if pens {
-                                    shown = PEN_PRESET_COUNT;
-                                    for i in 0..PEN_PRESET_COUNT {
-                                        let preset = state.pen_presets[i];
-                                        let selected = i == state.active_pen;
-                                        let tooltip = if selected {
-                                            t!(
-                                                "Stift {number} ({width} mm) – erneut tippen für Farbe & Stärke; \
-                                                 Änderungen merkt sich der Stift",
-                                                number = i + 1,
-                                                width = format!("{:.2}", preset.width_mm)
-                                            )
+
+                                if !state.view_mode {
+                                    // --- Werkzeuge ---
+                                    let pen_resp = sidebar_button(
+                                        ui,
+                                        btn,
+                                        SidebarIcon::Glyph("✏"),
+                                        state.active_tool == ActiveTool::Pen,
+                                        true,
+                                        Some(state.pen_color),
+                                        if state.is_pen_menu_open {
+                                            ""
                                         } else {
-                                            t!("Stift {number} ({width} mm)", number = i + 1, width = format!("{:.2}", preset.width_mm))
-                                        };
-                                        let response =
-                                            pen_preset_swatch(ui, preset, selected, &tooltip, swatch);
-                                        if selected {
-                                            // Die Einstellungen erscheinen neben dem gewählten Stift
-                                            pen_btn_rect = Some(response.rect);
+                                            t!("Stift (B/U/R für Farben) – erneut tippen für Farbe & Stärke")
+                                        },
+                                    );
+                                    pen_btn_rect = Some(pen_resp.rect);
+                                    if pen_resp.clicked() {
+                                        state.is_highlighter_menu_open = false;
+                                        state.is_more_menu_open = false;
+                                        if state.active_tool != ActiveTool::Pen {
+                                            state.active_tool = ActiveTool::Pen;
+                                            state.is_pen_menu_open = false;
+                                            actions.push(UiAction::SetTool(ActiveTool::Pen));
+                                            actions.push(UiAction::SetColor(state.pen_color));
+                                            actions.push(UiAction::SetStrokeWidthMm(
+                                                state.pen_stroke_width_mm,
+                                            ));
+                                        } else {
+                                            let open = !state.is_pen_menu_open;
+                                            state.close_overlays();
+                                            state.is_pen_menu_open = open;
                                         }
-                                        if response.clicked() {
+                                    }
+
+                                    let high_resp = sidebar_button(
+                                        ui,
+                                        btn,
+                                        SidebarIcon::Glyph("🖊"),
+                                        state.active_tool == ActiveTool::Highlighter,
+                                        true,
+                                        Some(state.highlighter_color),
+                                        if state.is_highlighter_menu_open {
+                                            ""
+                                        } else {
+                                            t!("Textmarker – erneut tippen für Farbe & Stärke")
+                                        },
+                                    );
+                                    high_btn_rect = Some(high_resp.rect);
+                                    if high_resp.clicked() {
+                                        state.is_pen_menu_open = false;
+                                        state.is_more_menu_open = false;
+                                        if state.active_tool != ActiveTool::Highlighter {
+                                            state.active_tool = ActiveTool::Highlighter;
                                             state.is_highlighter_menu_open = false;
-                                            state.is_more_menu_open = false;
-                                            if selected {
-                                                let open = !state.is_pen_menu_open;
-                                                state.close_overlays();
-                                                state.is_pen_menu_open = open;
-                                            } else {
-                                                state.is_pen_menu_open = false;
-                                                state.select_pen(i);
-                                                actions.push(UiAction::SetColor(state.pen_color));
-                                                actions.push(UiAction::SetStrokeWidthMm(
-                                                    state.pen_stroke_width_mm,
-                                                ));
-                                            }
+                                            actions.push(UiAction::SetTool(ActiveTool::Highlighter));
+                                            actions.push(UiAction::SetColor(state.highlighter_color));
+                                            actions.push(UiAction::SetStrokeWidthMm(
+                                                state.highlighter_stroke_width_mm,
+                                            ));
+                                        } else {
+                                            let open = !state.is_highlighter_menu_open;
+                                            state.close_overlays();
+                                            state.is_highlighter_menu_open = open;
                                         }
                                     }
-                                }
-                                // Eigene Farben von Textmarker und Text: antippen wählt, erneut
-                                // tippen passt die Farbe an. Die Auswahl wird in die Farben der
-                                // Stifte umgefärbt.
-                                let tool = state.active_tool;
-                                let slots: Option<Vec<[f32; 4]>> = match tool {
-                                    ActiveTool::Highlighter => Some(state.highlighter_colors.to_vec()),
-                                    ActiveTool::Text => Some(state.text_colors.to_vec()),
-                                    ActiveTool::Select => {
-                                        Some(state.pen_presets.iter().map(|p| p.color).collect())
-                                    }
-                                    _ => None,
-                                };
-                                if let Some(colors) = slots {
-                                    shown = colors.len();
-                                    for (i, color) in colors.into_iter().enumerate() {
-                                        let selected = match tool {
-                                            ActiveTool::Highlighter => i == state.active_highlighter,
-                                            ActiveTool::Text => {
-                                                i == state.active_text_color
-                                                    && state.text_color == color
-                                            }
-                                            _ => false,
-                                        };
-                                        let tooltip = match tool {
-                                            ActiveTool::Select => {
-                                                t!("Auswahl in der Farbe von Stift {number} umfärben", number = i + 1)
-                                            }
-                                            _ if selected => t!(
-                                                "Farbe {number} – erneut tippen, um sie anzupassen",
-                                                number = i + 1
-                                            ),
-                                            _ => t!("Farbe {number}", number = i + 1),
-                                        };
-                                        let response =
-                                            color_circle_swatch(ui, color, selected, &tooltip, swatch);
-                                        if selected {
-                                            // Das Farb-Popover erscheint neben der gewählten Farbe
-                                            match tool {
-                                                ActiveTool::Highlighter => high_btn_rect = Some(response.rect),
-                                                _ => text_color_btn_rect = Some(response.rect),
-                                            }
-                                        }
-                                        if !response.clicked() {
-                                            continue;
-                                        }
-                                        match tool {
-                                            ActiveTool::Highlighter if selected => {
-                                                let open = !state.is_highlighter_menu_open;
-                                                state.close_overlays();
-                                                state.is_highlighter_menu_open = open;
-                                            }
-                                            ActiveTool::Highlighter => {
-                                                state.close_overlays();
-                                                state.select_highlighter_color(i);
-                                                actions.push(UiAction::SetColor(color));
-                                            }
-                                            ActiveTool::Text if selected => {
-                                                let open = !state.is_text_color_menu_open;
-                                                state.close_overlays();
-                                                state.is_text_color_menu_open = open;
-                                            }
-                                            ActiveTool::Text => {
-                                                state.close_overlays();
-                                                state.active_text_color = i;
-                                                state.set_text_color(color);
-                                                actions.push(UiAction::SetColor(color));
-                                            }
-                                            _ => actions.push(UiAction::SetColor(color)),
-                                        }
-                                    }
-                                }
-                                let spacing = ui.spacing().item_spacing.y;
-                                let mut used = shown as f32 * (swatch + spacing);
-                                // Radierer: statt Farben die Radier-Modi im selben Platz
-                                if state.active_tool == ActiveTool::Eraser {
-                                    for (mode, icon, indicator, tooltip) in [
+
+                                    for (tool, icon, tooltip) in [
                                         (
-                                            EraserMode::All,
-                                            SidebarIcon::Text(t!("Alle")),
-                                            None,
-                                            t!("Alle Striche radieren"),
+                                            ActiveTool::Shape,
+                                            SidebarIcon::Glyph("📐"),
+                                            t!("Formen: Striche werden zu Linien, Rechtecken, Kreisen … (S/F)"),
                                         ),
                                         (
-                                            EraserMode::Partial,
-                                            SidebarIcon::Glyph("✂"),
-                                            None,
-                                            t!("Teilstrich radieren – nur den überstrichenen Teil entfernen (Formen ganz)"),
+                                            ActiveTool::Eraser,
+                                            SidebarIcon::Eraser,
+                                            t!("Radierer (E oder rechte Maustaste) – darunter: ganze Striche, Teilstrich oder nur Textmarker"),
                                         ),
                                         (
-                                            EraserMode::HighlighterOnly,
-                                            SidebarIcon::Glyph("🖊"),
-                                            Some(state.highlighter_color),
-                                            t!("Nur Textmarker radieren – Handschrift darunter bleibt"),
+                                            ActiveTool::Select,
+                                            SidebarIcon::Lasso,
+                                            t!("Auswählen: verschieben, drehen, skalieren, kopieren (V)"),
+                                        ),
+                                        (
+                                            ActiveTool::Space,
+                                            SidebarIcon::Glyph("↕"),
+                                            t!("Platz schaffen: auf das Blatt tippen und nach unten ziehen – alles \
+                                             darunter rutscht mit, auch auf die folgenden Seiten; nach oben \
+                                             schließt leeren Platz"),
+                                        ),
+                                        (
+                                            ActiveTool::Text,
+                                            SidebarIcon::Glyph("T"),
+                                            t!("Text (T): ins Blatt tippen und schreiben, vorhandenen Text \
+                                             antippen zum Ändern; Esc beendet"),
                                         ),
                                     ] {
                                         if sidebar_button(
                                             ui,
                                             btn,
                                             icon,
-                                            state.eraser_mode == mode,
-                                            true,
-                                            indicator,
-                                            tooltip,
-                                        )
-                                        .clicked()
-                                        {
-                                            state.eraser_mode = mode;
-                                        }
-                                        used += btn + spacing;
-                                    }
-                                }
-                                // Auswahl: unter den 4 Stiftfarben ist Platz für das Schloss des
-                                // Seitenverhältnisses beim Skalieren (Bilder: gesperrt, Issue #29)
-                                if state.active_tool == ActiveTool::Select {
-                                    let locked = state.selection_aspect_lock;
-                                    let (icon, tooltip) = if locked == Some(true) {
-                                        ("🔒", t!("Seitenverhältnis gesperrt – tippen zum Freigeben"))
-                                    } else {
-                                        ("🔓", t!("Seitenverhältnis frei – tippen zum Sperren"))
-                                    };
-                                    if sidebar_button(
-                                        ui,
-                                        swatch,
-                                        SidebarIcon::Glyph(icon),
-                                        locked == Some(true),
-                                        locked.is_some(),
-                                        None,
-                                        tooltip,
-                                    )
-                                    .clicked()
-                                    {
-                                        actions.push(UiAction::ToggleAspectLock);
-                                    }
-                                    used += swatch + spacing;
-                                }
-                                let reserved =
-                                    UiState::MAX_PALETTE_LEN as f32 * (swatch + spacing);
-                                if reserved > used {
-                                    ui.add_space(reserved - used);
-                                }
-
-                                // --- Aktionen für die Auswahl ---
-                                if state.active_tool == ActiveTool::Select {
-                                    sidebar_divider(ui, btn);
-                                    for (icon, tooltip, action) in [
-                                        ("📋", t!("Kopieren (Strg+C)"), UiAction::CopySelected),
-                                        ("📥", t!("Einfügen (Strg+V)"), UiAction::PasteSelected),
-                                        ("🔄", t!("Um 90° drehen (R)"), UiAction::RotateSelected),
-                                        ("🗑", t!("Löschen (Entf)"), UiAction::DeleteSelected),
-                                    ] {
-                                        if sidebar_button(
-                                            ui,
-                                            btn,
-                                            SidebarIcon::Glyph(icon),
-                                            false,
+                                            state.active_tool == tool,
                                             true,
                                             None,
                                             tooltip,
                                         )
                                         .clicked()
                                         {
-                                            actions.push(action);
+                                            state.active_tool = tool;
+                                            state.is_pen_menu_open = false;
+                                            state.is_highlighter_menu_open = false;
+                                            state.is_more_menu_open = false;
+                                            actions.push(UiAction::SetTool(tool));
                                         }
                                     }
-                                }
 
-                                // --- Schrift des Text-Werkzeugs ---
-                                if state.active_tool == ActiveTool::Text {
+                                    // --- Lineal (ein-/ausblenden) ---
+                                    if sidebar_button(
+                                        ui,
+                                        btn,
+                                        SidebarIcon::Ruler,
+                                        state.ruler.is_some(),
+                                        true,
+                                        None,
+                                        t!("Lineal (L): Fläche ziehen = verschieben, Griff ⟳ = drehen; \
+                                         Striche an einer Kante werden gerade"),
+                                    )
+                                    .clicked()
+                                    {
+                                        state.toggle_ruler();
+                                    }
+
+                                    // --- Stifte bzw. Farben des aktiven Werkzeugs ---
+                                    let pens = matches!(state.active_tool, ActiveTool::Pen | ActiveTool::Shape);
+                                    // Fester Platz für die längste Palette, damit die Knöpfe darunter
+                                    // beim Werkzeugwechsel nicht springen
                                     sidebar_divider(ui, btn);
-                                    text_style_buttons(ui, btn, state);
-                                }
+                                    let swatch = UiState::sidebar_swatch_size(btn);
+                                    let mut shown = 0;
+                                    if pens {
+                                        shown = PEN_PRESET_COUNT;
+                                        for i in 0..PEN_PRESET_COUNT {
+                                            let preset = state.pen_presets[i];
+                                            let selected = i == state.active_pen;
+                                            let tooltip = if selected {
+                                                t!(
+                                                    "Stift {number} ({width} mm) – erneut tippen für Farbe & Stärke; \
+                                                     Änderungen merkt sich der Stift",
+                                                    number = i + 1,
+                                                    width = format!("{:.2}", preset.width_mm)
+                                                )
+                                            } else {
+                                                t!("Stift {number} ({width} mm)", number = i + 1, width = format!("{:.2}", preset.width_mm))
+                                            };
+                                            let response =
+                                                pen_preset_swatch(ui, preset, selected, &tooltip, swatch);
+                                            if selected {
+                                                // Die Einstellungen erscheinen neben dem gewählten Stift
+                                                pen_btn_rect = Some(response.rect);
+                                            }
+                                            if response.clicked() {
+                                                state.is_highlighter_menu_open = false;
+                                                state.is_more_menu_open = false;
+                                                if selected {
+                                                    let open = !state.is_pen_menu_open;
+                                                    state.close_overlays();
+                                                    state.is_pen_menu_open = open;
+                                                } else {
+                                                    state.is_pen_menu_open = false;
+                                                    state.select_pen(i);
+                                                    actions.push(UiAction::SetColor(state.pen_color));
+                                                    actions.push(UiAction::SetStrokeWidthMm(
+                                                        state.pen_stroke_width_mm,
+                                                    ));
+                                                }
+                                            }
+                                        }
+                                    }
+                                    // Eigene Farben von Textmarker und Text: antippen wählt, erneut
+                                    // tippen passt die Farbe an. Die Auswahl wird in die Farben der
+                                    // Stifte umgefärbt.
+                                    let tool = state.active_tool;
+                                    let slots: Option<Vec<[f32; 4]>> = match tool {
+                                        ActiveTool::Highlighter => Some(state.highlighter_colors.to_vec()),
+                                        ActiveTool::Text => Some(state.text_colors.to_vec()),
+                                        ActiveTool::Select => {
+                                            Some(state.pen_presets.iter().map(|p| p.color).collect())
+                                        }
+                                        _ => None,
+                                    };
+                                    if let Some(colors) = slots {
+                                        shown = colors.len();
+                                        for (i, color) in colors.into_iter().enumerate() {
+                                            let selected = match tool {
+                                                ActiveTool::Highlighter => i == state.active_highlighter,
+                                                ActiveTool::Text => {
+                                                    i == state.active_text_color
+                                                        && state.text_color == color
+                                                }
+                                                _ => false,
+                                            };
+                                            let tooltip = match tool {
+                                                ActiveTool::Select => {
+                                                    t!("Auswahl in der Farbe von Stift {number} umfärben", number = i + 1)
+                                                }
+                                                _ if selected => t!(
+                                                    "Farbe {number} – erneut tippen, um sie anzupassen",
+                                                    number = i + 1
+                                                ),
+                                                _ => t!("Farbe {number}", number = i + 1),
+                                            };
+                                            let response =
+                                                color_circle_swatch(ui, color, selected, &tooltip, swatch);
+                                            if selected {
+                                                // Das Farb-Popover erscheint neben der gewählten Farbe
+                                                match tool {
+                                                    ActiveTool::Highlighter => high_btn_rect = Some(response.rect),
+                                                    _ => text_color_btn_rect = Some(response.rect),
+                                                }
+                                            }
+                                            if !response.clicked() {
+                                                continue;
+                                            }
+                                            match tool {
+                                                ActiveTool::Highlighter if selected => {
+                                                    let open = !state.is_highlighter_menu_open;
+                                                    state.close_overlays();
+                                                    state.is_highlighter_menu_open = open;
+                                                }
+                                                ActiveTool::Highlighter => {
+                                                    state.close_overlays();
+                                                    state.select_highlighter_color(i);
+                                                    actions.push(UiAction::SetColor(color));
+                                                }
+                                                ActiveTool::Text if selected => {
+                                                    let open = !state.is_text_color_menu_open;
+                                                    state.close_overlays();
+                                                    state.is_text_color_menu_open = open;
+                                                }
+                                                ActiveTool::Text => {
+                                                    state.close_overlays();
+                                                    state.active_text_color = i;
+                                                    state.set_text_color(color);
+                                                    actions.push(UiAction::SetColor(color));
+                                                }
+                                                _ => actions.push(UiAction::SetColor(color)),
+                                            }
+                                        }
+                                    }
+                                    let spacing = ui.spacing().item_spacing.y;
+                                    let mut used = shown as f32 * (swatch + spacing);
+                                    // Radierer: statt Farben die Radier-Modi im selben Platz
+                                    if state.active_tool == ActiveTool::Eraser {
+                                        for (mode, icon, indicator, tooltip) in [
+                                            (
+                                                EraserMode::All,
+                                                SidebarIcon::Text(t!("Alle")),
+                                                None,
+                                                t!("Alle Striche radieren"),
+                                            ),
+                                            (
+                                                EraserMode::Partial,
+                                                SidebarIcon::Glyph("✂"),
+                                                None,
+                                                t!("Teilstrich radieren – nur den überstrichenen Teil entfernen (Formen ganz)"),
+                                            ),
+                                            (
+                                                EraserMode::HighlighterOnly,
+                                                SidebarIcon::Glyph("🖊"),
+                                                Some(state.highlighter_color),
+                                                t!("Nur Textmarker radieren – Handschrift darunter bleibt"),
+                                            ),
+                                        ] {
+                                            if sidebar_button(
+                                                ui,
+                                                btn,
+                                                icon,
+                                                state.eraser_mode == mode,
+                                                true,
+                                                indicator,
+                                                tooltip,
+                                            )
+                                            .clicked()
+                                            {
+                                                state.eraser_mode = mode;
+                                            }
+                                            used += btn + spacing;
+                                        }
+                                    }
+                                    // Auswahl: unter den 4 Stiftfarben ist Platz für das Schloss des
+                                    // Seitenverhältnisses beim Skalieren (Bilder: gesperrt, Issue #29)
+                                    if state.active_tool == ActiveTool::Select {
+                                        let locked = state.selection_aspect_lock;
+                                        let (icon, tooltip) = if locked == Some(true) {
+                                            ("🔒", t!("Seitenverhältnis gesperrt – tippen zum Freigeben"))
+                                        } else {
+                                            ("🔓", t!("Seitenverhältnis frei – tippen zum Sperren"))
+                                        };
+                                        if sidebar_button(
+                                            ui,
+                                            swatch,
+                                            SidebarIcon::Glyph(icon),
+                                            locked == Some(true),
+                                            locked.is_some(),
+                                            None,
+                                            tooltip,
+                                        )
+                                        .clicked()
+                                        {
+                                            actions.push(UiAction::ToggleAspectLock);
+                                        }
+                                        used += swatch + spacing;
+                                    }
+                                    let reserved =
+                                        UiState::MAX_PALETTE_LEN as f32 * (swatch + spacing);
+                                    if reserved > used {
+                                        ui.add_space(reserved - used);
+                                    }
 
-                                sidebar_divider(ui, btn);
+                                    // --- Aktionen für die Auswahl ---
+                                    if state.active_tool == ActiveTool::Select {
+                                        sidebar_divider(ui, btn);
+                                        for (icon, tooltip, action) in [
+                                            ("📋", t!("Kopieren (Strg+C)"), UiAction::CopySelected),
+                                            ("📥", t!("Einfügen (Strg+V)"), UiAction::PasteSelected),
+                                            ("🔄", t!("Um 90° drehen (R)"), UiAction::RotateSelected),
+                                            ("🗑", t!("Löschen (Entf)"), UiAction::DeleteSelected),
+                                        ] {
+                                            if sidebar_button(
+                                                ui,
+                                                btn,
+                                                SidebarIcon::Glyph(icon),
+                                                false,
+                                                true,
+                                                None,
+                                                tooltip,
+                                            )
+                                            .clicked()
+                                            {
+                                                actions.push(action);
+                                            }
+                                        }
+                                    }
 
-                                // --- Undo & Redo ---
-                                let history = &notebook.current_page().history;
-                                if sidebar_button(
-                                    ui,
-                                    btn,
-                                    SidebarIcon::Glyph("⟲"),
-                                    false,
-                                    history.can_undo(),
-                                    None,
-                                    t!("Rückgängig (Strg+Z)"),
-                                )
-                                .clicked()
-                                {
-                                    actions.push(UiAction::Undo);
-                                }
-                                if sidebar_button(
-                                    ui,
-                                    btn,
-                                    SidebarIcon::Glyph("⟳"),
-                                    false,
-                                    history.can_redo(),
-                                    None,
-                                    t!("Wiederholen (Strg+Y)"),
-                                )
-                                .clicked()
-                                {
-                                    actions.push(UiAction::Redo);
-                                }
+                                    // --- Schrift des Text-Werkzeugs ---
+                                    if state.active_tool == ActiveTool::Text {
+                                        sidebar_divider(ui, btn);
+                                        text_style_buttons(ui, btn, state);
+                                    }
 
+                                    sidebar_divider(ui, btn);
+
+                                    // --- Undo & Redo ---
+                                    let history = &notebook.current_page().history;
+                                    if sidebar_button(
+                                        ui,
+                                        btn,
+                                        SidebarIcon::Glyph("⟲"),
+                                        false,
+                                        history.can_undo(),
+                                        None,
+                                        t!("Rückgängig (Strg+Z)"),
+                                    )
+                                    .clicked()
+                                    {
+                                        actions.push(UiAction::Undo);
+                                    }
+                                    if sidebar_button(
+                                        ui,
+                                        btn,
+                                        SidebarIcon::Glyph("⟳"),
+                                        false,
+                                        history.can_redo(),
+                                        None,
+                                        t!("Wiederholen (Strg+Y)"),
+                                    )
+                                    .clicked()
+                                    {
+                                        actions.push(UiAction::Redo);
+                                    }
+
+                                }
                                 sidebar_divider(ui, btn);
 
                                 // --- Seitennavigation ---
@@ -3448,7 +3499,8 @@ pub fn render_ui(
                                 {
                                     actions.push(UiAction::NextPage);
                                 }
-                                if sidebar_button(
+                                if !state.view_mode
+                                    && sidebar_button(
                                     ui,
                                     btn,
                                     SidebarIcon::Glyph("➕"),
@@ -5583,6 +5635,103 @@ mod tests {
         }
     }
 
+    /// Taps down the middle of the toolbar and collects every action it produces.
+    fn toolbar_scan(view_mode: bool, notebook: &Notebook) -> Vec<UiAction> {
+        let mut probe = UiState::new();
+        probe.view_mode = view_mode;
+        render_frames(&mut probe, notebook, 10);
+        let bar = probe.toolbar_rect.unwrap();
+        let updater = crate::updater::UpdaterController::new();
+        let screen = Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(1280.0, 850.0),
+        ));
+        let mut actions = Vec::new();
+        let mut y = bar.min.y + 4.0;
+        while y < bar.max.y {
+            let mut state = UiState::new();
+            state.view_mode = view_mode;
+            let ctx = render_frames(&mut state, notebook, 10);
+            let pos = egui::pos2(bar.center().x, y);
+            for pressed in [true, false] {
+                let mut events = vec![egui::Event::PointerMoved(pos)];
+                events.push(egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::default(),
+                });
+                ctx.begin_frame(egui::RawInput {
+                    screen_rect: screen,
+                    events,
+                    ..Default::default()
+                });
+                actions.extend(render_ui(
+                    &ctx,
+                    &mut state,
+                    notebook,
+                    AutosaveStatus::Saved,
+                    &updater,
+                ));
+                let _ = ctx.end_frame();
+            }
+            y += 6.0;
+        }
+        actions
+    }
+
+    #[test]
+    fn test_view_mode_hides_editing_buttons() {
+        let notebook = Notebook::new();
+        let editing = toolbar_scan(false, &notebook);
+        assert!(
+            editing.contains(&UiAction::SetViewMode(true)),
+            "{editing:?}"
+        );
+        assert!(editing.iter().any(|a| matches!(a, UiAction::SetTool(_))));
+        assert!(editing.contains(&UiAction::AddPage));
+
+        let viewing = toolbar_scan(true, &notebook);
+        assert!(
+            viewing.contains(&UiAction::SetViewMode(false)),
+            "{viewing:?}"
+        );
+        assert!(
+            !viewing.iter().any(|a| matches!(
+                a,
+                UiAction::SetTool(_) | UiAction::AddPage | UiAction::Undo | UiAction::Redo
+            )),
+            "{viewing:?}"
+        );
+    }
+
+    #[test]
+    fn test_view_mode_keeps_only_harmless_keys() {
+        use winit::keyboard::{Key, NamedKey, SmolStr};
+        let ch = |c: &str| Key::Character(SmolStr::new(c));
+        for (key, ctrl) in [
+            (Key::Named(NamedKey::PageDown), false),
+            (Key::Named(NamedKey::Escape), false),
+            (ch("+"), true),
+            (ch("0"), true),
+            (ch("S"), true),
+        ] {
+            assert!(key_allowed_in_view_mode(&key, ctrl), "{key:?}");
+        }
+        for (key, ctrl) in [
+            (Key::Named(NamedKey::Delete), false),
+            (Key::Named(NamedKey::Backspace), false),
+            (ch("z"), true),
+            (ch("v"), true),
+            (ch("e"), false),
+            (ch("g"), false),
+            (ch("n"), false),
+            (ch("l"), false),
+        ] {
+            assert!(!key_allowed_in_view_mode(&key, ctrl), "{key:?}");
+        }
+    }
+
     #[test]
     fn test_aspect_lock_button_only_with_selection() {
         // Den Knopf in der Leiste des Auswahlwerkzeugs suchen: ohne Auswahl gesperrt
@@ -5642,7 +5791,7 @@ mod tests {
         }
         // Große Fenster behalten die volle Knopfgröße
         assert_eq!(
-            UiState::sidebar_button_size(ActiveTool::Select, 1000.0, true),
+            UiState::sidebar_button_size(ActiveTool::Select, 1100.0, true),
             40.0
         );
     }
