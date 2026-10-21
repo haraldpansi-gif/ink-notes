@@ -84,6 +84,11 @@
   </branding>
   <content_rating type="oars-1.1" />
   <releases>
+    <release version="0.31.0" date="2026-10-21">
+      <description>
+        <p>New view-only mode: with 👁 in the toolbar, pen, finger and mouse only scroll and zoom, and nothing can be changed by accident.</p>
+      </description>
+    </release>
     <release version="0.30.2" date="2026-10-20">
       <description>
         <p>Ctrl+Plus and Ctrl+Minus zoom only the page again, no longer the whole interface. Text boxes being edited now sit exactly where the text ends up.</p>
