@@ -48,6 +48,9 @@ jobs:
           # schlagen cargo fmt und cargo clippy in den Quality Gates sofort fehl
           components: rustfmt, clippy
           cache: true
+          # No global -D warnings: it would also apply to the vendored winit (vendor/winit),
+          # which is built as a path dependency. The quality gates run clippy with -D warnings.
+          rustflags: ""
 
       - name: Install rsign2 (Release-Signatur)
         # RUSTFLAGS leeren: die Toolchain-Action setzt -D warnings, das soll nicht für rsign2 gelten
