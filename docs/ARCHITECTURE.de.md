@@ -108,6 +108,8 @@ Schnelles Wischen mit dem Finger gleitet nach (`Fling` in `viewport.rs`): Die Ge
 ### 3.4 Endlose Fläche
 Ein endloses Notizbuch hat eine einzige Seite von 10 × 10 m (`ENDLESS_PAGE_SIZE`). Damit bleibt alles wie bei jeder anderen Seite – Eingabe, Treffertests, Undo, Speichern –, nur der Rand ist praktisch unerreichbar. `PageViewport::calculate_endless` wählt Maßstab und Lage so, als läge eine DIN-A4-Seite am Startausschnitt (`ENDLESS_HOME`, ein A4-Rahmen in der Mitte); 100 % Zoom und „Ansicht zurücksetzen“ zeigen also diesen Rahmen. Bilder und Textfelder richten ihre Größe bzw. ihren Umbruch an DIN A4 aus (`Page::reference_size`, `Page::text_right_edge`).
 
+Die Fläche wächst nur nach rechts und unten: Nach jedem Verschieben oder Zoomen hält `CanvasState::clamp_endless` die linke obere Ecke des sichtbaren Bereichs auf oder hinter `Page::endless_scroll_limit` – 10 mm links und oberhalb des Startausschnitts bzw. von Inhalt, der weiter oben oder links liegt (in Notizbüchern aus 0.29/0.30).
+
 Beim Wechsel von und zu Seiten (`Notebook::make_endless`/`make_paged`) wird der Inhalt um `ENDLESS_HOME` verschoben und der Verlauf der Seite geleert. Zurück zu Seiten geht nur, solange alles im Startausschnitt liegt. Export und Bilder einer Auswahl rastern bzw. exportieren nur einen Ausschnitt (`Page::cropped`), beim Export auf das Musterraster gelegt (`Page::endless_export_bounds`).
 
 ## 4. Rendering

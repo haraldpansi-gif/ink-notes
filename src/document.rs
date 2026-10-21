@@ -833,6 +833,15 @@ impl Page {
         page
     }
 
+    /// Endless page: the view never shows anything left of or above this point – the start
+    /// frame or the content, whichever reaches further, with a 10 mm margin. The canvas
+    /// therefore only grows to the right and down (Issue #30).
+    pub fn endless_scroll_limit(&self) -> glam::Vec2 {
+        let top_left = Self::selection_aabb(&self.strokes)
+            .map_or(ENDLESS_HOME, |content| content.min.min(ENDLESS_HOME));
+        (top_left - ENDLESS_EXPORT_MARGIN).max(glam::Vec2::ZERO)
+    }
+
     /// Exportausschnitt einer endlosen Seite: der Inhalt mit 10 mm Rand (leer: der
     /// Startausschnitt). Die linke obere Ecke liegt auf dem Musterraster.
     pub fn endless_export_bounds(&self) -> (glam::Vec2, glam::Vec2) {
@@ -2798,6 +2807,30 @@ mod tests {
         assert!((home - ENDLESS_HOME - glam::Vec2::splat(1.0 / a4.scale)).length() < 0.05);
         // Weit neben dem Startausschnitt lässt sich weiter schreiben
         assert!(endless.screen_to_page(-5000.0, -5000.0).is_some());
+    }
+
+    #[test]
+    fn test_endless_scroll_limit_includes_content_left_of_the_start() {
+        let mut page = Page::new(1, PageBackground::Grid5mm).with_size(ENDLESS_PAGE_SIZE);
+        assert_eq!(
+            page.endless_scroll_limit(),
+            ENDLESS_HOME - ENDLESS_EXPORT_MARGIN
+        );
+        // Content right of and below the start frame does not move the limit
+        page.add_stroke(line(1, ENDLESS_HOME + 500.0, ENDLESS_HOME + 900.0));
+        assert_eq!(
+            page.endless_scroll_limit(),
+            ENDLESS_HOME - ENDLESS_EXPORT_MARGIN
+        );
+        // Older notebooks may have content further up and left: it stays reachable
+        let from = glam::Vec2::new(30_000.0, 40_000.0);
+        page.add_stroke(line(2, from, ENDLESS_HOME));
+        let limit = page.endless_scroll_limit();
+        assert!(limit.cmple(from - ENDLESS_EXPORT_MARGIN).all(), "{limit:?}");
+        assert!(
+            limit.cmpgt(from - 2.0 * ENDLESS_EXPORT_MARGIN).all(),
+            "{limit:?}"
+        );
     }
 
     #[test]

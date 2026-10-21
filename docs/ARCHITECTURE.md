@@ -108,6 +108,8 @@ A quick finger swipe keeps gliding (`Fling` in `viewport.rs`): the speed is meas
 ### 3.4 Endless canvas
 An endless notebook has a single page of 10 × 10 m (`ENDLESS_PAGE_SIZE`). This keeps everything the same as with any other page – input, hit tests, undo, saving – only the edge is practically unreachable. `PageViewport::calculate_endless` chooses scale and position as if an A4 page lay at the starting area (`ENDLESS_HOME`, an A4 frame in the middle); 100 % zoom and "Reset view" therefore show this frame. Images and text boxes base their size and wrapping on A4 (`Page::reference_size`, `Page::text_right_edge`).
 
+The canvas only grows to the right and down: after every pan or zoom, `CanvasState::clamp_endless` keeps the top left corner of the visible area at or beyond `Page::endless_scroll_limit` – 10 mm above and left of the starting area, or of content lying further up or left (in notebooks from 0.29/0.30).
+
 When switching to and from pages (`Notebook::make_endless`/`make_paged`), the content is shifted by `ENDLESS_HOME` and the page's history is cleared. Switching back to pages is only possible while everything lies within the starting area. Export and images of a selection only rasterize or export a section (`Page::cropped`), aligned to the pattern grid on export (`Page::endless_export_bounds`).
 
 ## 4. Rendering

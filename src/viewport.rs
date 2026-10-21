@@ -157,6 +157,24 @@ impl ViewportState {
         true
     }
 
+    /// Endless page: shifts the view so that the screen point `corner` (top left of the free
+    /// area) shows nothing left of or above `limit`. `true` if the view was corrected.
+    pub fn clamp_top_left(
+        &mut self,
+        corner: [f32; 2],
+        limit: Vec2,
+        page_viewport: &PageViewport,
+    ) -> bool {
+        let c = self.screen_to_page_unclamped(corner[0], corner[1], page_viewport);
+        let clamped = c.max(limit);
+        if (clamped - c).length() < 1e-3 {
+            return false;
+        }
+        self.pan_offset[0] += c.x - clamped.x;
+        self.pan_offset[1] += c.y - clamped.y;
+        true
+    }
+
     /// Passt den Pan-Offset um eine Bildschirmverschiebung (in Fensterpixeln) an.
     pub fn pan_by_screen_delta(
         &mut self,
@@ -565,6 +583,28 @@ mod tests {
         let c = vp.screen_to_page_unclamped(center[0], center[1], &page_vp);
         assert!((c.y - (PITCH + A4.y)).abs() < 0.1, "{c:?}");
         assert!((c.x - A4.x).abs() < 0.1, "{c:?}");
+    }
+
+    #[test]
+    fn test_endless_view_stays_right_of_and_below_the_limit() {
+        use crate::document::{ENDLESS_HOME, ENDLESS_PAGE_SIZE};
+        let page_vp = PageViewport::calculate_endless(1280.0, 850.0, 24.0, (0.0, 0.0));
+        let limit = ENDLESS_HOME - 100.0;
+        let mut vp = ViewportState::new();
+        // The A4 start frame is centered: the wide window shows space left of it
+        assert!(vp.clamp_top_left([0.0, 0.0], limit, &page_vp));
+        let corner = vp.screen_to_page_unclamped(0.0, 0.0, &page_vp);
+        assert!((corner.x - limit.x).abs() < 0.1, "{corner:?}");
+        assert!(corner.y >= limit.y - 0.1, "{corner:?}");
+        // Right and down stay free
+        vp.pan_by_screen_delta(-5000.0, -5000.0, &page_vp);
+        assert!(!vp.clamp_top_left([0.0, 0.0], limit, &page_vp));
+        // Back up and left: stops at the limit
+        vp.pan_by_screen_delta(20000.0, 20000.0, &page_vp);
+        assert!(vp.clamp_top_left([0.0, 0.0], limit, &page_vp));
+        let corner = vp.screen_to_page_unclamped(0.0, 0.0, &page_vp);
+        assert!((corner - limit).length() < 0.1, "{corner:?}");
+        assert!(corner.cmplt(ENDLESS_PAGE_SIZE).all());
     }
 
     #[test]

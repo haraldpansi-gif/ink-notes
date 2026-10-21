@@ -843,6 +843,18 @@ impl CanvasState {
         changed
     }
 
+    /// Endless page: keeps the view right of and below `limit` (see
+    /// [`crate::document::Page::endless_scroll_limit`]). `true` if the view was corrected.
+    pub fn clamp_endless(&mut self, limit: glam::Vec2) -> bool {
+        let changed = self
+            .camera
+            .clamp_top_left([self.ui_inset_left, 0.0], limit, &self.viewport);
+        if changed {
+            self.update_uniforms();
+        }
+        changed
+    }
+
     /// Durchgehende Ansicht: Scrollt senkrecht, bis die Fenstermitte auf Höhe `y`
     /// (Koordinaten der aktuellen Seite) liegt.
     pub fn scroll_center_to(&mut self, y: f32) {

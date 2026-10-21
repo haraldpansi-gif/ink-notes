@@ -3156,7 +3156,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         //    Auswahl oder beim Ziehen des Lineals). Wer auf einer Nachbarseite
                         //    schreibt, bleibt dort, bis wieder gescrollt wird (Undo betrifft sie).
                         canvas.set_fit_box(notebook.fit_box());
-                        if ui_state.continuous_scroll {
+                        if notebook.is_endless() {
+                            if canvas.clamp_endless(notebook.current_page().endless_scroll_limit()) {
+                                fling.stop();
+                            }
+                        } else if ui_state.continuous_scroll {
                             let stack = notebook.page_stack();
                             if canvas.clamp_scroll(&stack) {
                                 // Am Anfang oder Ende des Notizbuchs angekommen
