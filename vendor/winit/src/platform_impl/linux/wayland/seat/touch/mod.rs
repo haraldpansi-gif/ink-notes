@@ -35,6 +35,10 @@ impl TouchHandler for WinitState {
             .data::<SurfaceData>()
             .and_then(|data| data.parent_surface().cloned());
         if let Some(parent_surface) = parent_surface.filter(|parent| *parent != surface) {
+            // A palm resting on the title bar while writing must not move or close the window
+            if crate::platform::wayland::decoration_touches_ignored() {
+                return;
+            }
             let window_id = wayland::make_wid(&parent_surface);
             let mut window = match self.windows.get_mut().get_mut(&window_id) {
                 Some(window) => window.lock().unwrap(),

@@ -8,6 +8,26 @@ use crate::platform_impl::{ApplicationName, Backend};
 
 pub use crate::window::Theme;
 
+/// ink-notes patch: touches on the client-side decorations that start before this instant
+/// are ignored (palm rejection while a pen is near the screen); `None` accepts them.
+static IGNORE_DECORATION_TOUCHES_UNTIL: std::sync::Mutex<Option<std::time::Instant>> =
+    std::sync::Mutex::new(None);
+
+/// ink-notes patch: ignore touches on the client-side decorations until `until`.
+pub fn ignore_decoration_touches_until(until: Option<std::time::Instant>) {
+    *IGNORE_DECORATION_TOUCHES_UNTIL
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = until;
+}
+
+/// ink-notes patch: whether a touch on the decorations is ignored right now.
+pub(crate) fn decoration_touches_ignored() -> bool {
+    IGNORE_DECORATION_TOUCHES_UNTIL
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .is_some_and(|until| std::time::Instant::now() < until)
+}
+
 /// Additional methods on [`EventLoopWindowTarget`] that are specific to Wayland.
 pub trait EventLoopWindowTargetExtWayland {
     /// True if the [`EventLoopWindowTarget`] uses Wayland.

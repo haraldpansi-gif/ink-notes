@@ -21,6 +21,8 @@ use crate::t;
 pub const DISPLAY_RENDER_PIXELS: u32 = 2560;
 /// Längste Kante beim starken Hineinzoomen (A4 ≈ 440 dpi).
 pub const ZOOMED_RENDER_PIXELS: u32 = 5120;
+/// Longest edge of a page picker thumbnail (sharp at display scale 2).
+pub const THUMBNAIL_RENDER_PIXELS: u32 = 256;
 
 /// Texturschlüssel einer PDF-Seite: `<asset>#<seite>`, gerendert mit mehr als
 /// [`DISPLAY_RENDER_PIXELS`] als `<asset>#<seite>@<pixel>`. Liefert Asset, Seite und Pixel.

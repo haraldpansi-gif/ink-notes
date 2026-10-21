@@ -1801,6 +1801,52 @@ pub fn contour_rms(points: &[Vec2], shape: &RecognizedShape) -> Option<f32> {
     Some((sum_sq / points.len() as f32).sqrt())
 }
 
+/// Longest miter of a polygon corner, in half stroke widths; sharper corners are bevelled.
+const MITER_LIMIT: f32 = 2.0;
+
+/// Vertex pairs (left, right of the outline direction) of a triangle strip at corner `curr`
+/// between the edges from `prev` and to `next` with left normals `n_prev` and `n_next`. Both
+/// edges keep the full half width `half_w` up to the corner (Issue #41): mild corners get one
+/// mitered pair, sharp ones a bevel from two pairs that share the inner point.
+fn polygon_corner_join(
+    curr: Vec2,
+    prev: Vec2,
+    next: Vec2,
+    n_prev: Vec2,
+    n_next: Vec2,
+    half_w: f32,
+) -> Vec<[Vec2; 2]> {
+    let bisector = (n_prev + n_next).normalize_or_zero();
+    let cos_half = bisector.dot(n_prev);
+    if bisector == Vec2::ZERO || cos_half <= 1e-3 {
+        // Edge turns back on itself
+        return vec![[curr + n_prev * half_w, curr - n_prev * half_w]];
+    }
+    let miter = half_w / cos_half;
+    if miter <= half_w * MITER_LIMIT {
+        let offset = bisector * miter;
+        return vec![[curr + offset, curr - offset]];
+    }
+    // The inner point may not reach past the shorter adjacent edge
+    let shortest = (curr - prev).length().min((next - curr).length());
+    let inner_len = miter.min(shortest.max(half_w));
+    // Turning towards the left normal: the outer side is on the right
+    let turns_left = (next - curr).dot(n_prev) > 0.0;
+    if turns_left {
+        let inner = curr + bisector * inner_len;
+        vec![
+            [inner, curr - n_prev * half_w],
+            [inner, curr - n_next * half_w],
+        ]
+    } else {
+        let inner = curr - bisector * inner_len;
+        vec![
+            [curr + n_prev * half_w, inner],
+            [curr + n_next * half_w, inner],
+        ]
+    }
+}
+
 /// Erzeugt ein gleichmäßiges Triangle-Strip-Mesh für ein geschlossenes Polygon (Dreieck, Rechteck, Raute, N-Eck).
 pub fn closed_polygon_to_mesh(
     corners: &[Vec2],
@@ -1812,7 +1858,7 @@ pub fn closed_polygon_to_mesh(
         return (Vec::new(), Vec::new());
     }
 
-    let mut vertices = Vec::with_capacity((n + 1) * 2);
+    let mut vertices = Vec::with_capacity((2 * n + 1) * 2);
     let mut samples = Vec::with_capacity(n * 8);
 
     for i in 0..n {
@@ -1825,18 +1871,10 @@ pub fn closed_polygon_to_mesh(
 
         let n_prev = Vec2::new(-d_prev.y, d_prev.x);
         let n_next = Vec2::new(-d_next.y, d_next.x);
-        let corner_norm = (n_prev + n_next).normalize_or_zero() * half_w;
-
-        vertices.push(InkVertex::new(
-            curr.x + corner_norm.x,
-            curr.y + corner_norm.y,
-            color,
-        ));
-        vertices.push(InkVertex::new(
-            curr.x - corner_norm.x,
-            curr.y - corner_norm.y,
-            color,
-        ));
+        for [left, right] in polygon_corner_join(curr, prev, next, n_prev, n_next, half_w) {
+            vertices.push(InkVertex::new(left.x, left.y, color));
+            vertices.push(InkVertex::new(right.x, right.y, color));
+        }
 
         let edge_len = (next - curr).length();
         let steps = ((edge_len / 10.0).ceil() as usize).max(2);
@@ -2479,6 +2517,33 @@ mod tests {
             nearest < 1e-3,
             "äußere Ecke fehlt, nächster Punkt {nearest}"
         );
+    }
+
+    #[test]
+    fn test_polygon_edges_keep_full_width() {
+        // Right and acute corners: no outline vertex comes closer than half a stroke width to
+        // the outline, so all three sides look equally thick (Issue #41); mitered corners
+        // reach at most MITER_LIMIT half widths out
+        let half_w = 10.0;
+        let corners = [
+            Vec2::new(0.0, 0.0),
+            Vec2::new(0.0, 300.0),
+            Vec2::new(300.0, 300.0),
+        ];
+        let (_, vertices) = closed_polygon_to_mesh(&corners, half_w, [0.0, 0.0, 0.0, 1.0]);
+        assert!(vertices.len() > 2 * corners.len());
+        for v in &vertices {
+            let p = Vec2::new(v.position[0], v.position[1]);
+            let nearest = (0..3)
+                .map(|i| {
+                    crate::document::point_to_segment_distance(p, corners[i], corners[(i + 1) % 3])
+                })
+                .fold(f32::MAX, f32::min);
+            assert!(
+                nearest > half_w - 0.01 && nearest < half_w * MITER_LIMIT + 0.01,
+                "{p:?} is {nearest} from the outline"
+            );
+        }
     }
 
     #[test]

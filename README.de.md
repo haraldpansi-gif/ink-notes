@@ -27,7 +27,7 @@ Die Oberfläche gibt es auf Deutsch und Englisch; ink-notes folgt der Systemspra
 - **Glättung in zwei Stufen:** Während des Schreibens glättet ein 1€-Filter das Zittern, die Linie erscheint sofort. Beim Absetzen wird der Strich nachbearbeitet: Ecken (Knicke über 65°) bleiben erhalten und werden rund verbunden, der Druckverlauf wird geglättet, überflüssige Punkte entfallen, die Enden werden rund.
 - **Druckkurve** im ☰-Menü an den eigenen Stift anpassen (weicher/härter, Schwelle gegen Grundrauschen).
 - **Tasten am Stift** im ☰-Menü belegen: Radieren (Standard), Auswählen, Textmarker, Stift oder nichts – gilt, solange die Taste gedrückt ist. Jede Taste erscheint dort nach dem ersten Drücken.
-- **Radierer** in drei Modi: ganze Striche, nur den überstrichenen Teil (Teilstrich) oder nur Textmarker. Die Stiftrückseite radiert ebenfalls.
+- **Radierer** in drei Modi: ganze Striche, nur den überstrichenen Teil (Teilstrich) oder nur Textmarker, in vier Größen (wird gemerkt). Die Stiftrückseite radiert ebenfalls.
 - **Virtuelles Lineal** (`L`): verschieben, am Griff drehen (rastet bei 15° ein); Striche entlang einer Kante werden gerade.
 - **Nur ansehen** (👁 in der Werkzeugleiste): Stift, Finger und Maus scrollen und zoomen nur; die Werkzeuge verschwinden, nichts lässt sich versehentlich ändern. Erneut 👁 tippen, um zu schreiben.
 - **Platz schaffen** (↕ in der Werkzeugleiste): aufs Blatt tippen und nach unten ziehen – alles darunter rutscht mit, auch auf den folgenden Seiten. Was über ein Seitenende rutschen würde, beginnt auf der nächsten Seite; fehlende Seiten werden angehängt. Nach oben ziehen schließt leeren Platz. Ein Schritt für Rückgängig.
@@ -55,7 +55,7 @@ Die Oberfläche gibt es auf Deutsch und Englisch; ink-notes folgt der Systemspra
 - **Durchgehendes Scrollen, endlose Fläche oder feste Seiten, je Notizbuch:** Beim Anlegen wählbar (Vorgabe: durchgehend; oder endlos), im ☰-Menü umschaltbar – dort auch auf feste Seiten (Seite für Seite blättern mit Pfeilen in der Werkzeugleiste). Durchgehend hängen die Seiten lückenlos untereinander, eine dunkle Linie markiert die Grenze; schnelles Wischen gleitet nach, und mit der Bildlaufleiste am Rand gegenüber der Werkzeugleiste springt man samt Seitenzahl durch lange PDFs; wer im unteren Fünftel der letzten Seite schreibt, bekommt automatisch eine neue Seite. Endlos ist eine einzige Fläche ohne Rand, die oben links beginnt und nach rechts und unten beliebig weitergeht; der PDF-Export enthält nur den beschriebenen Bereich.
 - **Seiten einfügen und löschen:** ➕ in der Werkzeugleiste fügt nach der aktuellen Seite eine leere Seite ein. Löschen im ☰-Menü (mit Rückfrage); die zuletzt gelöschte Seite lässt sich dort wiederherstellen, solange die App läuft.
 - **Zoom** von 25 % bis 1000 % (`Strg + Mausrad`, zwei Finger, `Strg + +/-/0`), Verschieben mit mittlerer Maustaste, `Leertaste + Ziehen` oder einem Finger.
-- **Seiten** anhängen oder direkt nach der aktuellen Seite einfügen, **Seitentitel** vergeben; die Seitenübersicht zeigt Vorschaubilder oder ein Inhaltsverzeichnis. Seitentitel werden im PDF zu Lesezeichen.
+- **Seiten** anhängen oder direkt nach der aktuellen Seite einfügen, **Seitentitel** vergeben; die Seitenübersicht zeigt Vorschaubilder (samt importierter PDF-Seite) oder ein Inhaltsverzeichnis. Seitentitel werden im PDF zu Lesezeichen.
 - **Werkzeugleiste** links oder rechts andocken (für Links- und Rechtshänder).
 
 ### Notizbücher und Speichern
@@ -72,7 +72,7 @@ Die Oberfläche gibt es auf Deutsch und Englisch; ink-notes folgt der Systemspra
 
 ### Eingabegeräte
 - Stifte über das Tablet-Protokoll von Wayland bzw. X11 (Druck, Stiftrückseite, Seitentaste).
-- Solange der Stift aufliegt oder in der Nähe ist, werden Berührungen mit der Hand ignoriert.
+- Solange der Stift aufliegt oder in der Nähe ist, und kurz danach, werden Berührungen mit der Hand ignoriert – auch auf der Titelleiste. Liegt die Hand schon auf, wenn der Stift kommt, wird sie bis zum Abheben ignoriert.
 - Finger: standardmäßig scrollen und zoomen; Zeichnen mit dem Finger lässt sich im ☰-Menü einschalten.
 
 ### Updates

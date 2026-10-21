@@ -43,6 +43,9 @@ use ink_notes::updater::UpdaterController;
 
 /// Kennung der App (Name der .desktop-Datei und des Symbols).
 const APP_ID: &str = "eu.pansi.ink-notes";
+/// After the pen leaves the screen, new touches still count as the writing hand for this long
+/// (Issue #39).
+const PALM_GRACE: Duration = Duration::from_millis(700);
 
 /// Fenstersymbol aus dem eingebauten App-Symbol, auf 64 × 64 Pixel verkleinert: In voller
 /// Größe (256 × 256) überschreitet es die Größe einer einzelnen X11-Anfrage und fehlt dann.
@@ -1350,6 +1353,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ui_state.continuous_scroll = ui_settings.continuous_scroll;
     ui_state.pen_presets = ui_settings.pen_presets;
     ui_state.stylus_buttons = ui_settings.stylus_buttons.clone();
+    ui_state.set_eraser_radius_mm(ui_settings.eraser_radius_mm);
     ui_state.select_pen(ui_settings.active_pen);
     ui_state.highlighter_colors = ui_settings.highlighter_colors;
     ui_state.select_highlighter_color(ui_settings.active_highlighter);
@@ -1437,6 +1441,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Stift zieht mit dem Auswahlwerkzeug (Rahmen, Verschieben, Drehen, Skalieren)
     let mut is_stylus_selecting = false;
     let mut is_stylus_in_proximity = false;
+    // Palm rejection (Issue #39): fingers that rest on the screen when the pen comes near, or
+    // that touch it while the pen is near, are ignored until they are lifted
+    let mut palm_touch_ids: std::collections::HashSet<u64> = std::collections::HashSet::new();
+    let mut stylus_left_at: Option<Instant> = None;
     let mut stylus_tool_id: Option<octotablet::tool::ID> = None;
     // Gedrückte Stifttaste (Kennung, Belegung) und das Werkzeug, das während eines Strichs mit
     // einer Werkzeug-Taste (Auswählen, Textmarker, Stift) vertreten wird
@@ -1465,7 +1473,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut stroke_snapped_shape: Option<RecognizedShape> = None;
 
     // Radier-Parameter
-    let eraser_radius = 30.0_f32; // 3 mm in DIN-A4-Einheiten
     let stroke_max_radius = 12.0_f32;
 
     update_window_title(
@@ -1589,6 +1596,46 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 let tool_is_hardware_eraser =
                                     tool.tool_type == Some(octotablet::tool::Type::Eraser);
 
+                                let pen_arrives = !is_stylus_in_proximity
+                                    && matches!(
+                                        event,
+                                        octotablet::events::ToolEvent::In { .. }
+                                            | octotablet::events::ToolEvent::Pose(_)
+                                            | octotablet::events::ToolEvent::Down
+                                    );
+                                if pen_arrives {
+                                    // Fingers already on the screen are most likely the writing hand:
+                                    // undo what they started and ignore them until lifted
+                                    if debug_fling && !active_touches.is_empty() {
+                                        eprintln!("[Nachgleiten] Stift kommt: {} Finger als Handballen ignoriert", active_touches.len());
+                                    }
+                                    palm_touch_ids.extend(active_touches.drain().map(|(id, _)| id));
+                                    long_press.cancel();
+                                    if is_touch_drawing {
+                                        is_touch_drawing = false;
+                                        is_drawing = false;
+                                        canvas.cancel_stroke();
+                                    }
+                                    if is_touch_spacing {
+                                        is_touch_spacing = false;
+                                        ui_state.space_drag = None;
+                                    }
+                                    if selection_state.drag_mode != DragMode::None && !is_stylus_selecting {
+                                        selection_release(false, &mut notebook, &mut manifest, &mut autosave, &mut selection_state, &mut canvas);
+                                    }
+                                    is_erasing = false;
+                                    is_touch_panning = false;
+                                    is_pinch_gesturing = false;
+                                    pinch_prev_distance = None;
+                                    pinch_prev_center = None;
+                                    stylus_left_at = None;
+                                    #[cfg(target_os = "linux")]
+                                    winit::platform::wayland::ignore_decoration_touches_until(Some(
+                                        Instant::now() + Duration::from_secs(24 * 3600),
+                                    ));
+                                    window.request_redraw();
+                                }
+
                                 match event {
                                     octotablet::events::ToolEvent::In { .. } => {
                                         is_stylus_in_proximity = true;
@@ -1596,6 +1643,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     }
                                     octotablet::events::ToolEvent::Out
                                     | octotablet::events::ToolEvent::Removed => {
+                                        if is_stylus_in_proximity {
+                                            stylus_left_at = Some(Instant::now());
+                                            #[cfg(target_os = "linux")]
+                                            winit::platform::wayland::ignore_decoration_touches_until(Some(
+                                                Instant::now() + PALM_GRACE,
+                                            ));
+                                        }
                                         is_stylus_in_proximity = false;
                                         if stylus_ui_capture {
                                             stylus_ui_capture = false;
@@ -1724,7 +1778,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             focus_page_at!((sx, sy));
                                             if let Some(page_pt) = canvas.screen_to_page(sx, sy) {
                                                 if notebook.erase_at(page_pt,
-                                                    eraser_radius,
+                                                    ui_state.eraser_radius(),
                                                     stroke_max_radius, ui_state.eraser_mode) {
                                                     canvas.sync_page(notebook.current_page_mut());
                                                     autosave.mark_dirty(&notebook, &mut manifest);
@@ -1801,6 +1855,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             Some(StylusAction::Pen) => Some(ActiveTool::Pen),
                                             _ => None,
                                         };
+                                        // A selection made with the select button stays grabbable with
+                                        // the bare pen; elsewhere the pen draws and the selection ends
+                                        // (Issue #37)
+                                        let mut button_tool = button_tool;
+                                        if button_action.is_none()
+                                            && !tool_is_hardware_eraser
+                                            && (ui_state.active_tool.is_drawing()
+                                                || ui_state.active_tool == ActiveTool::Shape)
+                                            && !selection_state.is_empty()
+                                        {
+                                            let hit = selection_state.hit_test_handles(
+                                                notebook.current_page(),
+                                                &canvas,
+                                                Vec2::new(sx, sy),
+                                                egui_ctx.pixels_per_point(),
+                                            );
+                                            if matches!(hit, SelectionHandleHit::None) {
+                                                selection_state.clear();
+                                            } else {
+                                                button_tool = Some(ActiveTool::Select);
+                                            }
+                                        }
                                         if let Some(tool) = button_tool
                                             .filter(|&t| !tool_is_hardware_eraser && t != ui_state.active_tool)
                                         {
@@ -1829,7 +1905,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             is_erasing = true;
                                             if let Some(page_pt) = canvas.screen_to_page(sx, sy) {
                                                 if notebook.erase_at(page_pt,
-                                                    eraser_radius,
+                                                    ui_state.eraser_radius(),
                                                     stroke_max_radius, ui_state.eraser_mode) {
                                                     canvas.sync_page(notebook.current_page_mut());
                                                     autosave.mark_dirty(&notebook, &mut manifest);
@@ -2118,6 +2194,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         is_mouse_drawing = false;
                         active_touches.clear();
                         ui_touch_ids.clear();
+                        palm_touch_ids.clear();
                         stylus_ui_capture = false;
                         is_pinch_gesturing = false;
                         pinch_prev_distance = None;
@@ -2605,7 +2682,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     is_erasing = true;
                                     let (sx, sy) = cursor_screen_pos;
                                     if let Some(page_pt) = canvas.screen_to_page(sx, sy) {
-                                        if notebook.erase_at(page_pt, eraser_radius, stroke_max_radius, ui_state.eraser_mode) {
+                                        if notebook.erase_at(page_pt, ui_state.eraser_radius(), stroke_max_radius, ui_state.eraser_mode) {
                                             canvas.sync_page(notebook.current_page_mut());
                                             autosave.mark_dirty(&notebook, &mut manifest);
                                             update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
@@ -2753,7 +2830,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             } else if is_erasing {
                                 focus_page_at!((sx, sy));
                                 if let Some(page_pt) = canvas.screen_to_page(sx, sy) {
-                                    if notebook.erase_at(page_pt, eraser_radius, stroke_max_radius, ui_state.eraser_mode) {
+                                    if notebook.erase_at(page_pt, ui_state.eraser_radius(), stroke_max_radius, ui_state.eraser_mode) {
                                         canvas.sync_page(notebook.current_page_mut());
                                         autosave.mark_dirty(&notebook, &mut manifest);
                                         update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
@@ -2846,8 +2923,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                         let is_eraser_action = ui_state.active_tool == ActiveTool::Eraser;
 
-                        // Hardware-Palm-Rejection: Wenn der Stylus in Proximity ist oder zeichnet, Touch ignorieren
-                        if is_stylus_drawing || is_stylus_in_proximity {
+                        // Palm rejection: a touch that starts while the pen is near the screen (or
+                        // was just lifted away) belongs to the hand and is ignored until lifted
+                        let pen_near = is_stylus_drawing
+                            || is_stylus_in_proximity
+                            || stylus_left_at.is_some_and(|t| t.elapsed() < PALM_GRACE);
+                        if touch.phase == TouchPhase::Started && pen_near {
+                            palm_touch_ids.insert(touch.id);
+                        }
+                        if palm_touch_ids.contains(&touch.id) {
+                            if matches!(touch.phase, TouchPhase::Ended | TouchPhase::Cancelled) {
+                                palm_touch_ids.remove(&touch.id);
+                            }
                             if debug_fling && touch.phase != TouchPhase::Moved {
                                 eprintln!("[Nachgleiten] Finger ignoriert ({:?}): Stift in der Nähe", touch.phase);
                             }
@@ -2955,7 +3042,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         if is_eraser_action {
                                             is_erasing = true;
                                             if let Some(page_pt) = canvas.screen_to_page(tx, ty) {
-                                                if notebook.erase_at(page_pt, eraser_radius, stroke_max_radius, ui_state.eraser_mode) {
+                                                if notebook.erase_at(page_pt, ui_state.eraser_radius(), stroke_max_radius, ui_state.eraser_mode) {
                                                     canvas.sync_page(notebook.current_page_mut());
                                                     autosave.mark_dirty(&notebook, &mut manifest);
                                                     update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
@@ -3048,7 +3135,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     } else if is_erasing {
                                         focus_page_at!((tx, ty));
                                         if let Some(page_pt) = canvas.screen_to_page(tx, ty) {
-                                            if notebook.erase_at(page_pt, eraser_radius, stroke_max_radius, ui_state.eraser_mode) {
+                                            if notebook.erase_at(page_pt, ui_state.eraser_radius(), stroke_max_radius, ui_state.eraser_mode) {
                                                 canvas.sync_page(notebook.current_page_mut());
                                                 autosave.mark_dirty(&notebook, &mut manifest);
                                                 update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
@@ -3237,6 +3324,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
 
                         // 4. UI-Aktionen verarbeiten
+                        let mut pdf_thumbnails_wanted = Vec::new();
                         for action in actions {
                             match action {
                                 UiAction::SetTool(tool) => {
@@ -3485,6 +3573,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             last_deleted_page = Some((id, index, page));
                                         }
                                     }
+                                }
+                                UiAction::RequestPdfThumbnails(pdfs) => {
+                                    pdf_thumbnails_wanted = pdfs;
                                 }
                                 UiAction::LoadAllPages => {
                                     // Für die Vorschaubilder der Seitenauswahl; Fehler werden wie beim
@@ -4020,6 +4111,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             updated.active_highlighter = ui_state.active_highlighter;
                             updated.text_colors = ui_state.text_colors;
                             updated.active_text_color = ui_state.active_text_color;
+                            updated.eraser_radius_mm = ui_state.eraser_radius_mm;
                             if updated != ui_settings {
                                 ui_settings = updated;
                                 save_ui_settings(&ui_settings, ui_settings_path.as_deref(), &mut ui_state);
@@ -4098,6 +4190,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         // Scrollen), verwirft end_frame, bevor sie gerendert werden
                         pdf_renderer.begin_frame();
                         canvas.prepare_images(&mut |key| texture_for(key, &assets, &mut pdf_renderer));
+                        // Page picker: PDF pages rendered small, after the pages on screen (Issue #40)
+                        for pdf in pdf_thumbnails_wanted {
+                            let pixels = ink_notes::pdf_doc::THUMBNAIL_RENDER_PIXELS;
+                            let key = format!("{}@{pixels}", pdf.key());
+                            let result = match assets.path_of(&pdf.asset) {
+                                Ok(path) => pdf_renderer.take(&key, path, pdf.page as usize, pixels),
+                                Err(err) => Some(Err(err.to_string())),
+                            };
+                            let texture = match result {
+                                None => continue,
+                                Some(Ok(levels)) => levels.first().map(|image| {
+                                    let size = [image.width as usize, image.height as usize];
+                                    ui::Thumbnail(egui_ctx.load_texture(
+                                        &key,
+                                        egui::ColorImage::from_rgba_premultiplied(size, &image.pixels),
+                                        egui::TextureOptions::LINEAR,
+                                    ))
+                                }),
+                                Some(Err(err)) => {
+                                    eprintln!("[PDF] Vorschau {key}: {err}");
+                                    None
+                                }
+                            };
+                            // Bounded memory: a few hundred small pages at most
+                            if ui_state.pdf_thumbnails.len() >= 300 {
+                                ui_state.pdf_thumbnails.clear();
+                            }
+                            ui_state.pdf_thumbnails.insert(pdf.key(), texture);
+                            window.request_redraw();
+                        }
                         // Nächste PDF-Seite vorab rendern, damit Blättern sofort klappt
                         if !canvas.is_waiting_for_images() {
                             let next = notebook.pages.get(notebook.current_page_index + 1);

@@ -110,6 +110,9 @@ pub const PEN_WIDTH_PRESETS: [(f32, &str); 4] = [
 pub const HIGHLIGHTER_WIDTH_PRESETS: [(f32, &str); 3] =
     [(4.0, "4.0 mm"), (6.0, "6.0 mm"), (8.0, "8.0 mm")];
 
+/// Eraser radii in mm, small to large; the toolbar button cycles through them (Issue #38).
+pub const ERASER_RADII_MM: [f32; 4] = [1.5, 3.0, 6.0, 12.0];
+
 /// Abbildung zwischen Seitenkoordinaten und logischen Bildschirmpunkten (egui), vom
 /// Hauptprogramm je Bild aus Ansicht und Zoom gesetzt.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -247,6 +250,8 @@ pub enum UiAction {
     GoToPage(usize),
     /// Alle noch nicht geladenen Seiten laden (für die Vorschaubilder der Seitenauswahl)
     LoadAllPages,
+    /// Render these PDF pages small for the page picker (see `UiState::pdf_thumbnails`)
+    RequestPdfThumbnails(Vec<crate::document::PdfBackground>),
     SetBackground(PageBackground),
     ExportPdf,
     ZoomIn,
@@ -345,6 +350,16 @@ pub enum UiAction {
     ForceExit,
 }
 
+/// Texture of a page picker thumbnail (egui's handle has no `Debug`).
+#[derive(Clone)]
+pub struct Thumbnail(pub egui::TextureHandle);
+
+impl std::fmt::Debug for Thumbnail {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Thumbnail({:?})", self.0.id())
+    }
+}
+
 /// Zustand der grafischen Benutzeroberfläche.
 #[derive(Debug, Clone)]
 pub struct UiState {
@@ -433,6 +448,11 @@ pub struct UiState {
     pub is_more_menu_open: bool,
     /// Welche Striche der Radierer entfernt (gilt auch für Stiftrückseite und Seitentaste)
     pub eraser_mode: EraserMode,
+    /// Eraser radius in mm, one of [`ERASER_RADII_MM`] (also for the pen's eraser end)
+    pub eraser_radius_mm: f32,
+    /// Small renders of PDF pages for the page picker by [`crate::document::PdfBackground::key`];
+    /// `None` if the page could not be rendered (Issue #40)
+    pub pdf_thumbnails: std::collections::HashMap<String, Option<Thumbnail>>,
     /// Papierfarbe der Anzeige
     pub paper_theme: PaperTheme,
     /// Dunkle Tinte auf dunklem Papier aufhellen
@@ -537,6 +557,8 @@ impl Default for UiState {
             language: None,
             is_more_menu_open: false,
             eraser_mode: EraserMode::All,
+            eraser_radius_mm: ERASER_RADII_MM[1],
+            pdf_thumbnails: std::collections::HashMap::new(),
             paper_theme: PaperTheme::White,
             adapt_ink_colors: true,
             pattern_color: PatternColor::Light,
@@ -572,6 +594,28 @@ impl UiState {
     pub const SIDEBAR_BUTTON: f32 = 40.0;
     /// Abstand der Werkzeugleiste zum Fensterrand.
     pub const SIDEBAR_MARGIN: f32 = 10.0;
+
+    /// Index of the eraser size in [`ERASER_RADII_MM`] closest to the current radius.
+    pub fn eraser_size_index(&self) -> usize {
+        (0..ERASER_RADII_MM.len())
+            .min_by(|&a, &b| {
+                let da = (ERASER_RADII_MM[a] - self.eraser_radius_mm).abs();
+                let db = (ERASER_RADII_MM[b] - self.eraser_radius_mm).abs();
+                da.total_cmp(&db)
+            })
+            .unwrap_or(1)
+    }
+
+    /// Sets the eraser radius to the closest available size (e.g. from the settings file).
+    pub fn set_eraser_radius_mm(&mut self, mm: f32) {
+        self.eraser_radius_mm = mm;
+        self.eraser_radius_mm = ERASER_RADII_MM[self.eraser_size_index()];
+    }
+
+    /// Eraser radius in page units.
+    pub fn eraser_radius(&self) -> f32 {
+        self.eraser_radius_mm * crate::document::UNITS_PER_MM
+    }
 
     /// Schließt alle Popover und Dialoge. Wird vor dem Öffnen eines neuen aufgerufen, damit
     /// sich nie mehrere überlagern.
@@ -933,6 +977,8 @@ enum SidebarIcon<'a> {
     Lasso,
     /// Selbst gezeichnetes Lineal mit Skala
     Ruler,
+    /// Filled circle with this radius in points (eraser size)
+    Dot(f32),
 }
 
 /// Quadratischer Symbol-Knopf der Werkzeugleiste mit optionalem Farbbalken an der Unterkante.
@@ -1034,6 +1080,9 @@ fn sidebar_button(
                     egui::Color32::TRANSPARENT,
                     stroke,
                 ));
+            }
+            SidebarIcon::Dot(radius) => {
+                painter.circle_filled(c, radius, color);
             }
             SidebarIcon::Ruler => {
                 let dir = egui::vec2(1.0, -1.0).normalized();
@@ -1338,12 +1387,14 @@ const THUMBNAIL_POINT_BUDGET: usize = 1500;
 /// Zeichenbefehle für die verkleinerte Vorschau einer Seite in `rect` in der Papierfarbe
 /// `paper`: so groß wie möglich, waagerecht zentriert und oben (Querformat-Seiten sind
 /// flacher). Striche werden als Linien gezeichnet und bei vielen Punkten gleichmäßig
-/// ausgedünnt; `adapt_ink` hellt dunkle Tinte wie auf dem Blatt auf.
+/// ausgedünnt; `adapt_ink` hellt dunkle Tinte wie auf dem Blatt auf. `pdf_texture` is the
+/// rendered PDF page under the ink; without it the PDF page is a plain gray area.
 pub fn page_thumbnail_shapes(
     page: &Page,
     rect: egui::Rect,
     paper: PaperTheme,
     adapt_ink: bool,
+    pdf_texture: Option<egui::TextureId>,
 ) -> Vec<egui::Shape> {
     let scale = (rect.width() / page.size.x).min(rect.height() / page.size.y);
     let size = egui::vec2(page.size.x, page.size.y) * scale;
@@ -1359,18 +1410,27 @@ pub fn page_thumbnail_shapes(
     let adapt = adapt_ink && paper.is_dark();
     let to_screen = |p: glam::Vec2| sheet.min + egui::vec2(p.x * scale, p.y * scale);
 
-    // Importierte PDF-Seite als helle Fläche mit Rand
+    // Importierte PDF-Seite: gerendert oder als helle Fläche mit Rand
     if let Some(pdf) = &page.pdf_background {
         let points: Vec<egui::Pos2> = pdf
             .corners(page.size)
             .iter()
             .map(|&c| to_screen(c))
             .collect();
-        shapes.push(egui::Shape::convex_polygon(
-            points,
-            egui::Color32::from_rgb(236, 238, 243),
-            egui::Stroke::new(0.8_f32, egui::Color32::from_gray(150)),
-        ));
+        if let Some(texture) = pdf_texture {
+            shapes.push(egui::Shape::image(
+                texture,
+                egui::Rect::from_two_pos(points[0], points[2]),
+                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                egui::Color32::WHITE,
+            ));
+        } else {
+            shapes.push(egui::Shape::convex_polygon(
+                points,
+                egui::Color32::from_rgb(236, 238, 243),
+                egui::Stroke::new(0.8_f32, egui::Color32::from_gray(150)),
+            ));
+        }
     }
 
     // Bilder als Flächen unter der Tinte
@@ -1564,13 +1624,15 @@ fn linear_color32(color: [f32; 4]) -> egui::Color32 {
     egui::Rgba::from_rgba_unmultiplied(color[0], color[1], color[2], color[3]).into()
 }
 
-/// Kachel der Seitenauswahl: Vorschau der Seite mit Seitenzahl darunter.
+/// Kachel der Seitenauswahl: Vorschau der Seite mit Seitenzahl darunter. A visible PDF page
+/// that has not been rendered small yet is added to `wanted_pdfs`.
 fn page_thumbnail(
     ui: &mut egui::Ui,
     state: &UiState,
     page: &Page,
     number: usize,
     is_current: bool,
+    wanted_pdfs: &mut Vec<crate::document::PdfBackground>,
 ) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(PAGE_TILE, egui::Sense::click());
     if ui.is_rect_visible(rect) {
@@ -1578,12 +1640,23 @@ fn page_thumbnail(
             rect.min,
             egui::vec2(PAGE_TILE.x, PAGE_TILE.x * PAGE_HEIGHT / PAGE_WIDTH),
         );
+        let pdf_texture = match &page.pdf_background {
+            Some(pdf) => match state.pdf_thumbnails.get(&pdf.key()) {
+                Some(texture) => texture.as_ref().map(|t| t.0.id()),
+                None => {
+                    wanted_pdfs.push(pdf.clone());
+                    None
+                }
+            },
+            None => None,
+        };
         let painter = ui.painter();
         painter.extend(page_thumbnail_shapes(
             page,
             thumb,
             state.paper_theme,
             state.adapt_ink_colors,
+            pdf_texture,
         ));
         if !page.is_loaded {
             painter.text(
@@ -3144,7 +3217,7 @@ pub fn render_ui(
                                         (
                                             ActiveTool::Eraser,
                                             SidebarIcon::Eraser,
-                                            t!("Radierer (E oder rechte Maustaste) – darunter: ganze Striche, Teilstrich oder nur Textmarker"),
+                                            t!("Radierer (E oder rechte Maustaste) – darunter: ganze Striche, Teilstrich, nur Textmarker und die Größe"),
                                         ),
                                         (
                                             ActiveTool::Select,
@@ -3319,7 +3392,8 @@ pub fn render_ui(
                                     }
                                     let spacing = ui.spacing().item_spacing.y;
                                     let mut used = shown as f32 * (swatch + spacing);
-                                    // Radierer: statt Farben die Radier-Modi im selben Platz
+                                    // Eraser: its modes and size take the place of the colors (swatch-sized, so that
+                                    // all four fit)
                                     if state.active_tool == ActiveTool::Eraser {
                                         for (mode, icon, indicator, tooltip) in [
                                             (
@@ -3343,7 +3417,7 @@ pub fn render_ui(
                                         ] {
                                             if sidebar_button(
                                                 ui,
-                                                btn,
+                                                swatch,
                                                 icon,
                                                 state.eraser_mode == mode,
                                                 true,
@@ -3354,8 +3428,35 @@ pub fn render_ui(
                                             {
                                                 state.eraser_mode = mode;
                                             }
-                                            used += btn + spacing;
+                                            used += swatch + spacing;
                                         }
+                                        // Eraser size: tapping cycles small → large (Issue #38)
+                                        let index = state.eraser_size_index();
+                                        let diameter = format!("{}", ERASER_RADII_MM[index] * 2.0);
+                                        let tooltip = t!(
+                                            "Radiergröße {size} mm – tippen für die nächste Größe",
+                                            size = diameter
+                                        );
+                                        let dot = [2.5_f32, 4.0, 6.0, 8.5][index].min(swatch * 0.45);
+                                        if sidebar_button(
+                                            ui,
+                                            swatch,
+                                            SidebarIcon::Dot(dot),
+                                            false,
+                                            true,
+                                            None,
+                                            &tooltip,
+                                        )
+                                        .clicked()
+                                        {
+                                            let next = (index + 1) % ERASER_RADII_MM.len();
+                                            state.eraser_radius_mm = ERASER_RADII_MM[next];
+                                            state.set_export_message(t!(
+                                                "Radiergröße {size} mm",
+                                                size = format!("{}", ERASER_RADII_MM[next] * 2.0)
+                                            ));
+                                        }
+                                        used += swatch + spacing;
                                     }
                                     // Auswahl: unter den 4 Stiftfarben ist Platz für das Schloss des
                                     // Seitenverhältnisses beim Skalieren (Bilder: gesperrt, Issue #29)
@@ -4268,6 +4369,7 @@ pub fn render_ui(
                                 egui::ScrollArea::vertical()
                                     .max_height(420.0)
                                     .show(ui, |ui| {
+                                        let mut wanted_pdfs = Vec::new();
                                         egui::Grid::new("page_picker_grid")
                                             .spacing([8.0, 8.0])
                                             .show(ui, |ui| {
@@ -4281,6 +4383,7 @@ pub fn render_ui(
                                                         page,
                                                         idx + 1,
                                                         is_current,
+                                                        &mut wanted_pdfs,
                                                     )
                                                     .clicked()
                                                     {
@@ -4292,6 +4395,10 @@ pub fn render_ui(
                                                     }
                                                 }
                                             });
+                                        if !wanted_pdfs.is_empty() {
+                                            actions
+                                                .push(UiAction::RequestPdfThumbnails(wanted_pdfs));
+                                        }
                                     });
                             }
                             ui.add_space(4.0);
@@ -5711,6 +5818,20 @@ mod tests {
     }
 
     #[test]
+    fn test_eraser_size_snaps_to_the_available_sizes() {
+        let mut state = UiState::new();
+        assert_eq!(state.eraser_radius(), 30.0);
+        // Values from the settings file snap to the closest size
+        state.set_eraser_radius_mm(7.0);
+        assert_eq!(state.eraser_radius_mm, 6.0);
+        assert_eq!(state.eraser_size_index(), 2);
+        state.set_eraser_radius_mm(100.0);
+        assert_eq!(state.eraser_radius_mm, 12.0);
+        state.set_eraser_radius_mm(f32::NAN);
+        assert!(ERASER_RADII_MM.contains(&state.eraser_radius_mm));
+    }
+
+    #[test]
     fn test_view_mode_keeps_only_harmless_keys() {
         use winit::keyboard::{Key, NamedKey, SmolStr};
         let ch = |c: &str| Key::Character(SmolStr::new(c));
@@ -6314,13 +6435,13 @@ mod tests {
         // Leere Seite: nur das weiße Blatt
         let empty = Page::new(1, PageBackground::Blank);
         assert_eq!(
-            page_thumbnail_shapes(&empty, rect, PaperTheme::White, true).len(),
+            page_thumbnail_shapes(&empty, rect, PaperTheme::White, true, None).len(),
             1
         );
 
         // Striche liegen innerhalb der Kachel
         let page = page_with_strokes(3, 20);
-        let shapes = page_thumbnail_shapes(&page, rect, PaperTheme::White, true);
+        let shapes = page_thumbnail_shapes(&page, rect, PaperTheme::White, true, None);
         assert_eq!(shapes.len(), 1 + 3);
         let pts = shape_points(&shapes);
         assert!(!pts.is_empty());
@@ -6331,7 +6452,13 @@ mod tests {
 
         // Sehr volle Seite wird auf das Punktbudget ausgedünnt (+ Endpunkte je Strich)
         let full = page_with_strokes(100, 1000);
-        let pts = shape_points(&page_thumbnail_shapes(&full, rect, PaperTheme::White, true));
+        let pts = shape_points(&page_thumbnail_shapes(
+            &full,
+            rect,
+            PaperTheme::White,
+            true,
+            None,
+        ));
         assert!(
             pts.len() <= THUMBNAIL_POINT_BUDGET + 2 * 100,
             "{} Punkte statt höchstens {}",
@@ -6354,12 +6481,27 @@ mod tests {
                 ],
             ),
         );
-        let shapes = page_thumbnail_shapes(&with_image, rect, PaperTheme::White, true);
+        let shapes = page_thumbnail_shapes(&with_image, rect, PaperTheme::White, true, None);
         assert_eq!(shapes.len(), 3);
         assert!(
             matches!(shapes[1], egui::Shape::Path(ref p) if p.closed && p.fill != egui::Color32::TRANSPARENT)
         );
         assert!(matches!(shapes[2], egui::Shape::Path(ref p) if !p.closed));
+
+        // PDF page: the rendered page fills the PDF area, otherwise a gray area (Issue #40)
+        let mut with_pdf = Page::new(2, PageBackground::Blank);
+        with_pdf.pdf_background = Some(crate::document::PdfBackground {
+            asset: "a.pdf".into(),
+            page: 0,
+            width_pt: 595.0,
+            height_pt: 842.0,
+        });
+        let gray = page_thumbnail_shapes(&with_pdf, rect, PaperTheme::White, true, None);
+        assert!(matches!(gray[1], egui::Shape::Path(ref p) if p.closed));
+        let texture = egui::TextureId::User(7);
+        let shapes = page_thumbnail_shapes(&with_pdf, rect, PaperTheme::White, true, Some(texture));
+        assert!(matches!(shapes[1], egui::Shape::Mesh(ref m) if m.texture_id == texture));
+        assert!(rect.contains_rect(shapes[1].visual_bounding_rect()));
     }
 
     #[test]

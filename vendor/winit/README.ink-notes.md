@@ -11,6 +11,9 @@ docs of the original crate were removed.
   are now passed to the frame like a left click: close, minimize and maximize work with a
   finger, and dragging the title bar moves the window (Issue #36). All changes are marked with
   `ink-notes patch`.
+- `src/platform/wayland.rs`: `ignore_decoration_touches_until` lets ink-notes ignore touches on
+  the title bar while the pen is near the screen, so a resting palm does not move the window
+  (Issue #39).
 - `Cargo.toml`: `[lints.rust] warnings = "allow"`, because a path dependency is not built with
   capped lints like a crates.io dependency.
 

@@ -27,7 +27,7 @@ The interface is available in English and German; ink-notes follows the system l
 - **Two-stage smoothing:** While you write, a 1€ filter removes jitter and the line appears immediately. When you lift the pen, the stroke is refined: corners (bends over 65°) are kept and drawn round, the pressure curve is smoothed, redundant points are dropped and the ends become round.
 - **Pressure curve** adjustable to your pen in the ☰ menu (softer/harder, threshold against base noise).
 - **Pen buttons** can be assigned in the ☰ menu: erase (default), select, highlighter, pen or nothing – active while the button is held. Each button appears there after it is pressed for the first time.
-- **Eraser** with three modes: whole strokes, only the part you wipe over (partial stroke), or highlighter only. The back end of the pen erases too.
+- **Eraser** with three modes: whole strokes, only the part you wipe over (partial stroke), or highlighter only, in four sizes (remembered). The back end of the pen erases too.
 - **Virtual ruler** (`L`): move it, rotate it by its handle (snaps to 15°); strokes along an edge become straight.
 - **View only** (👁 in the toolbar): pen, finger and mouse only scroll and zoom; the tools disappear and nothing can be changed by accident. Tap 👁 again to write.
 - **Make space** (↕ in the toolbar): tap the page and drag down – everything below moves along, also on the following pages. Whatever would slide past the end of a page continues on the next one; missing pages are appended. Dragging up closes empty space. Undo reverts it in one step.
@@ -55,7 +55,7 @@ The interface is available in English and German; ink-notes follows the system l
 - **Continuous scrolling, endless canvas or fixed pages, per notebook:** chosen when creating a notebook (default: continuous; or endless) and switchable in the ☰ menu – where fixed pages are available too (page by page with arrows in the toolbar). In continuous mode the pages hang seamlessly below each other with a dark line marking the boundary. A quick swipe keeps gliding, and the scrollbar on the edge opposite the toolbar jumps through long PDFs with the page number shown. Writing in the bottom fifth of the last page adds a new page automatically. Endless is a single borderless canvas that grows to the right and down as far as you like, starting at the top left; the PDF export only contains the area you used.
 - **Insert and delete pages:** ➕ in the toolbar inserts an empty page after the current one. Delete it in the ☰ menu (with confirmation); the most recently deleted page can be restored there while the app is running.
 - **Zoom** from 25 % to 1000 % (`Ctrl + mouse wheel`, two fingers, `Ctrl + +/-/0`), pan with the middle mouse button, `Space + drag` or one finger.
-- **Pages** can be appended or inserted right after the current page, and given **page titles**; the page overview shows thumbnails or a table of contents. Page titles become bookmarks in the PDF.
+- **Pages** can be appended or inserted right after the current page, and given **page titles**; the page overview shows thumbnails (including the imported PDF page) or a table of contents. Page titles become bookmarks in the PDF.
 - **Toolbar** can be docked left or right (for left- and right-handed use).
 
 ### Notebooks and saving
@@ -72,7 +72,7 @@ The interface is available in English and German; ink-notes follows the system l
 
 ### Input devices
 - Pens via the Wayland or X11 tablet protocol (pressure, eraser end, side button).
-- While the pen touches the screen or hovers nearby, touches by the hand are ignored.
+- While the pen touches the screen or hovers nearby, and shortly after, touches by the hand are ignored – also on the title bar. A hand already resting on the screen when the pen comes near is ignored until it is lifted.
 - Fingers: scroll and zoom by default; drawing with a finger can be enabled in the ☰ menu.
 
 ### Updates

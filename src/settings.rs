@@ -227,6 +227,8 @@ pub struct UiSettings {
     pub stylus_buttons: Vec<StylusButton>,
     /// Sprache der Oberfläche; ohne Angabe die des Systems
     pub language: Option<Language>,
+    /// Eraser radius in mm (Issue #38)
+    pub eraser_radius_mm: f32,
 }
 
 impl Default for UiSettings {
@@ -246,6 +248,7 @@ impl Default for UiSettings {
             active_text_color: 0,
             stylus_buttons: Vec::new(),
             language: None,
+            eraser_radius_mm: 3.0,
         }
     }
 }
@@ -345,6 +348,7 @@ mod tests {
                 },
             ],
             language: Some(Language::English),
+            eraser_radius_mm: 6.0,
         };
         settings.save_to(&path).unwrap();
         assert_eq!(UiSettings::load_from(&path), settings);
