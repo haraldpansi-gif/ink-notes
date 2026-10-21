@@ -1426,6 +1426,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut touch_pan_last_pos = (0.0_f32, 0.0_f32);
     // Nachgleiten nach schnellem Wischen mit dem Finger (Issue #28)
     let mut fling = ink_notes::viewport::Fling::default();
+    // Diagnosis for Issue #28: log every finger lift and the swipe speed
+    let debug_fling = std::env::var_os("INK_NOTES_DEBUG_FLING").is_some();
+    if debug_fling {
+        eprintln!("[Nachgleiten] Diagnose aktiv – bitte mit dem Finger wischen");
+    }
 
     // Stylus / Digitizer Zustand (Octotablet / Wayland Tablet Protocol)
     let mut is_stylus_drawing = false;
@@ -2843,6 +2848,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                         // Hardware-Palm-Rejection: Wenn der Stylus in Proximity ist oder zeichnet, Touch ignorieren
                         if is_stylus_drawing || is_stylus_in_proximity {
+                            if debug_fling && touch.phase != TouchPhase::Moved {
+                                eprintln!("[Nachgleiten] Finger ignoriert ({:?}): Stift in der Nähe", touch.phase);
+                            }
                             return;
                         }
 
@@ -3058,6 +3066,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             TouchPhase::Ended | TouchPhase::Cancelled => {
                                 active_touches.remove(&touch.id);
                                 long_press.cancel();
+                                if debug_fling {
+                                    eprintln!(
+                                        "[Nachgleiten] Finger abgehoben ({:?}), verschiebt: {}, weitere Finger: {}",
+                                        touch.phase,
+                                        is_touch_panning,
+                                        active_touches.len()
+                                    );
+                                }
 
                                 if active_touches.is_empty() {
                                     is_pinch_gesturing = false;
@@ -3069,7 +3085,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         canvas.pan(dx, dy);
                                         fling.track(Vec2::new(dx, dy), Instant::now());
                                         let velocity = fling.release(Instant::now());
-                                        if std::env::var_os("INK_NOTES_DEBUG_FLING").is_some() {
+                                        if debug_fling {
                                             eprintln!(
                                                 "[Nachgleiten] {:.0} px/s beim Abheben, gleitet: {}",
                                                 velocity.length(),

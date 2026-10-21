@@ -639,13 +639,16 @@ impl UiState {
 
     /// Länge der längsten Farbpalette; so viel Platz hält die Leiste immer frei.
     pub const MAX_PALETTE_LEN: usize = 5;
+    /// Vertical gap between toolbar buttons and the height of a divider line.
+    pub const SIDEBAR_SPACING: f32 = 2.0;
+    pub const SIDEBAR_DIVIDER: f32 = 3.0;
 
     /// Durchmesser der Farbtupfer passend zur Knopfgröße.
     pub fn sidebar_swatch_size(button_size: f32) -> f32 {
         button_size - 10.0
     }
 
-    /// Größte Knopfgröße (40 px, schrittweise bis 28 px), bei der die Leiste mit allen Elementen
+    /// Größte Knopfgröße (40 px, schrittweise bis 26 px), bei der die Leiste mit allen Elementen
     /// des aktiven Werkzeugs in `max_height` passt. `continuous`: durchgehende Ansicht (ohne
     /// Blätterpfeile).
     pub fn sidebar_button_size(tool: ActiveTool, max_height: f32, continuous: bool) -> f32 {
@@ -655,11 +658,11 @@ impl UiState {
         let page_buttons = if continuous { 2 } else { 4 };
         let buttons = 12 + page_buttons + if select { 4 } else { 0 };
         let dividers = 5 + usize::from(select);
-        let spacing = 3.0;
+        let spacing = Self::SIDEBAR_SPACING;
         let needed = |b: f32| {
             buttons as f32 * (b + spacing)
                 + Self::MAX_PALETTE_LEN as f32 * (Self::sidebar_swatch_size(b) + spacing)
-                + dividers as f32 * (7.0 + spacing)
+                + dividers as f32 * (Self::SIDEBAR_DIVIDER + spacing)
                 // frame, margins and the spacing egui adds (measured with the selection tool)
                 + 40.0
         };
@@ -1092,8 +1095,10 @@ fn sidebar_button(
 
 /// Waagerechte Trennlinie zwischen Gruppen der Werkzeugleiste.
 fn sidebar_divider(ui: &mut egui::Ui, button_size: f32) {
-    let (rect, _) =
-        ui.allocate_exact_size(egui::vec2(button_size - 12.0, 7.0), egui::Sense::hover());
+    let (rect, _) = ui.allocate_exact_size(
+        egui::vec2(button_size - 12.0, UiState::SIDEBAR_DIVIDER),
+        egui::Sense::hover(),
+    );
     ui.painter().hline(
         rect.x_range(),
         rect.center().y,
@@ -1502,7 +1507,7 @@ fn text_edit_overlay(ctx: &egui::Context, state: &mut UiState) {
     // anpassen, damit die Zeilen an denselben Stellen umbrechen wie auf dem Blatt
     let height_px = font_size * ctx.pixels_per_point() * edit.text.font.height_per_em();
     let rounding = height_px.round().max(1.0) / height_px;
-    let width = (edit.text.wrap_width.max(edit.text.size) * sx * view.scale * rounding).max(8.0);
+    let width = (edit.text.edit_width() * sx * view.scale * rounding).max(8.0);
     let color = color32_from(if adapt {
         adapt_ink_color(edit.color)
     } else {
@@ -3004,7 +3009,7 @@ pub fn render_ui(
                             // Zentriertes Layout nimmt sonst die volle Fensterbreite ein
                             ui.set_width(btn);
                             ui.with_layout(egui::Layout::top_down(egui::Align::Center), |ui| {
-                                ui.spacing_mut().item_spacing = egui::vec2(0.0, 3.0);
+                                ui.spacing_mut().item_spacing = egui::vec2(0.0, UiState::SIDEBAR_SPACING);
 
                                 // --- Notizbücher ---
                                 let doc_tooltip = t!(

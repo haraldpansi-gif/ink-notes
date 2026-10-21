@@ -151,6 +151,20 @@ impl TextBox {
         glam::Vec2::new(self.wrap_width.max(self.size), self.layout().height())
     }
 
+    /// Width of the field while it is being edited: as wide as the longest line plus room for
+    /// the next character, at most the wrap width, so a new field starts short (Issue #34).
+    pub fn edit_width(&self) -> f32 {
+        let widest = self
+            .layout()
+            .lines
+            .iter()
+            .map(|line| line.width)
+            .fold(0.0, f32::max);
+        (widest + self.size)
+            .max(3.0 * self.size)
+            .min(self.wrap_width.max(self.size))
+    }
+
     /// Setzt den Text mit Zeilenumbruch an Leerzeichen; zu lange Wörter werden zeichenweise
     /// umbrochen, Zeilenumbrüche im Text bleiben erhalten.
     pub fn layout(&self) -> TextLayout {
@@ -407,6 +421,19 @@ mod tests {
 
     fn sample(content: &str, wrap_width: f32) -> TextBox {
         TextBox::new(content.to_string(), 50.0, TextFont::Sans, wrap_width)
+    }
+
+    #[test]
+    fn test_edit_width_grows_with_the_text() {
+        let empty = sample("", 1500.0);
+        assert!((empty.edit_width() - 150.0).abs() < 1e-3);
+        let short = sample("Hallo", 1500.0);
+        let longer = sample("Hallo Welt, wie geht es", 1500.0);
+        assert!(short.edit_width() < longer.edit_width());
+        assert!(longer.edit_width() < 1500.0);
+        // Long text wraps at the page edge and fills the full width
+        let long = sample(&"Wort ".repeat(100), 1500.0);
+        assert!((long.edit_width() - 1500.0).abs() < 1e-3);
     }
 
     #[test]
