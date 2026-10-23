@@ -1801,8 +1801,9 @@ pub fn contour_rms(points: &[Vec2], shape: &RecognizedShape) -> Option<f32> {
     Some((sum_sq / points.len() as f32).sqrt())
 }
 
-/// Longest miter of a polygon corner, in half stroke widths; sharper corners are bevelled.
-const MITER_LIMIT: f32 = 2.0;
+/// Longest miter of a polygon corner, in half stroke widths: corners down to about 14° stay
+/// pointed, only sharper ones are bevelled (Issue #41).
+const MITER_LIMIT: f32 = 8.0;
 
 /// Vertex pairs (left, right of the outline direction) of a triangle strip at corner `curr`
 /// between the edges from `prev` and to `next` with left normals `n_prev` and `n_next`. Both

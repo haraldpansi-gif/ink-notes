@@ -110,8 +110,10 @@ pub const PEN_WIDTH_PRESETS: [(f32, &str); 4] = [
 pub const HIGHLIGHTER_WIDTH_PRESETS: [(f32, &str); 3] =
     [(4.0, "4.0 mm"), (6.0, "6.0 mm"), (8.0, "8.0 mm")];
 
-/// Eraser radii in mm, small to large; the toolbar button cycles through them (Issue #38).
+/// Eraser size presets as radius in mm, small to large (Issue #38).
 pub const ERASER_RADII_MM: [f32; 4] = [1.5, 3.0, 6.0, 12.0];
+/// Range of the eraser size slider (diameter in mm).
+pub const ERASER_DIAMETER_RANGE_MM: (f32, f32) = (2.0, 30.0);
 
 /// Abbildung zwischen Seitenkoordinaten und logischen Bildschirmpunkten (egui), vom
 /// Hauptprogramm je Bild aus Ansicht und Zoom gesetzt.
@@ -376,6 +378,8 @@ pub struct UiState {
     pub toolbar_rect: Option<egui::Rect>,
     /// Öffnungszustand des Einstellungs-Popovers für den Stift
     pub is_pen_menu_open: bool,
+    /// Eraser size menu next to the size button (Issue #38)
+    pub is_eraser_menu_open: bool,
     /// Öffnungszustand des Einstellungs-Popovers für den Textmarker
     pub is_highlighter_menu_open: bool,
     /// Bildschirm-Rechteck des geöffneten Einstellungs-Popovers
@@ -514,6 +518,7 @@ impl Default for UiState {
             current_zoom: 1.0,
             toolbar_rect: None,
             is_pen_menu_open: false,
+            is_eraser_menu_open: false,
             is_highlighter_menu_open: false,
             popover_rect: None,
             is_document_menu_open: false,
@@ -595,21 +600,14 @@ impl UiState {
     /// Abstand der Werkzeugleiste zum Fensterrand.
     pub const SIDEBAR_MARGIN: f32 = 10.0;
 
-    /// Index of the eraser size in [`ERASER_RADII_MM`] closest to the current radius.
-    pub fn eraser_size_index(&self) -> usize {
-        (0..ERASER_RADII_MM.len())
-            .min_by(|&a, &b| {
-                let da = (ERASER_RADII_MM[a] - self.eraser_radius_mm).abs();
-                let db = (ERASER_RADII_MM[b] - self.eraser_radius_mm).abs();
-                da.total_cmp(&db)
-            })
-            .unwrap_or(1)
-    }
-
-    /// Sets the eraser radius to the closest available size (e.g. from the settings file).
+    /// Sets the eraser radius within the slider range (e.g. from the settings file).
     pub fn set_eraser_radius_mm(&mut self, mm: f32) {
-        self.eraser_radius_mm = mm;
-        self.eraser_radius_mm = ERASER_RADII_MM[self.eraser_size_index()];
+        let (min, max) = ERASER_DIAMETER_RANGE_MM;
+        self.eraser_radius_mm = if mm.is_finite() {
+            mm.clamp(min / 2.0, max / 2.0)
+        } else {
+            ERASER_RADII_MM[1]
+        };
     }
 
     /// Eraser radius in page units.
@@ -624,6 +622,7 @@ impl UiState {
         self.context_menu = None;
         self.is_text_color_menu_open = false;
         self.is_pen_menu_open = false;
+        self.is_eraser_menu_open = false;
         self.is_highlighter_menu_open = false;
         self.is_more_menu_open = false;
         self.show_page_jump_popup = false;
@@ -962,6 +961,61 @@ fn stroke_preview_button(
     }
 
     response.on_hover_text(t!("Stärke auf {width} setzen", width = label_text))
+}
+
+/// Eraser size button of the eraser menu: a circle in proportion to the size and its diameter.
+fn eraser_size_button(ui: &mut egui::Ui, is_active: bool, radius_mm: f32) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(66.0, 40.0), egui::Sense::click());
+    let label = format!("{} mm", format_mm(radius_mm * 2.0));
+    if ui.is_rect_visible(rect) {
+        let painter = ui.painter();
+        let (bg, border) = if is_active {
+            (
+                egui::Color32::from_rgba_premultiplied(50, 85, 150, 220),
+                egui::Color32::from_rgba_unmultiplied(120, 175, 255, 200),
+            )
+        } else if response.hovered() {
+            (
+                egui::Color32::from_rgba_unmultiplied(255, 255, 255, 16),
+                egui::Color32::from_rgba_unmultiplied(255, 255, 255, 25),
+            )
+        } else {
+            (
+                egui::Color32::from_rgba_unmultiplied(255, 255, 255, 8),
+                egui::Color32::from_rgba_unmultiplied(255, 255, 255, 14),
+            )
+        };
+        painter.rect_filled(rect, egui::Rounding::same(6.0), bg);
+        painter.rect_stroke(
+            rect,
+            egui::Rounding::same(6.0),
+            egui::Stroke::new(1.0_f32, border),
+        );
+        let text_color = if is_active {
+            egui::Color32::WHITE
+        } else {
+            egui::Color32::from_gray(190)
+        };
+        painter.circle_stroke(
+            egui::pos2(rect.center().x, rect.center().y - 5.0),
+            (radius_mm * 0.9).clamp(1.5, 11.0),
+            egui::Stroke::new(1.5_f32, text_color),
+        );
+        painter.text(
+            egui::pos2(rect.center().x, rect.max.y - 7.5),
+            egui::Align2::CENTER_CENTER,
+            &label,
+            egui::FontId::proportional(10.0),
+            text_color,
+        );
+    }
+    response.on_hover_text(t!("Radiergröße {size} setzen", size = label))
+}
+
+/// Millimeters without trailing zeros: 3, 1.5, 2.25.
+fn format_mm(mm: f32) -> String {
+    let text = format!("{:.2}", mm);
+    text.trim_end_matches('0').trim_end_matches('.').to_string()
 }
 
 /// Inhalt eines Symbol-Knopfs der Werkzeugleiste.
@@ -1379,8 +1433,36 @@ fn color_circle_swatch(
 
 /// Spalten der Seitenauswahl.
 const PAGE_PICKER_COLUMNS: usize = 4;
-/// Größe einer Kachel der Seitenauswahl: A4-Vorschau plus Zeile für die Seitenzahl.
-const PAGE_TILE: egui::Vec2 = egui::vec2(66.0, 66.0 * PAGE_HEIGHT / PAGE_WIDTH + 18.0);
+/// Breite einer Kachel der Seitenauswahl; darunter kommt eine Zeile für die Seitenzahl.
+const PAGE_TILE_WIDTH: f32 = 66.0;
+const PAGE_TILE_LABEL: f32 = 18.0;
+
+/// Size of a page picker tile: as high as the tallest page of the notebook needs, so that
+/// slides (landscape PDFs) get flat tiles without an empty strip (Issue #40).
+fn page_tile_size(notebook: &Notebook) -> egui::Vec2 {
+    let aspect = notebook
+        .pages
+        .iter()
+        .map(|p| p.size.y / p.size.x.max(1.0))
+        .fold(0.0_f32, f32::max);
+    let aspect = if aspect > 0.0 {
+        aspect.clamp(0.3, 2.0)
+    } else {
+        PAGE_HEIGHT / PAGE_WIDTH
+    };
+    egui::vec2(PAGE_TILE_WIDTH, PAGE_TILE_WIDTH * aspect + PAGE_TILE_LABEL)
+}
+
+/// Rectangle of a page of `page_size` in a thumbnail area: as large as possible, centered
+/// horizontally and at the top.
+fn thumbnail_sheet(page_size: glam::Vec2, rect: egui::Rect) -> egui::Rect {
+    let scale = (rect.width() / page_size.x).min(rect.height() / page_size.y);
+    let size = egui::vec2(page_size.x, page_size.y) * scale;
+    egui::Rect::from_min_size(
+        rect.min + egui::vec2((rect.width() - size.x) / 2.0, 0.0),
+        size,
+    )
+}
 /// Höchstzahl gezeichneter Punkte pro Vorschau (dünnt volle Seiten aus).
 const THUMBNAIL_POINT_BUDGET: usize = 1500;
 
@@ -1396,12 +1478,8 @@ pub fn page_thumbnail_shapes(
     adapt_ink: bool,
     pdf_texture: Option<egui::TextureId>,
 ) -> Vec<egui::Shape> {
-    let scale = (rect.width() / page.size.x).min(rect.height() / page.size.y);
-    let size = egui::vec2(page.size.x, page.size.y) * scale;
-    let sheet = egui::Rect::from_min_size(
-        rect.min + egui::vec2((rect.width() - size.x) / 2.0, 0.0),
-        size,
-    );
+    let sheet = thumbnail_sheet(page.size, rect);
+    let scale = sheet.width() / page.size.x;
     let mut shapes = vec![egui::Shape::rect_filled(
         sheet,
         egui::Rounding::same(3.0),
@@ -1632,14 +1710,13 @@ fn page_thumbnail(
     page: &Page,
     number: usize,
     is_current: bool,
+    tile: egui::Vec2,
     wanted_pdfs: &mut Vec<crate::document::PdfBackground>,
 ) -> egui::Response {
-    let (rect, response) = ui.allocate_exact_size(PAGE_TILE, egui::Sense::click());
+    let (rect, response) = ui.allocate_exact_size(tile, egui::Sense::click());
     if ui.is_rect_visible(rect) {
-        let thumb = egui::Rect::from_min_size(
-            rect.min,
-            egui::vec2(PAGE_TILE.x, PAGE_TILE.x * PAGE_HEIGHT / PAGE_WIDTH),
-        );
+        let thumb =
+            egui::Rect::from_min_size(rect.min, egui::vec2(tile.x, tile.y - PAGE_TILE_LABEL));
         let pdf_texture = match &page.pdf_background {
             Some(pdf) => match state.pdf_thumbnails.get(&pdf.key()) {
                 Some(texture) => texture.as_ref().map(|t| t.0.id()),
@@ -1658,9 +1735,11 @@ fn page_thumbnail(
             state.adapt_ink_colors,
             pdf_texture,
         ));
+        // Frame and marks follow the page itself, not the whole tile
+        let sheet = thumbnail_sheet(page.size, thumb);
         if !page.is_loaded {
             painter.text(
-                thumb.center(),
+                sheet.center(),
                 egui::Align2::CENTER_CENTER,
                 "…",
                 egui::FontId::proportional(16.0),
@@ -1669,7 +1748,7 @@ fn page_thumbnail(
         }
         // Lesezeichen-Ecke für benannte Seiten
         if page.title.is_some() {
-            let corner = thumb.right_top();
+            let corner = sheet.right_top();
             painter.add(egui::Shape::convex_polygon(
                 vec![
                     corner + egui::vec2(-14.0, 0.0),
@@ -1687,7 +1766,7 @@ fn page_thumbnail(
         } else {
             egui::Stroke::new(1.0_f32, egui::Color32::from_white_alpha(60))
         };
-        painter.rect_stroke(thumb, egui::Rounding::same(3.0), border);
+        painter.rect_stroke(sheet, egui::Rounding::same(3.0), border);
         painter.text(
             egui::pos2(rect.center().x, rect.max.y - 8.0),
             egui::Align2::CENTER_CENTER,
@@ -3030,6 +3109,7 @@ pub fn render_ui(
     context_menu(ctx, state, &mut actions);
 
     let mut pen_btn_rect = None;
+    let mut eraser_btn_rect = None;
     let mut high_btn_rect = None;
     let mut text_color_btn_rect = None;
     let mut more_btn_rect = None;
@@ -3430,31 +3510,27 @@ pub fn render_ui(
                                             }
                                             used += swatch + spacing;
                                         }
-                                        // Eraser size: tapping cycles small → large (Issue #38)
-                                        let index = state.eraser_size_index();
-                                        let diameter = format!("{}", ERASER_RADII_MM[index] * 2.0);
+                                        // Eraser size: opens a menu like the pens (Issue #38)
+                                        let diameter = format_mm(state.eraser_radius_mm * 2.0);
                                         let tooltip = t!(
-                                            "Radiergröße {size} mm – tippen für die nächste Größe",
+                                            "Radiergröße {size} mm – tippen zum Ändern",
                                             size = diameter
                                         );
-                                        let dot = [2.5_f32, 4.0, 6.0, 8.5][index].min(swatch * 0.45);
-                                        if sidebar_button(
+                                        let dot = (state.eraser_radius_mm * 0.7).clamp(2.0, swatch * 0.45);
+                                        let response = sidebar_button(
                                             ui,
                                             swatch,
                                             SidebarIcon::Dot(dot),
-                                            false,
+                                            state.is_eraser_menu_open,
                                             true,
                                             None,
                                             &tooltip,
-                                        )
-                                        .clicked()
-                                        {
-                                            let next = (index + 1) % ERASER_RADII_MM.len();
-                                            state.eraser_radius_mm = ERASER_RADII_MM[next];
-                                            state.set_export_message(t!(
-                                                "Radiergröße {size} mm",
-                                                size = format!("{}", ERASER_RADII_MM[next] * 2.0)
-                                            ));
+                                        );
+                                        eraser_btn_rect = Some(response.rect);
+                                        if response.clicked() {
+                                            let open = !state.is_eraser_menu_open;
+                                            state.close_overlays();
+                                            state.is_eraser_menu_open = open;
                                         }
                                         used += swatch + spacing;
                                     }
@@ -3770,6 +3846,84 @@ pub fn render_ui(
                             .changed()
                         {
                             actions.push(UiAction::SetStrokeWidthMm(state.pen_stroke_width_mm));
+                        }
+                    });
+
+                    frame.response.rect
+                });
+
+            popover_rect = Some(pop_response.inner);
+        }
+    } else if state.is_eraser_menu_open && state.active_tool == ActiveTool::Eraser {
+        if let Some(btn_rect) = eraser_btn_rect {
+            let (popover_pos, pivot) =
+                popover_placement(state.sidebar_side, area_response.inner, btn_rect);
+            let pop_response = egui::Area::new(egui::Id::new("eraser_settings_popover"))
+                .fixed_pos(popover_pos)
+                .pivot(pivot)
+                .constrain(true)
+                .order(egui::Order::Foreground)
+                .show(ctx, |ui| {
+                    let frame = popover_frame().show(ui, |ui| {
+                        ui.set_width(320.0);
+                        touch_friendly_spacing(ui);
+
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                egui::RichText::new(t!("Radierer"))
+                                    .strong()
+                                    .color(egui::Color32::WHITE)
+                                    .size(12.5),
+                            );
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if close_button(ui).clicked() {
+                                        state.is_eraser_menu_open = false;
+                                    }
+                                },
+                            );
+                        });
+
+                        ui.add_space(8.0);
+                        ui.label(
+                            egui::RichText::new(t!("GRÖSSE"))
+                                .size(10.5)
+                                .strong()
+                                .color(egui::Color32::from_gray(160)),
+                        );
+                        ui.add_space(3.0);
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing = egui::vec2(6.0, 0.0);
+                            for radius in ERASER_RADII_MM {
+                                let is_sel = (state.eraser_radius_mm - radius).abs() < 0.05;
+                                if eraser_size_button(ui, is_sel, radius).clicked() {
+                                    state.eraser_radius_mm = radius;
+                                }
+                            }
+                        });
+
+                        ui.add_space(10.0);
+                        ui.label(
+                            egui::RichText::new(t!("STUFENLOSE GRÖSSE"))
+                                .size(10.5)
+                                .strong()
+                                .color(egui::Color32::from_gray(160)),
+                        );
+                        ui.add_space(2.0);
+                        let mut diameter = state.eraser_radius_mm * 2.0;
+                        if ui
+                            .add(
+                                egui::Slider::new(
+                                    &mut diameter,
+                                    ERASER_DIAMETER_RANGE_MM.0..=ERASER_DIAMETER_RANGE_MM.1,
+                                )
+                                .suffix(" mm")
+                                .step_by(0.5),
+                            )
+                            .changed()
+                        {
+                            state.set_eraser_radius_mm(diameter / 2.0);
                         }
                     });
 
@@ -4295,7 +4449,9 @@ pub fn render_ui(
                     popover_frame()
                         .show(ui, |ui| {
                             // Breite = Kachelraster; sonst nimmt die Kopfzeile die ganze Fensterbreite ein
-                            ui.set_width(PAGE_PICKER_COLUMNS as f32 * (PAGE_TILE.x + 8.0) - 8.0);
+                            ui.set_width(
+                                PAGE_PICKER_COLUMNS as f32 * (PAGE_TILE_WIDTH + 8.0) - 8.0,
+                            );
                             touch_friendly_spacing(ui);
                             let title = t!("Seiten ({count})", count = notebook.pages.len());
                             if dialog_header(ui, &title, true) {
@@ -4370,6 +4526,7 @@ pub fn render_ui(
                                     .max_height(420.0)
                                     .show(ui, |ui| {
                                         let mut wanted_pdfs = Vec::new();
+                                        let tile = page_tile_size(notebook);
                                         egui::Grid::new("page_picker_grid")
                                             .spacing([8.0, 8.0])
                                             .show(ui, |ui| {
@@ -4383,6 +4540,7 @@ pub fn render_ui(
                                                         page,
                                                         idx + 1,
                                                         is_current,
+                                                        tile,
                                                         &mut wanted_pdfs,
                                                     )
                                                     .clicked()
@@ -4428,6 +4586,7 @@ pub fn render_ui(
 
     // Automatisches Schließen der Popover bei Klick außerhalb von Leiste und Popover
     if (state.is_pen_menu_open
+        || state.is_eraser_menu_open
         || state.is_highlighter_menu_open
         || state.is_text_color_menu_open
         || state.is_more_menu_open
@@ -4439,6 +4598,7 @@ pub fn render_ui(
             let in_popover = state.popover_rect.is_some_and(|r| r.contains(pos));
             if !in_toolbar && !in_popover {
                 state.is_pen_menu_open = false;
+                state.is_eraser_menu_open = false;
                 state.is_highlighter_menu_open = false;
                 state.is_text_color_menu_open = false;
                 state.is_more_menu_open = false;
@@ -5818,17 +5978,20 @@ mod tests {
     }
 
     #[test]
-    fn test_eraser_size_snaps_to_the_available_sizes() {
+    fn test_eraser_size_stays_in_the_slider_range() {
         let mut state = UiState::new();
         assert_eq!(state.eraser_radius(), 30.0);
-        // Values from the settings file snap to the closest size
+        // Values from the settings file stay within the slider range
         state.set_eraser_radius_mm(7.0);
-        assert_eq!(state.eraser_radius_mm, 6.0);
-        assert_eq!(state.eraser_size_index(), 2);
+        assert_eq!(state.eraser_radius_mm, 7.0);
         state.set_eraser_radius_mm(100.0);
-        assert_eq!(state.eraser_radius_mm, 12.0);
+        assert_eq!(state.eraser_radius_mm, ERASER_DIAMETER_RANGE_MM.1 / 2.0);
+        state.set_eraser_radius_mm(0.0);
+        assert_eq!(state.eraser_radius_mm, ERASER_DIAMETER_RANGE_MM.0 / 2.0);
         state.set_eraser_radius_mm(f32::NAN);
-        assert!(ERASER_RADII_MM.contains(&state.eraser_radius_mm));
+        assert_eq!(state.eraser_radius_mm, 3.0);
+        assert_eq!(format_mm(3.0), "3");
+        assert_eq!(format_mm(2.5), "2.5");
     }
 
     #[test]
@@ -6502,6 +6665,25 @@ mod tests {
         let shapes = page_thumbnail_shapes(&with_pdf, rect, PaperTheme::White, true, Some(texture));
         assert!(matches!(shapes[1], egui::Shape::Mesh(ref m) if m.texture_id == texture));
         assert!(rect.contains_rect(shapes[1].visual_bounding_rect()));
+    }
+
+    #[test]
+    fn test_page_tiles_follow_the_page_shape() {
+        // Slides only: flat tiles without an empty strip below the page (Issue #40)
+        let mut notebook = Notebook::new();
+        notebook.pages[0].size = glam::Vec2::new(2970.0, 1671.0);
+        let flat = page_tile_size(&notebook);
+        assert!((flat.y - PAGE_TILE_LABEL - flat.x * 1671.0 / 2970.0).abs() < 0.01);
+        let thumb =
+            egui::Rect::from_min_size(egui::Pos2::ZERO, flat - egui::vec2(0.0, PAGE_TILE_LABEL));
+        let sheet = thumbnail_sheet(notebook.pages[0].size, thumb);
+        assert!((sheet.height() - thumb.height()).abs() < 0.01);
+
+        // A portrait page among them: tiles as high as A4, slides at the top
+        let index = notebook.add_page(PageBackground::Blank);
+        notebook.pages[index].size = crate::document::A4_SIZE;
+        let tall = page_tile_size(&notebook);
+        assert!((tall.y - PAGE_TILE_LABEL - tall.x * PAGE_HEIGHT / PAGE_WIDTH).abs() < 0.01);
     }
 
     #[test]

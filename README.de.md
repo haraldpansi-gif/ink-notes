@@ -27,7 +27,7 @@ Die Oberfläche gibt es auf Deutsch und Englisch; ink-notes folgt der Systemspra
 - **Glättung in zwei Stufen:** Während des Schreibens glättet ein 1€-Filter das Zittern, die Linie erscheint sofort. Beim Absetzen wird der Strich nachbearbeitet: Ecken (Knicke über 65°) bleiben erhalten und werden rund verbunden, der Druckverlauf wird geglättet, überflüssige Punkte entfallen, die Enden werden rund.
 - **Druckkurve** im ☰-Menü an den eigenen Stift anpassen (weicher/härter, Schwelle gegen Grundrauschen).
 - **Tasten am Stift** im ☰-Menü belegen: Radieren (Standard), Auswählen, Textmarker, Stift oder nichts – gilt, solange die Taste gedrückt ist. Jede Taste erscheint dort nach dem ersten Drücken.
-- **Radierer** in drei Modi: ganze Striche, nur den überstrichenen Teil (Teilstrich) oder nur Textmarker, in vier Größen (wird gemerkt). Die Stiftrückseite radiert ebenfalls.
+- **Radierer** in drei Modi: ganze Striche, nur den überstrichenen Teil (Teilstrich) oder nur Textmarker; die Größe stellt man in einem Menü wie bei den Stiften ein (wird gemerkt). Die Stiftrückseite radiert ebenfalls.
 - **Virtuelles Lineal** (`L`): verschieben, am Griff drehen (rastet bei 15° ein); Striche entlang einer Kante werden gerade.
 - **Nur ansehen** (👁 in der Werkzeugleiste): Stift, Finger und Maus scrollen und zoomen nur; die Werkzeuge verschwinden, nichts lässt sich versehentlich ändern. Erneut 👁 tippen, um zu schreiben.
 - **Platz schaffen** (↕ in der Werkzeugleiste): aufs Blatt tippen und nach unten ziehen – alles darunter rutscht mit, auch auf den folgenden Seiten. Was über ein Seitenende rutschen würde, beginnt auf der nächsten Seite; fehlende Seiten werden angehängt. Nach oben ziehen schließt leeren Platz. Ein Schritt für Rückgängig.

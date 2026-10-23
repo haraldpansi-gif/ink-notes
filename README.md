@@ -27,7 +27,7 @@ The interface is available in English and German; ink-notes follows the system l
 - **Two-stage smoothing:** While you write, a 1€ filter removes jitter and the line appears immediately. When you lift the pen, the stroke is refined: corners (bends over 65°) are kept and drawn round, the pressure curve is smoothed, redundant points are dropped and the ends become round.
 - **Pressure curve** adjustable to your pen in the ☰ menu (softer/harder, threshold against base noise).
 - **Pen buttons** can be assigned in the ☰ menu: erase (default), select, highlighter, pen or nothing – active while the button is held. Each button appears there after it is pressed for the first time.
-- **Eraser** with three modes: whole strokes, only the part you wipe over (partial stroke), or highlighter only, in four sizes (remembered). The back end of the pen erases too.
+- **Eraser** with three modes: whole strokes, only the part you wipe over (partial stroke), or highlighter only; its size is set in a menu like the pens (remembered). The back end of the pen erases too.
 - **Virtual ruler** (`L`): move it, rotate it by its handle (snaps to 15°); strokes along an edge become straight.
 - **View only** (👁 in the toolbar): pen, finger and mouse only scroll and zoom; the tools disappear and nothing can be changed by accident. Tap 👁 again to write.
 - **Make space** (↕ in the toolbar): tap the page and drag down – everything below moves along, also on the following pages. Whatever would slide past the end of a page continues on the next one; missing pages are appended. Dragging up closes empty space. Undo reverts it in one step.

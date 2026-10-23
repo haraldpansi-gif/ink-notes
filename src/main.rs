@@ -2648,6 +2648,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
 
                     WindowEvent::MouseInput { state, button, .. } => {
+                        if debug_fling {
+                            eprintln!("[Nachgleiten] Maus: {button:?} {state:?}");
+                        }
                         let now = start_time.elapsed().as_secs_f64();
                         let is_eraser_action = ui_state.active_tool == ActiveTool::Eraser
                             || button == MouseButton::Right;
@@ -2856,7 +2859,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
 
-                    WindowEvent::MouseWheel { delta, .. } => {
+                    WindowEvent::MouseWheel { delta, phase, .. } => {
+                        if debug_fling {
+                            eprintln!("[Nachgleiten] Mausrad/Touchpad: {delta:?} ({phase:?}), über der Leiste: {is_pointer_in_ui}");
+                        }
                         fling.stop();
                         if is_pointer_in_ui {
                             return;
@@ -2961,6 +2967,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     (tx, ty),
                                     window.scale_factor() as f32,
                                 );
+                                if debug_fling {
+                                    eprintln!(
+                                        "[Nachgleiten] Finger aufgesetzt bei ({tx:.0}, {ty:.0}), auf der Leiste: {is_touch_in_ui}"
+                                    );
+                                }
                                 if is_touch_in_ui {
                                     ui_touch_ids.insert(touch.id);
                                     window.request_redraw();
