@@ -84,6 +84,11 @@
   </branding>
   <content_rating type="oars-1.1" />
   <releases>
+    <release version="0.34.0" date="2026-10-23">
+      <description>
+        <p>The eraser size is set in a menu like the pens, with presets and a slider. Corners of snapped shapes stay pointed. Slides get flat tiles in the page overview.</p>
+      </description>
+    </release>
     <release version="0.33.0" date="2026-10-21">
       <description>
         <p>The hand is ignored while the pen is near the screen, also on the title bar. The eraser comes in four sizes. The page overview shows imported PDF pages. Snapped triangles and other shapes have the same width on every side. A selection made with the pen's select button can be moved with the pen.</p>
