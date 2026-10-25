@@ -84,6 +84,11 @@
   </branding>
   <content_rating type="oars-1.1" />
   <releases>
+    <release version="0.34.1" date="2026-10-25">
+      <description>
+        <p>A finger swipe is measured reliably again for gliding, also when the view touches the edge of the notebook. The fling diagnostics log more details.</p>
+      </description>
+    </release>
     <release version="0.34.0" date="2026-10-23">
       <description>
         <p>The eraser size is set in a menu like the pens, with presets and a slider. Corners of snapped shapes stay pointed. Slides get flat tiles in the page overview.</p>
