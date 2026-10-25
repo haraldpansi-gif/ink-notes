@@ -1428,6 +1428,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Langes Drücken mit einem Finger öffnet das Kontextmenü
     let mut long_press = ui::LongPress::default();
     let mut touch_pan_last_pos = (0.0_f32, 0.0_f32);
+    // Diagnostics for the fling: moves, path length (px) and time of the last move of this swipe
+    let mut touch_pan_trace: (u32, f32, Option<Instant>) = (0, 0.0, None);
     // Nachgleiten nach schnellem Wischen mit dem Finger (Issue #28)
     let mut fling = ink_notes::viewport::Fling::default();
     // Diagnosis for Issue #28: log every finger lift and the swipe speed
@@ -3047,6 +3049,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         // Standard: 1 Finger scrollt / verschiebt den Canvas (Pan)
                                         is_touch_panning = true;
                                         touch_pan_last_pos = (tx, ty);
+                                        touch_pan_trace = (0, 0.0, None);
                                     } else {
                                         // Modus Finger-Zeichnen aktiv
                                         focus_page_at!((tx, ty));
@@ -3123,6 +3126,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         touch_pan_last_pos = (tx, ty);
                                         canvas.pan(dx, dy);
                                         fling.track(Vec2::new(dx, dy), Instant::now());
+                                        touch_pan_trace.0 += 1;
+                                        touch_pan_trace.1 += Vec2::new(dx, dy).length();
+                                        touch_pan_trace.2 = Some(Instant::now());
                                         window.request_redraw();
                                     } else if is_touch_drawing {
                                         current_pressure = pressure;
@@ -3184,10 +3190,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         fling.track(Vec2::new(dx, dy), Instant::now());
                                         let velocity = fling.release(Instant::now());
                                         if debug_fling {
+                                            let (moves, path, last_move) = touch_pan_trace;
                                             eprintln!(
-                                                "[Nachgleiten] {:.0} px/s beim Abheben, gleitet: {}",
+                                                "[Nachgleiten] {:.0} px/s beim Abheben, gleitet: {} ({moves} Bewegungen, {path:.0} px, letzte vor {} ms)",
                                                 velocity.length(),
-                                                fling.is_active()
+                                                fling.is_active(),
+                                                last_move.map_or(-1, |t| t.elapsed().as_millis() as i64)
                                             );
                                         }
                                         window.request_redraw();
@@ -3255,13 +3263,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         //    schreibt, bleibt dort, bis wieder gescrollt wird (Undo betrifft sie).
                         canvas.set_fit_box(notebook.fit_box());
                         if notebook.is_endless() {
-                            if canvas.clamp_endless(notebook.current_page().endless_scroll_limit()) {
+                            if canvas.clamp_endless(notebook.current_page().endless_scroll_limit()) && fling.is_active() {
                                 fling.stop();
                             }
                         } else if ui_state.continuous_scroll {
                             let stack = notebook.page_stack();
-                            if canvas.clamp_scroll(&stack) {
-                                // Am Anfang oder Ende des Notizbuchs angekommen
+                            if canvas.clamp_scroll(&stack) && fling.is_active() {
+                                // Am Anfang oder Ende des Notizbuchs angekommen (only a glide stops
+                                // here; a finger still on the screen keeps its measured swipe)
                                 fling.stop();
                             }
                             // Unabhängig von der Bezugsseite: Lage bezogen auf die erste Seite
