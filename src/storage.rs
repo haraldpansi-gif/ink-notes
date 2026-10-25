@@ -2385,7 +2385,7 @@ mod tests {
             create_new_notebook(temp_dir.path(), "Neue Seiten").unwrap();
         let mut autosave = AutosaveController::new(dir.clone(), Duration::from_secs(60));
 
-        // Wie Taste N in main.rs: neue Seite anhängen, Strich darauf, speichern
+        // Wie Taste N in app.rs: neue Seite anhängen, Strich darauf, speichern
         notebook.next_page();
         let idx = notebook.current_page_index;
         notebook.pages[idx] = page_with_one_stroke(notebook.pages[idx].id, PageBackground::Lined);

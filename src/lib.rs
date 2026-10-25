@@ -1,5 +1,6 @@
 //! ink-notes: Latenzoptimierte Inking-App für Linux.
 
+pub mod app;
 pub mod assets;
 pub mod autosave;
 pub mod background;

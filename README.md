@@ -154,8 +154,9 @@ New code comments and commit messages are written in English; older code and his
 
 ```text
 src/
-├── main.rs         # Event loop (winit), mouse, touch and pen input, control flow
-├── lib.rs          # Library exports (for tests)
+├── main.rs         # Desktop entry point, starts app::run
+├── app.rs          # Event loop (winit), mouse, touch and pen input, control flow
+├── lib.rs          # Library exports (app and modules, also for tests)
 ├── canvas.rs       # wgpu rendering: paper, patterns, images, ink, neighboring pages
 ├── shader.wgsl     # Vertex and fragment shaders
 ├── viewport.rs     # Camera (zoom, pan), page stack of the continuous view, swipe momentum

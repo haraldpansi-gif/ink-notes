@@ -156,7 +156,7 @@ mod tests {
         ("file_picker.rs", include_str!("file_picker.rs")),
         ("geometry.rs", include_str!("geometry.rs")),
         ("library.rs", include_str!("library.rs")),
-        ("main.rs", include_str!("main.rs")),
+        ("app.rs", include_str!("app.rs")),
         ("page_export.rs", include_str!("page_export.rs")),
         ("pdf_doc.rs", include_str!("pdf_doc.rs")),
         ("pdf_merge.rs", include_str!("pdf_merge.rs")),

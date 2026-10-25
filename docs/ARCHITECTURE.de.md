@@ -15,7 +15,7 @@ ink-notes ist ein einzelnes Programm mit einem Event-Loop (`winit`) im Haupt-Thr
 | Haupt-Thread | Eingaben, Datenmodell, Rendering (`wgpu`), Oberfläche (`egui`) |
 | Autosave | Seiten und Manifest auf die Festplatte schreiben (`autosave.rs`) |
 | PDF-Rendering | Importierte PDF-Seiten zu Texturen rendern (`pdf_doc.rs`, `hayro`) |
-| Export | PDF/PNG/SVG-Export, damit die Oberfläche nicht hängt (`main.rs`) |
+| Export | PDF/PNG/SVG-Export, damit die Oberfläche nicht hängt (`app.rs`) |
 
 Stifteingaben kommen über `octotablet` (Tablet-Protokoll von Wayland bzw. X11), Maus und Touch über `winit`. Die Oberfläche (Werkzeugleiste, Menüs, Dialoge, Textbearbeitung) ist mit `egui` gebaut und wird im selben Render-Durchgang über das Blatt gezeichnet.
 

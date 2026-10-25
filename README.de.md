@@ -152,8 +152,9 @@ Die CI prüft zusätzlich `cargo fmt --check` und `cargo clippy --all-targets --
 
 ```text
 src/
-├── main.rs         # Event-Loop (winit), Eingaben von Maus, Touch und Stift, Ablaufsteuerung
-├── lib.rs          # Bibliotheks-Exporte (für Tests)
+├── main.rs         # Einstieg für den Desktop, startet app::run
+├── app.rs          # Event-Loop (winit), Eingaben von Maus, Touch und Stift, Ablaufsteuerung
+├── lib.rs          # Bibliotheks-Exporte (App und Module, auch für Tests)
 ├── canvas.rs       # wgpu-Rendering: Papier, Muster, Bilder, Tinte, Nachbarseiten
 ├── shader.wgsl     # Vertex- und Fragment-Shader
 ├── viewport.rs     # Kamera (Zoom, Verschieben), Seitenstapel der durchgehenden Ansicht

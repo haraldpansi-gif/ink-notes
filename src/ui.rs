@@ -6133,7 +6133,7 @@ mod tests {
     const UI_SOURCES: [(&str, &str); 4] = [
         ("ui.rs", include_str!("ui.rs")),
         ("selection.rs", include_str!("selection.rs")),
-        ("main.rs", include_str!("main.rs")),
+        ("app.rs", include_str!("app.rs")),
         ("file_picker.rs", include_str!("file_picker.rs")),
     ];
 
