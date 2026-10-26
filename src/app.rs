@@ -466,6 +466,49 @@ fn page_to_focus(
     (!grabs_selection).then_some(index)
 }
 
+/// Fling diagnostics (Issue #28): reports events whose handling blocks the app for longer than
+/// a few frames, because touch events wait in the queue meanwhile.
+struct SlowEventLog {
+    label: Option<&'static str>,
+    start: Instant,
+}
+
+impl SlowEventLog {
+    const LIMIT: Duration = Duration::from_millis(40);
+
+    fn new(enabled: bool, event: &Event<()>) -> Self {
+        let label = enabled.then_some(match event {
+            Event::WindowEvent {
+                event: WindowEvent::RedrawRequested,
+                ..
+            } => "Zeichnen",
+            Event::WindowEvent {
+                event: WindowEvent::Touch(_),
+                ..
+            } => "Finger",
+            Event::WindowEvent { .. } => "Fensterereignis",
+            Event::AboutToWait => "Leerlauf",
+            _ => "Ereignis",
+        });
+        Self {
+            label,
+            start: Instant::now(),
+        }
+    }
+}
+
+impl Drop for SlowEventLog {
+    fn drop(&mut self) {
+        let elapsed = self.start.elapsed();
+        if let Some(label) = self.label.filter(|_| elapsed > Self::LIMIT) {
+            eprintln!(
+                "[Nachgleiten] {label} hat {} ms gedauert",
+                elapsed.as_millis()
+            );
+        }
+    }
+}
+
 /// Zwischenablage: interne Objekte (Strg+C in ink-notes), Bilder aus der
 /// Systemzwischenablage (Screenshots, aus anderen Programmen kopierte Bilder) und Text.
 struct ClipboardBridge {
@@ -1429,8 +1472,12 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     // Langes Drücken mit einem Finger öffnet das Kontextmenü
     let mut long_press = ui::LongPress::default();
     let mut touch_pan_last_pos = (0.0_f32, 0.0_f32);
-    // Diagnostics for the fling: moves, path length (px) and time of the last move of this swipe
-    let mut touch_pan_trace: (u32, f32, Option<Instant>) = (0, 0.0, None);
+    // Diagnostics for the fling: moves, path length (px), and when the last move of this swipe
+    // was handled and happened (compositor time)
+    let mut touch_pan_trace: (u32, f32, Option<(Instant, Instant)>) = (0, 0.0, None);
+    // Compositor time (ms) of the latest touch Started and when it was handled: maps the event
+    // times of the following touch events to `Instant`s
+    let mut touch_clock: Option<(Instant, u32)> = None;
     // Nachgleiten nach schnellem Wischen mit dem Finger (Issue #28)
     let mut fling = crate::viewport::Fling::default();
     // Diagnosis for Issue #28: log every finger lift and the swipe speed
@@ -1550,6 +1597,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     event_loop.run(move |event, target| {
+        let _slow_event_log = SlowEventLog::new(debug_fling, &event);
         // Anordnung der Seiten gehört zum offenen Notizbuch (Issue #30)
         // Endlos ist ein Notizbuch an seiner einzigen, endlosen Seite erkennbar
         ui_state.endless = notebook.is_endless();
@@ -2915,6 +2963,27 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
 
                     WindowEvent::Touch(touch) => {
                         let now = start_time.elapsed().as_secs_f64();
+                        // When the touch really happened (Wayland reports the time of each
+                        // event): the swipe speed must not depend on how late we handle it
+                        let handled_at = Instant::now();
+                        let event_time = match touch.phase {
+                            TouchPhase::Cancelled => None,
+                            phase => winit::platform::wayland::take_touch_time(touch.id, phase),
+                        };
+                        if let (TouchPhase::Started, Some(time)) = (touch.phase, event_time) {
+                            touch_clock = Some((handled_at, time));
+                        }
+                        let touch_at = match (event_time, touch_clock) {
+                            (Some(time), Some((at, start))) => {
+                                let ms = time.wrapping_sub(start) as i32;
+                                if ms >= 0 {
+                                    at + Duration::from_millis(ms as u64)
+                                } else {
+                                    handled_at
+                                }
+                            }
+                            _ => handled_at,
+                        };
                         let tx = touch.location.x as f32;
                         let ty = touch.location.y as f32;
                         let raw_pressure = match touch.force {
@@ -3126,10 +3195,10 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                                         let dy = ty - touch_pan_last_pos.1;
                                         touch_pan_last_pos = (tx, ty);
                                         canvas.pan(dx, dy);
-                                        fling.track(Vec2::new(dx, dy), Instant::now());
+                                        fling.track(Vec2::new(dx, dy), touch_at);
                                         touch_pan_trace.0 += 1;
                                         touch_pan_trace.1 += Vec2::new(dx, dy).length();
-                                        touch_pan_trace.2 = Some(Instant::now());
+                                        touch_pan_trace.2 = Some((handled_at, touch_at));
                                         window.request_redraw();
                                     } else if is_touch_drawing {
                                         current_pressure = pressure;
@@ -3188,15 +3257,20 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                                         // Letztes Stück bis zum Abheben noch mitnehmen
                                         let (dx, dy) = (tx - touch_pan_last_pos.0, ty - touch_pan_last_pos.1);
                                         canvas.pan(dx, dy);
-                                        fling.track(Vec2::new(dx, dy), Instant::now());
-                                        let velocity = fling.release(Instant::now());
+                                        fling.track(Vec2::new(dx, dy), touch_at);
+                                        let velocity = fling.release(touch_at);
+                                        // The glide itself starts now
+                                        fling.restart_clock(Instant::now());
                                         if debug_fling {
                                             let (moves, path, last_move) = touch_pan_trace;
+                                            let ms = |d: Option<Duration>| d.map_or(-1, |d| d.as_millis() as i64);
                                             eprintln!(
-                                                "[Nachgleiten] {:.0} px/s beim Abheben, gleitet: {} ({moves} Bewegungen, {path:.0} px, letzte vor {} ms)",
+                                                "[Nachgleiten] {:.0} px/s beim Abheben, gleitet: {} ({moves} Bewegungen, {path:.0} px, letzte vor {} ms, laut System vor {} ms{})",
                                                 velocity.length(),
                                                 fling.is_active(),
-                                                last_move.map_or(-1, |t| t.elapsed().as_millis() as i64)
+                                                ms(last_move.map(|(handled, _)| handled_at.duration_since(handled))),
+                                                ms(last_move.map(|(_, at)| touch_at.duration_since(at))),
+                                                if event_time.is_some() { "" } else { ", keine Systemzeit" }
                                             );
                                         }
                                         window.request_redraw();

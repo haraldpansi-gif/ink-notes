@@ -389,6 +389,14 @@ impl Fling {
         velocity
     }
 
+    /// The glide continues from `now` (after [`Self::release`] with the time the finger was
+    /// lifted, which may lie a little in the past).
+    pub fn restart_clock(&mut self, now: std::time::Instant) {
+        if self.active {
+            self.last = Some(now);
+        }
+    }
+
     /// Hält an (neue Berührung, Mausklick, Mausrad).
     pub fn stop(&mut self) {
         *self = Self::default();
@@ -428,6 +436,25 @@ mod tests {
 
     fn a4_stack(count: usize, current: usize) -> PageStack {
         PageStack::new(vec![A4; count], current)
+    }
+
+    #[test]
+    fn test_fling_measures_with_event_times_handled_late() {
+        use std::time::{Duration, Instant};
+        let t0 = Instant::now();
+        let ms = |n: u64| t0 + Duration::from_millis(n);
+        let mut fling = Fling::default();
+        // The finger moved until 100 ms and was lifted at 105 ms; the app only got to the
+        // lift 300 ms later, so the glide starts from there
+        for i in 0..=10 {
+            fling.track(Vec2::new(0.0, -30.0), ms(i * 10));
+        }
+        let velocity = fling.release(ms(105));
+        assert!(velocity.y < -2000.0, "{velocity:?}");
+        assert!(fling.is_active());
+        fling.restart_clock(ms(405));
+        let first = fling.step(ms(421)).unwrap();
+        assert!(first.y < -20.0 && first.y > -60.0, "{first:?}");
     }
 
     #[test]

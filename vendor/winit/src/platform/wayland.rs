@@ -28,6 +28,36 @@ pub(crate) fn decoration_touches_ignored() -> bool {
         .is_some_and(|until| std::time::Instant::now() < until)
 }
 
+/// ink-notes patch: compositor timestamps (ms) of the touch events not yet taken, in event order.
+static TOUCH_TIMES: std::sync::Mutex<
+    std::collections::VecDeque<(u64, crate::event::TouchPhase, u32)>,
+> = std::sync::Mutex::new(std::collections::VecDeque::new());
+
+/// ink-notes patch: remembers the compositor time of a touch event that is about to be sent.
+pub(crate) fn push_touch_time(id: u64, phase: crate::event::TouchPhase, time: u32) {
+    let mut times = TOUCH_TIMES.lock().unwrap_or_else(|e| e.into_inner());
+    // Nobody takes them (e.g. an app that never asks): keep only the latest
+    if times.len() >= 256 {
+        times.pop_front();
+    }
+    times.push_back((id, phase, time));
+}
+
+/// ink-notes patch: compositor time in milliseconds (arbitrary origin, wraps around) of the
+/// touch event with this id and phase (`Started`, `Moved` or `Ended`; `Cancelled` has none),
+/// for the event currently being handled. Call it once for every such `WindowEvent::Touch`.
+/// `None` on X11 or if the time is unknown.
+pub fn take_touch_time(id: u64, phase: crate::event::TouchPhase) -> Option<u32> {
+    let mut times = TOUCH_TIMES.lock().unwrap_or_else(|e| e.into_inner());
+    // Older entries that were never taken are skipped
+    while let Some((i, p, time)) = times.pop_front() {
+        if i == id && p == phase {
+            return Some(time);
+        }
+    }
+    None
+}
+
 /// Additional methods on [`EventLoopWindowTarget`] that are specific to Wayland.
 pub trait EventLoopWindowTargetExtWayland {
     /// True if the [`EventLoopWindowTarget`] uses Wayland.

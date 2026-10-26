@@ -83,6 +83,9 @@ impl TouchHandler for WinitState {
             .touch_map
             .insert(id, TouchPoint { surface, location, frame_of: None });
 
+        // ink-notes patch: keep the event time for `take_touch_time`
+        crate::platform::wayland::push_touch_time(id as u64, TouchPhase::Started, time);
+
         self.events_sink.push_window_event(
             WindowEvent::Touch(Touch {
                 device_id: crate::event::DeviceId(crate::platform_impl::DeviceId::Wayland(
@@ -138,6 +141,8 @@ impl TouchHandler for WinitState {
             None => return,
         };
 
+        // ink-notes patch: keep the event time for `take_touch_time`
+        crate::platform::wayland::push_touch_time(id as u64, TouchPhase::Ended, time);
         self.events_sink.push_window_event(
             WindowEvent::Touch(Touch {
                 device_id: crate::event::DeviceId(crate::platform_impl::DeviceId::Wayland(
@@ -157,7 +162,7 @@ impl TouchHandler for WinitState {
         _: &Connection,
         _: &QueueHandle<Self>,
         touch: &WlTouch,
-        _: u32,
+        time: u32,
         id: i32,
         position: (f64, f64),
     ) {
@@ -191,6 +196,9 @@ impl TouchHandler for WinitState {
         };
 
         touch_point.location = LogicalPosition::<f64>::from(position);
+
+        // ink-notes patch: keep the event time for `take_touch_time`
+        crate::platform::wayland::push_touch_time(id as u64, TouchPhase::Moved, time);
 
         self.events_sink.push_window_event(
             WindowEvent::Touch(Touch {

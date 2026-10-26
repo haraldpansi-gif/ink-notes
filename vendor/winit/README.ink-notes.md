@@ -14,6 +14,10 @@ docs of the original crate were removed.
 - `src/platform/wayland.rs`: `ignore_decoration_touches_until` lets ink-notes ignore touches on
   the title bar while the pen is near the screen, so a resting palm does not move the window
   (Issue #39).
+- `src/platform/wayland.rs` and the touch handler: `take_touch_time` returns the compositor
+  timestamp of each touch event (Started, Moved, Ended), so ink-notes measures the swipe speed
+  for gliding with the real event times and not with the time it got around to handling them
+  (Issue #28).
 - `Cargo.toml`: `[lints.rust] warnings = "allow"`, because a path dependency is not built with
   capped lints like a crates.io dependency.
 
