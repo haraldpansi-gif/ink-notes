@@ -165,7 +165,10 @@ struct NeighborPage {
 }
 
 pub struct CanvasState {
-    pub surface: wgpu::Surface<'static>,
+    /// Drawing surface of the window; `None` while the app is in the background on Android
+    /// (the native window only exists between `Resumed` and `Suspended`)
+    surface: Option<wgpu::Surface<'static>>,
+    instance: wgpu::Instance,
     /// Verwendeter Grafikadapter (für erneute Abfrage der Surface-Fähigkeiten bei Größenänderung)
     adapter: wgpu::Adapter,
     /// Multisampling der Zeichenfläche (1 = aus) und das zugehörige Zwischenbild
@@ -591,7 +594,8 @@ impl CanvasState {
         let egui_renderer = egui_wgpu::Renderer::new(&device, render_format(&config), None, 1);
 
         Ok(Self {
-            surface,
+            surface: Some(surface),
+            instance,
             adapter,
             msaa_samples,
             msaa_view,
@@ -727,14 +731,42 @@ impl CanvasState {
         self.update_uniforms();
     }
 
+    /// Releases the drawing surface: on Android the native window goes away when the app
+    /// is sent to the background (`Event::Suspended`). Drawing is skipped until [`Self::resume`].
+    pub fn suspend(&mut self) {
+        self.surface = None;
+    }
+
+    /// Creates the drawing surface again for the window (`Event::Resumed` on Android).
+    pub fn resume(&mut self, window: Arc<Window>) -> Result<(), Box<dyn std::error::Error>> {
+        if self.surface.is_some() {
+            return Ok(());
+        }
+        let surface = self.instance.create_surface(window.clone())?;
+        if !surface
+            .get_capabilities(&self.adapter)
+            .formats
+            .contains(&self.config.format)
+        {
+            return Err("surface format changed".into());
+        }
+        self.surface = Some(surface);
+        // Configures the new surface (the window may have changed size meanwhile)
+        self.resize(window.inner_size());
+        Ok(())
+    }
+
     /// Passt die Surface und Projektionsmatrizen an eine neue Fenstergröße an.
     pub fn resize(&mut self, new_size: PhysicalSize<u32>) {
         if new_size.width > 0 && new_size.height > 0 {
             self.size = new_size;
             self.config.width = new_size.width;
             self.config.height = new_size.height;
+            let Some(surface) = &self.surface else {
+                return;
+            };
             // Fähigkeiten neu abfragen: Ein nicht (mehr) angebotener Modus führt in wgpu zum Absturz
-            let caps = self.surface.get_capabilities(&self.adapter);
+            let caps = surface.get_capabilities(&self.adapter);
             if !caps.present_modes.contains(&self.config.present_mode) {
                 match choose_present_mode(&caps.present_modes) {
                     Some(mode) => self.config.present_mode = mode,
@@ -750,7 +782,7 @@ impl CanvasState {
                     }
                 }
             }
-            self.surface.configure(&self.device, &self.config);
+            surface.configure(&self.device, &self.config);
             self.msaa_view = create_msaa_view(&self.device, &self.config, self.msaa_samples);
             self.stencil_view = create_stencil_view(&self.device, &self.config, self.msaa_samples);
             self.recalculate_viewport();
@@ -1386,7 +1418,13 @@ impl CanvasState {
                 .update_texture(&self.device, &self.queue, *id, image_delta);
         }
 
-        let output = self.surface.get_current_texture()?;
+        let Some(surface) = &self.surface else {
+            for id in &textures_delta.free {
+                self.egui_renderer.free_texture(id);
+            }
+            return Ok(());
+        };
+        let output = surface.get_current_texture()?;
         let view = output.texture.create_view(&wgpu::TextureViewDescriptor {
             format: Some(render_format(&self.config)),
             ..Default::default()

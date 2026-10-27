@@ -38,9 +38,7 @@ pub mod xopp;
 
 /// Entry point on Android (Issue #42), called by the native activity.
 ///
-/// Builds with `cargo rustc --lib --crate-type cdylib --target aarch64-linux-android`. Not
-/// usable yet: the window surface still has to be created on `Resumed` and dropped on
-/// `Suspended`.
+/// `scripts/package-android.sh` builds the library and packs it into an APK.
 #[cfg(target_os = "android")]
 #[no_mangle]
 fn android_main(app: winit::platform::android::activity::AndroidApp) {
@@ -51,6 +49,8 @@ fn android_main(app: winit::platform::android::activity::AndroidApp) {
             .with_max_level(log::LevelFilter::Info)
             .with_tag("ink-notes"),
     );
+    // Panics would otherwise only go to stderr, which Android discards
+    std::panic::set_hook(Box::new(|info| log::error!("{info}")));
     if let Some(dir) = app.internal_data_path() {
         paths::set_app_dir(dir);
     }

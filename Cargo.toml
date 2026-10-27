@@ -69,7 +69,7 @@ wayland-backend = { version = "0.3", features = ["client_system"] }
 wayland-protocols = { version = "0.31", features = ["client", "unstable"] }
 
 # Android (Issue #42): winit bound to the native activity. The library is built as
-# cdylib with `cargo rustc --lib --crate-type cdylib --target aarch64-linux-android`
+# cdylib and packed into an APK by scripts/package-android.sh
 [target.'cfg(target_os = "android")'.dependencies]
 winit = { version = "0.29", features = ["rwh_06", "android-native-activity"] }
 android_logger = { version = "0.13", default-features = false }

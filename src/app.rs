@@ -1271,7 +1271,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
 
 /// Runs the app on `event_loop` (desktop: [`run`], Android: `android_main` in `lib.rs`).
 pub fn run_with(
-    event_loop: winit::event_loop::EventLoop<()>,
+    mut event_loop: winit::event_loop::EventLoop<()>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Gespeicherte UI-Einstellungen; zuerst, damit alle Texte in der gewählten Sprache sind
     let ui_settings_path = UiSettings::default_path();
@@ -1290,6 +1290,7 @@ pub fn run_with(
         .with_window_icon(app_icon());
     let builder = platform::with_app_id(builder, APP_ID);
     let window = Arc::new(builder.build(&event_loop)?);
+    platform::wait_until_resumed(&mut event_loop);
 
     let mut canvas = match pollster::block_on(CanvasState::new(window.clone())) {
         Ok(canvas) => canvas,
@@ -1405,6 +1406,8 @@ pub fn run_with(
     let (export_tx, export_rx) = mpsc::channel::<Result<PathBuf, String>>();
 
     let mut updater = UpdaterController::new();
+    // Android: updates come as APK, which the updater cannot install yet
+    #[cfg(not(target_os = "android"))]
     updater.check_for_updates();
 
     let mut egui_winit_state = egui_winit::State::new(
@@ -1631,7 +1634,7 @@ pub fn run_with(
         };
     }
 
-    event_loop.run(move |event, target| {
+    platform::run_event_loop(event_loop, move |event, target| {
         let _slow_event_log = SlowEventLog::new(debug_fling, &event);
         // Anordnung der Seiten gehört zum offenen Notizbuch (Issue #30)
         // Endlos ist ein Notizbuch an seiner einzigen, endlosen Seite erkennbar
@@ -1644,11 +1647,42 @@ pub fn run_with(
             notebook.can_make_endless()
         };
         match event {
+            // Android: the app went to the background and its window is gone. It may be
+            // stopped at any time from now on, so everything is saved right away (Issue #42)
+            Event::Suspended => {
+                finish_text_edit(
+                    &mut canvas,
+                    &mut notebook,
+                    &mut manifest,
+                    &mut autosave,
+                    &mut ui_state,
+                );
+                if let Err(err) = autosave.flush() {
+                    eprintln!(
+                        "[Speichern] Fehler beim Wechsel in den Hintergrund: {}",
+                        err.messages.join(", ")
+                    );
+                }
+                canvas.suspend();
+            }
+            Event::Resumed => {
+                if let Err(err) = canvas.resume(window.clone()) {
+                    eprintln!("[Grafik-Fehler] {err}");
+                    std::process::exit(1);
+                }
+                window.request_redraw();
+            }
             Event::AboutToWait => {
                 let prev_status = autosave.status();
                 let new_status = autosave.update();
                 if new_status != prev_status {
-                    update_window_title(&window, &notebook, &manifest, ui_state.active_tool, new_status);
+                    update_window_title(
+                        &window,
+                        &notebook,
+                        &manifest,
+                        ui_state.active_tool,
+                        new_status,
+                    );
                 }
 
                 // Take over changes from other devices (Issue #49), but only while everything
@@ -1667,14 +1701,23 @@ pub fn run_with(
                     } else {
                         let outcome = disk_watch.check(&mut notebook, &mut manifest, now);
                         if !outcome.is_empty() {
-                            if outcome.reloaded_pages > 0 || outcome.structure_changed || !outcome.conflict_pages.is_empty() {
+                            if outcome.reloaded_pages > 0
+                                || outcome.structure_changed
+                                || !outcome.conflict_pages.is_empty()
+                            {
                                 selection_state.clear();
                                 canvas.sync_page(notebook.current_page_mut());
                                 ui_state.document_title = manifest.title.clone();
-                                ui_state.set_export_message(t!("Änderungen von einem anderen Gerät übernommen").to_string());
+                                ui_state.set_export_message(
+                                    t!("Änderungen von einem anderen Gerät übernommen").to_string(),
+                                );
                             }
                             if !outcome.conflict_pages.is_empty() {
-                                for page in notebook.pages.iter().filter(|p| outcome.conflict_pages.contains(&p.id)) {
+                                for page in notebook
+                                    .pages
+                                    .iter()
+                                    .filter(|p| outcome.conflict_pages.contains(&p.id))
+                                {
                                     autosave.mark_page_dirty(page, &manifest);
                                 }
                                 autosave.mark_manifest_dirty(&manifest);
@@ -1689,7 +1732,13 @@ pub fn run_with(
                                     device = marker.device
                                 ));
                             }
-                            update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
+                            update_window_title(
+                                &window,
+                                &notebook,
+                                &manifest,
+                                ui_state.active_tool,
+                                autosave.status(),
+                            );
                             window.request_redraw();
                         }
                     }
@@ -1697,8 +1746,10 @@ pub fn run_with(
 
                 while let Ok(result) = export_rx.try_recv() {
                     match result {
-                        Ok(path) => ui_state.set_export_message(t!("Gespeichert: {path}", path = path.display())),
-                        Err(err) => ui_state.set_export_message(t!("Export fehlgeschlagen: {err}", err = err)),
+                        Ok(path) => ui_state
+                            .set_export_message(t!("Gespeichert: {path}", path = path.display())),
+                        Err(err) => ui_state
+                            .set_export_message(t!("Export fehlgeschlagen: {err}", err = err)),
                     }
                     window.request_redraw();
                 }
@@ -1720,8 +1771,24 @@ pub fn run_with(
                         // Aufsetzen erst mit der Position desselben Frames verarbeiten
                         let tablet_events = crate::platform::down_after_pose(
                             tablet_events,
-                            |e| matches!(e, octotablet::events::Event::Tool { event: octotablet::events::ToolEvent::Down, .. }),
-                            |e| matches!(e, octotablet::events::Event::Tool { event: octotablet::events::ToolEvent::Pose(_), .. }),
+                            |e| {
+                                matches!(
+                                    e,
+                                    octotablet::events::Event::Tool {
+                                        event: octotablet::events::ToolEvent::Down,
+                                        ..
+                                    }
+                                )
+                            },
+                            |e| {
+                                matches!(
+                                    e,
+                                    octotablet::events::Event::Tool {
+                                        event: octotablet::events::ToolEvent::Pose(_),
+                                        ..
+                                    }
+                                )
+                            },
                         );
 
                         for t_event in tablet_events {
@@ -1753,8 +1820,17 @@ pub fn run_with(
                                         is_touch_spacing = false;
                                         ui_state.space_drag = None;
                                     }
-                                    if selection_state.drag_mode != DragMode::None && !is_stylus_selecting {
-                                        selection_release(false, &mut notebook, &mut manifest, &mut autosave, &mut selection_state, &mut canvas);
+                                    if selection_state.drag_mode != DragMode::None
+                                        && !is_stylus_selecting
+                                    {
+                                        selection_release(
+                                            false,
+                                            &mut notebook,
+                                            &mut manifest,
+                                            &mut autosave,
+                                            &mut selection_state,
+                                            &mut canvas,
+                                        );
                                     }
                                     is_erasing = false;
                                     is_touch_panning = false;
@@ -1816,12 +1892,26 @@ pub fn run_with(
                                             }
                                             if is_stylus_spacing {
                                                 is_stylus_spacing = false;
-                                                space_release(&mut canvas, &mut notebook, &mut manifest, &mut autosave, &storage_dir, &mut ui_state);
+                                                space_release(
+                                                    &mut canvas,
+                                                    &mut notebook,
+                                                    &mut manifest,
+                                                    &mut autosave,
+                                                    &storage_dir,
+                                                    &mut ui_state,
+                                                );
                                                 window.request_redraw();
                                             }
                                             if is_stylus_selecting {
                                                 is_stylus_selecting = false;
-                                                selection_release(false, &mut notebook, &mut manifest, &mut autosave, &mut selection_state, &mut canvas);
+                                                selection_release(
+                                                    false,
+                                                    &mut notebook,
+                                                    &mut manifest,
+                                                    &mut autosave,
+                                                    &mut selection_state,
+                                                    &mut canvas,
+                                                );
                                                 window.request_redraw();
                                             }
                                             if let Some(tool) = tool_before_button.take() {
@@ -1831,17 +1921,36 @@ pub fn run_with(
                                             ui_state.pressed_stylus_button = None;
                                         }
                                     }
-                                    octotablet::events::ToolEvent::Button { button_id, pressed } => {
+                                    octotablet::events::ToolEvent::Button {
+                                        button_id,
+                                        pressed,
+                                    } => {
                                         // Tasten werden beim ersten Drücken gelernt (Standard: Radieren)
                                         let key = stylus_button_key(&button_id);
-                                        let mut index = ui_state.stylus_buttons.iter().position(|b| b.id == key);
-                                        if index.is_none() && pressed && ui_state.stylus_buttons.len() < MAX_STYLUS_BUTTONS {
-                                            ui_state.stylus_buttons.push(StylusButton { id: key, action: StylusAction::Erase });
+                                        let mut index = ui_state
+                                            .stylus_buttons
+                                            .iter()
+                                            .position(|b| b.id == key);
+                                        if index.is_none()
+                                            && pressed
+                                            && ui_state.stylus_buttons.len() < MAX_STYLUS_BUTTONS
+                                        {
+                                            ui_state.stylus_buttons.push(StylusButton {
+                                                id: key,
+                                                action: StylusAction::Erase,
+                                            });
                                             index = Some(ui_state.stylus_buttons.len() - 1);
-                                            ui_settings.stylus_buttons = ui_state.stylus_buttons.clone();
-                                            save_ui_settings(&ui_settings, ui_settings_path.as_deref(), &mut ui_state);
+                                            ui_settings.stylus_buttons =
+                                                ui_state.stylus_buttons.clone();
+                                            save_ui_settings(
+                                                &ui_settings,
+                                                ui_settings_path.as_deref(),
+                                                &mut ui_state,
+                                            );
                                         }
-                                        let action = index.map_or(StylusAction::Erase, |i| ui_state.stylus_buttons[i].action);
+                                        let action = index.map_or(StylusAction::Erase, |i| {
+                                            ui_state.stylus_buttons[i].action
+                                        });
                                         if pressed {
                                             stylus_held = Some((key, action));
                                             ui_state.pressed_stylus_button = index;
@@ -1879,7 +1988,10 @@ pub fn run_with(
                                         // Stiftbewegung an egui weitergeben (Hover, Schieberegler ziehen),
                                         // solange nicht auf dem Blatt gezeichnet oder radiert wird
                                         if stylus_ui_capture
-                                            || (!is_stylus_drawing && !is_erasing && !is_stylus_selecting && stylus_pan_last.is_none())
+                                            || (!is_stylus_drawing
+                                                && !is_erasing
+                                                && !is_stylus_selecting
+                                                && stylus_pan_last.is_none())
                                         {
                                             let ui_pos = egui::pos2(sx / scale, sy / scale);
                                             egui_winit_state
@@ -1887,7 +1999,12 @@ pub fn run_with(
                                                 .events
                                                 .push(egui::Event::PointerMoved(ui_pos));
                                             if stylus_ui_capture
-                                                || ui::is_screen_point_in_ui(&egui_ctx, &ui_state, (sx, sy), scale)
+                                                || ui::is_screen_point_in_ui(
+                                                    &egui_ctx,
+                                                    &ui_state,
+                                                    (sx, sy),
+                                                    scale,
+                                                )
                                             {
                                                 window.request_redraw();
                                             }
@@ -1908,9 +2025,12 @@ pub fn run_with(
                                         } else if is_erasing {
                                             focus_page_at!((sx, sy));
                                             if let Some(page_pt) = canvas.screen_to_page(sx, sy) {
-                                                if notebook.erase_at(page_pt,
+                                                if notebook.erase_at(
+                                                    page_pt,
                                                     ui_state.eraser_radius(),
-                                                    stroke_max_radius, ui_state.eraser_mode) {
+                                                    stroke_max_radius,
+                                                    ui_state.eraser_mode,
+                                                ) {
                                                     canvas.sync_page(notebook.current_page_mut());
                                                     autosave.mark_dirty(&notebook, &mut manifest);
                                                     update_window_title(
@@ -1931,7 +2051,8 @@ pub fn run_with(
                                         } else if is_stylus_drawing && is_drawing {
                                             let dx = sx - stroke_hold_anchor_pos.0;
                                             let dy = sy - stroke_hold_anchor_pos.1;
-                                            if (dx * dx + dy * dy).sqrt() > hold_tolerance(&window) {
+                                            if (dx * dx + dy * dy).sqrt() > hold_tolerance(&window)
+                                            {
                                                 stroke_last_motion_time = Instant::now();
                                                 stroke_hold_anchor_pos = (sx, sy);
                                             }
@@ -1953,7 +2074,12 @@ pub fn run_with(
                                         stylus_tool_id = Some(tool.id());
                                         let (sx, sy) = stylus_screen_pos;
 
-                                        if ui::is_screen_point_in_ui(&egui_ctx, &ui_state, (sx, sy), scale) {
+                                        if ui::is_screen_point_in_ui(
+                                            &egui_ctx,
+                                            &ui_state,
+                                            (sx, sy),
+                                            scale,
+                                        ) {
                                             // In die Eingabe-Warteschlange des NÄCHSTEN egui-Frames
                                             // (egui_ctx.input_mut würde vom nächsten Frame überschrieben)
                                             let ui_pos = egui::pos2(sx / scale, sy / scale);
@@ -1982,7 +2108,9 @@ pub fn run_with(
                                         let button_action = stylus_held.map(|(_, action)| action);
                                         let button_tool = match button_action {
                                             Some(StylusAction::Select) => Some(ActiveTool::Select),
-                                            Some(StylusAction::Highlighter) => Some(ActiveTool::Highlighter),
+                                            Some(StylusAction::Highlighter) => {
+                                                Some(ActiveTool::Highlighter)
+                                            }
                                             Some(StylusAction::Pen) => Some(ActiveTool::Pen),
                                             _ => None,
                                         };
@@ -2008,9 +2136,9 @@ pub fn run_with(
                                                 button_tool = Some(ActiveTool::Select);
                                             }
                                         }
-                                        if let Some(tool) = button_tool
-                                            .filter(|&t| !tool_is_hardware_eraser && t != ui_state.active_tool)
-                                        {
+                                        if let Some(tool) = button_tool.filter(|&t| {
+                                            !tool_is_hardware_eraser && t != ui_state.active_tool
+                                        }) {
                                             tool_before_button = Some(ui_state.active_tool);
                                             activate_tool(tool, &mut ui_state, &mut canvas);
                                         }
@@ -2018,26 +2146,60 @@ pub fn run_with(
                                             || button_action == Some(StylusAction::Erase)
                                             || ui_state.active_tool == ActiveTool::Eraser;
 
-                                        if !should_erase && ui_state.active_tool == ActiveTool::Space {
-                                            is_stylus_spacing = space_press((sx, sy), &canvas, &notebook, &mut ui_state);
+                                        if !should_erase
+                                            && ui_state.active_tool == ActiveTool::Space
+                                        {
+                                            is_stylus_spacing = space_press(
+                                                (sx, sy),
+                                                &canvas,
+                                                &notebook,
+                                                &mut ui_state,
+                                            );
                                             window.request_redraw();
-                                        } else if !should_erase && ui_state.active_tool == ActiveTool::Text {
+                                        } else if !should_erase
+                                            && ui_state.active_tool == ActiveTool::Text
+                                        {
                                             if let Some(page_pt) = canvas.screen_to_page(sx, sy) {
-                                                text_tool_click(page_pt, &mut canvas, &mut notebook, &mut manifest, &mut autosave, &mut ui_state);
-                                                update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
+                                                text_tool_click(
+                                                    page_pt,
+                                                    &mut canvas,
+                                                    &mut notebook,
+                                                    &mut manifest,
+                                                    &mut autosave,
+                                                    &mut ui_state,
+                                                );
+                                                update_window_title(
+                                                    &window,
+                                                    &notebook,
+                                                    &manifest,
+                                                    ui_state.active_tool,
+                                                    autosave.status(),
+                                                );
                                                 window.request_redraw();
                                             }
-                                        } else if !should_erase && ui_state.active_tool == ActiveTool::Select {
-                                            if selection_press((sx, sy), false, &canvas, notebook.current_page(), egui_ctx.pixels_per_point(), &mut selection_state) {
+                                        } else if !should_erase
+                                            && ui_state.active_tool == ActiveTool::Select
+                                        {
+                                            if selection_press(
+                                                (sx, sy),
+                                                false,
+                                                &canvas,
+                                                notebook.current_page(),
+                                                egui_ctx.pixels_per_point(),
+                                                &mut selection_state,
+                                            ) {
                                                 is_stylus_selecting = true;
                                                 window.request_redraw();
                                             }
                                         } else if should_erase {
                                             is_erasing = true;
                                             if let Some(page_pt) = canvas.screen_to_page(sx, sy) {
-                                                if notebook.erase_at(page_pt,
+                                                if notebook.erase_at(
+                                                    page_pt,
                                                     ui_state.eraser_radius(),
-                                                    stroke_max_radius, ui_state.eraser_mode) {
+                                                    stroke_max_radius,
+                                                    ui_state.eraser_mode,
+                                                ) {
                                                     canvas.sync_page(notebook.current_page_mut());
                                                     autosave.mark_dirty(&notebook, &mut manifest);
                                                     update_window_title(
@@ -2097,13 +2259,27 @@ pub fn run_with(
 
                                         if is_stylus_spacing {
                                             is_stylus_spacing = false;
-                                            space_release(&mut canvas, &mut notebook, &mut manifest, &mut autosave, &storage_dir, &mut ui_state);
+                                            space_release(
+                                                &mut canvas,
+                                                &mut notebook,
+                                                &mut manifest,
+                                                &mut autosave,
+                                                &storage_dir,
+                                                &mut ui_state,
+                                            );
                                             window.request_redraw();
                                         }
 
                                         if is_stylus_selecting {
                                             is_stylus_selecting = false;
-                                            if selection_release(false, &mut notebook, &mut manifest, &mut autosave, &mut selection_state, &mut canvas) {
+                                            if selection_release(
+                                                false,
+                                                &mut notebook,
+                                                &mut manifest,
+                                                &mut autosave,
+                                                &mut selection_state,
+                                                &mut canvas,
+                                            ) {
                                                 window.request_redraw();
                                             }
                                         }
@@ -2162,7 +2338,10 @@ pub fn run_with(
                     let dy = cursor_screen_pos.1 - stroke_hold_anchor_pos.1;
                     let dist = (dx * dx + dy * dy).sqrt();
 
-                    if elapsed >= Duration::from_millis(400) && dist < hold_tolerance(&window) && canvas.live_samples.len() >= 4 {
+                    if elapsed >= Duration::from_millis(400)
+                        && dist < hold_tolerance(&window)
+                        && canvas.live_samples.len() >= 4
+                    {
                         if let Some(shape) = geometry::detect_shape(&canvas.live_samples) {
                             stroke_already_snapped = true;
                             stroke_snapped_shape = Some(shape.clone());
@@ -2175,10 +2354,18 @@ pub fn run_with(
                                 axis_cross_with_previous(&notebook, &shape)
                                     .map_or(shape, |(_, cross)| cross)
                             };
-                            let width_units = ui_state.current_stroke_width_mm() * crate::document::UNITS_PER_MM;
-                            let (samples, vertices) = geometry::shape_to_mesh(&shape, width_units, canvas.current_ink_color);
+                            let width_units =
+                                ui_state.current_stroke_width_mm() * crate::document::UNITS_PER_MM;
+                            let (samples, vertices) = geometry::shape_to_mesh(
+                                &shape,
+                                width_units,
+                                canvas.current_ink_color,
+                            );
                             canvas.set_live_shape_mesh(samples, vertices);
-                            ui_state.set_export_message(t!("{shape} eingerastet!", shape = shape.name()));
+                            ui_state.set_export_message(t!(
+                                "{shape} eingerastet!",
+                                shape = shape.name()
+                            ));
                             window.request_redraw();
                         }
                     }
@@ -2229,10 +2416,14 @@ pub fn run_with(
                     || fling.is_active()
                 {
                     target.set_control_flow(ControlFlow::wait_duration(Duration::from_millis(8)));
-                } else if let Some(at) = [egui_repaint_at, long_press.deadline(), Some(disk_watch.deadline())]
-                    .into_iter()
-                    .flatten()
-                    .min()
+                } else if let Some(at) = [
+                    egui_repaint_at,
+                    long_press.deadline(),
+                    Some(disk_watch.deadline()),
+                ]
+                .into_iter()
+                .flatten()
+                .min()
                 {
                     target.set_control_flow(ControlFlow::WaitUntil(at));
                 } else {
@@ -2282,7 +2473,13 @@ pub fn run_with(
 
                 match event {
                     WindowEvent::CloseRequested => {
-                        finish_text_edit(&mut canvas, &mut notebook, &mut manifest, &mut autosave, &mut ui_state);
+                        finish_text_edit(
+                            &mut canvas,
+                            &mut notebook,
+                            &mut manifest,
+                            &mut autosave,
+                            &mut ui_state,
+                        );
                         println!("[Shutdown] Sichere alle ungespeicherten Daten auf Festplatte...");
                         match autosave.shutdown() {
                             Ok(()) => {
@@ -2304,10 +2501,23 @@ pub fn run_with(
                             let (sx, sy) = cursor_screen_pos;
                             let center = canvas.screen_to_page_clamped(sx, sy);
                             insert_image_file(
-                                &path, center, &storage_dir, &mut canvas, &mut notebook, &mut manifest,
-                                &mut autosave, &mut selection_state, &mut ui_state,
+                                &path,
+                                center,
+                                &storage_dir,
+                                &mut canvas,
+                                &mut notebook,
+                                &mut manifest,
+                                &mut autosave,
+                                &mut selection_state,
+                                &mut ui_state,
                             );
-                            update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
+                            update_window_title(
+                                &window,
+                                &notebook,
+                                &manifest,
+                                ui_state.active_tool,
+                                autosave.status(),
+                            );
                         } else {
                             ui_state.set_export_message(t!("Nur Bilder (PNG, JPEG, GIF, WebP, BMP) und PDFs können eingefügt werden").to_string());
                         }
@@ -2369,8 +2579,17 @@ pub fn run_with(
                             },
                         ..
                     } => {
+                        // Android's back button closes menus and dialogs like Escape; it never
+                        // reaches the system, so it does not close the app (Issue #42)
+                        let is_back = matches!(logical_key, Key::Named(NamedKey::BrowserBack));
+                        let logical_key = if is_back {
+                            Key::Named(NamedKey::Escape)
+                        } else {
+                            logical_key
+                        };
+
                         // Tastatureingaben nicht für Shortcuts nutzen, wenn ein Textfeld fokussiert ist
-                        if egui_ctx.wants_keyboard_input() {
+                        if egui_ctx.wants_keyboard_input() && !is_back {
                             return;
                         }
 
@@ -2438,12 +2657,29 @@ pub fn run_with(
 
                             // Undo: Strg + Z
                             Key::Character(c) if c.eq_ignore_ascii_case("z") && ctrl && !shift => {
-                                finish_text_edit(&mut canvas, &mut notebook, &mut manifest, &mut autosave, &mut ui_state);
+                                finish_text_edit(
+                                    &mut canvas,
+                                    &mut notebook,
+                                    &mut manifest,
+                                    &mut autosave,
+                                    &mut ui_state,
+                                );
                                 if let Some(changed) = notebook.undo() {
                                     selection_state.clear();
                                     canvas.sync_page(notebook.current_page_mut());
-                                    persist_pages(&changed, &notebook, &mut manifest, &mut autosave);
-                                    update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
+                                    persist_pages(
+                                        &changed,
+                                        &notebook,
+                                        &mut manifest,
+                                        &mut autosave,
+                                    );
+                                    update_window_title(
+                                        &window,
+                                        &notebook,
+                                        &manifest,
+                                        ui_state.active_tool,
+                                        autosave.status(),
+                                    );
                                     window.request_redraw();
                                 }
                             }
@@ -2453,21 +2689,43 @@ pub fn run_with(
                                 if (c.eq_ignore_ascii_case("y") && ctrl)
                                     || (c.eq_ignore_ascii_case("z") && ctrl && shift) =>
                             {
-                                finish_text_edit(&mut canvas, &mut notebook, &mut manifest, &mut autosave, &mut ui_state);
+                                finish_text_edit(
+                                    &mut canvas,
+                                    &mut notebook,
+                                    &mut manifest,
+                                    &mut autosave,
+                                    &mut ui_state,
+                                );
                                 if let Some(changed) = notebook.redo() {
                                     selection_state.clear();
                                     canvas.sync_page(notebook.current_page_mut());
-                                    persist_pages(&changed, &notebook, &mut manifest, &mut autosave);
-                                    update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
+                                    persist_pages(
+                                        &changed,
+                                        &notebook,
+                                        &mut manifest,
+                                        &mut autosave,
+                                    );
+                                    update_window_title(
+                                        &window,
+                                        &notebook,
+                                        &manifest,
+                                        ui_state.active_tool,
+                                        autosave.status(),
+                                    );
                                     window.request_redraw();
                                 }
                             }
 
                             // Kopieren: Strg + C
                             Key::Character(c) if c.eq_ignore_ascii_case("c") && ctrl => {
-                                let count = selection_state.copy_to_clipboard(notebook.current_page());
+                                let count =
+                                    selection_state.copy_to_clipboard(notebook.current_page());
                                 if count > 0 {
-                                    let as_image = clipboard.copy_selection(notebook.current_page(), &selection_state.selected_ids, &storage_dir);
+                                    let as_image = clipboard.copy_selection(
+                                        notebook.current_page(),
+                                        &selection_state.selected_ids,
+                                        &storage_dir,
+                                    );
                                     clipboard.note_internal_copy(&storage_dir);
                                     ui_state.set_export_message(copy_message(count, as_image));
                                     window.request_redraw();
@@ -2477,10 +2735,23 @@ pub fn run_with(
                             // Einfügen: Strg + V
                             Key::Character(c) if c.eq_ignore_ascii_case("v") && ctrl => {
                                 paste(
-                                    None, &mut clipboard, &storage_dir, &mut canvas, &mut notebook, &mut manifest,
-                                    &mut autosave, &mut selection_state, &mut ui_state,
+                                    None,
+                                    &mut clipboard,
+                                    &storage_dir,
+                                    &mut canvas,
+                                    &mut notebook,
+                                    &mut manifest,
+                                    &mut autosave,
+                                    &mut selection_state,
+                                    &mut ui_state,
                                 );
-                                update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
+                                update_window_title(
+                                    &window,
+                                    &notebook,
+                                    &manifest,
+                                    ui_state.active_tool,
+                                    autosave.status(),
+                                );
                                 window.request_redraw();
                             }
 
@@ -2500,11 +2771,15 @@ pub fn run_with(
                             // Löschen: Entf oder Backspace
                             Key::Named(NamedKey::Delete) | Key::Named(NamedKey::Backspace) => {
                                 if !selection_state.is_empty() {
-                                    let removed = selection_state.delete_selected(notebook.current_page_mut());
+                                    let removed = selection_state
+                                        .delete_selected(notebook.current_page_mut());
                                     if !removed.is_empty() {
                                         canvas.sync_page(notebook.current_page_mut());
                                         autosave.mark_dirty(&notebook, &mut manifest);
-                                        ui_state.set_export_message(t!("{count} Objekt(e) gelöscht", count = removed.len()));
+                                        ui_state.set_export_message(t!(
+                                            "{count} Objekt(e) gelöscht",
+                                            count = removed.len()
+                                        ));
                                         window.request_redraw();
                                     }
                                 }
@@ -2535,34 +2810,58 @@ pub fn run_with(
 
                             // PDF-Export: Strg + E
                             Key::Character(c) if c.eq_ignore_ascii_case("e") && ctrl => {
-                                start_pdf_export(&notebook, &storage_dir, &manifest.title, ui_state.pattern_color, export_tx.clone(), window.clone());
+                                start_pdf_export(
+                                    &notebook,
+                                    &storage_dir,
+                                    &manifest.title,
+                                    ui_state.pattern_color,
+                                    export_tx.clone(),
+                                    window.clone(),
+                                );
                                 ui_state.set_export_message(t!("PDF-Export läuft…"));
                                 window.request_redraw();
                             }
 
-
                             // Radierer umschalten: E
                             Key::Character(c) if c.eq_ignore_ascii_case("e") && !ctrl => {
                                 ui_state.active_tool = match ui_state.active_tool {
-                                    ActiveTool::Pen | ActiveTool::Highlighter | ActiveTool::Shape | ActiveTool::Select | ActiveTool::Text | ActiveTool::Space => ActiveTool::Eraser,
+                                    ActiveTool::Pen
+                                    | ActiveTool::Highlighter
+                                    | ActiveTool::Shape
+                                    | ActiveTool::Select
+                                    | ActiveTool::Text
+                                    | ActiveTool::Space => ActiveTool::Eraser,
                                     ActiveTool::Eraser => ActiveTool::Pen,
                                 };
                                 ui_state.is_pen_menu_open = false;
                                 ui_state.is_highlighter_menu_open = false;
-                                update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
+                                update_window_title(
+                                    &window,
+                                    &notebook,
+                                    &manifest,
+                                    ui_state.active_tool,
+                                    autosave.status(),
+                                );
                                 window.request_redraw();
                             }
 
                             // Auswahlwerkzeug umschalten: V (ohne Strg)
                             Key::Character(c) if c.eq_ignore_ascii_case("v") && !ctrl => {
-                                ui_state.active_tool = if ui_state.active_tool == ActiveTool::Select {
+                                ui_state.active_tool = if ui_state.active_tool == ActiveTool::Select
+                                {
                                     ActiveTool::Pen
                                 } else {
                                     ActiveTool::Select
                                 };
                                 ui_state.is_pen_menu_open = false;
                                 ui_state.is_highlighter_menu_open = false;
-                                update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
+                                update_window_title(
+                                    &window,
+                                    &notebook,
+                                    &manifest,
+                                    ui_state.active_tool,
+                                    autosave.status(),
+                                );
                                 window.request_redraw();
                             }
 
@@ -2570,10 +2869,14 @@ pub fn run_with(
                             Key::Character(c) if c.eq_ignore_ascii_case("b") && !ctrl => {
                                 if !selection_state.is_empty() {
                                     let color = [0.12, 0.12, 0.14, 1.0];
-                                    if selection_state.recolor_selected(notebook.current_page_mut(), color) {
+                                    if selection_state
+                                        .recolor_selected(notebook.current_page_mut(), color)
+                                    {
                                         canvas.sync_page(notebook.current_page_mut());
                                         autosave.mark_dirty(&notebook, &mut manifest);
-                                        ui_state.set_export_message(t!("Auswahl auf Schwarz umgefärbt").to_string());
+                                        ui_state.set_export_message(
+                                            t!("Auswahl auf Schwarz umgefärbt").to_string(),
+                                        );
                                         window.request_redraw();
                                     }
                                 } else {
@@ -2581,7 +2884,13 @@ pub fn run_with(
                                     ui_state.pen_color = [0.12, 0.12, 0.14, 1.0];
                                     canvas.set_stroke_color(ui_state.pen_color);
                                     canvas.set_stroke_width_mm(ui_state.pen_stroke_width_mm);
-                                    update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
+                                    update_window_title(
+                                        &window,
+                                        &notebook,
+                                        &manifest,
+                                        ui_state.active_tool,
+                                        autosave.status(),
+                                    );
                                     window.request_redraw();
                                 }
                             }
@@ -2590,10 +2899,14 @@ pub fn run_with(
                             Key::Character(c) if c.eq_ignore_ascii_case("u") && !ctrl => {
                                 if !selection_state.is_empty() {
                                     let color = [0.15, 0.35, 0.85, 1.0];
-                                    if selection_state.recolor_selected(notebook.current_page_mut(), color) {
+                                    if selection_state
+                                        .recolor_selected(notebook.current_page_mut(), color)
+                                    {
                                         canvas.sync_page(notebook.current_page_mut());
                                         autosave.mark_dirty(&notebook, &mut manifest);
-                                        ui_state.set_export_message(t!("Auswahl auf Blau umgefärbt").to_string());
+                                        ui_state.set_export_message(
+                                            t!("Auswahl auf Blau umgefärbt").to_string(),
+                                        );
                                         window.request_redraw();
                                     }
                                 } else {
@@ -2601,7 +2914,13 @@ pub fn run_with(
                                     ui_state.pen_color = [0.15, 0.35, 0.85, 1.0];
                                     canvas.set_stroke_color(ui_state.pen_color);
                                     canvas.set_stroke_width_mm(ui_state.pen_stroke_width_mm);
-                                    update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
+                                    update_window_title(
+                                        &window,
+                                        &notebook,
+                                        &manifest,
+                                        ui_state.active_tool,
+                                        autosave.status(),
+                                    );
                                     window.request_redraw();
                                 }
                             }
@@ -2609,10 +2928,14 @@ pub fn run_with(
                             // Stiftfarbe Korrektur-Rot oder Drehen: R
                             Key::Character(c) if c.eq_ignore_ascii_case("r") && !ctrl => {
                                 if !selection_state.is_empty() {
-                                    if selection_state.rotate_selected_90_deg(notebook.current_page_mut()) {
+                                    if selection_state
+                                        .rotate_selected_90_deg(notebook.current_page_mut())
+                                    {
                                         canvas.sync_page(notebook.current_page_mut());
                                         autosave.mark_dirty(&notebook, &mut manifest);
-                                        ui_state.set_export_message(t!("Auswahl um 90° gedreht").to_string());
+                                        ui_state.set_export_message(
+                                            t!("Auswahl um 90° gedreht").to_string(),
+                                        );
                                         window.request_redraw();
                                     }
                                 } else {
@@ -2620,7 +2943,13 @@ pub fn run_with(
                                     ui_state.pen_color = [0.85, 0.20, 0.20, 1.0];
                                     canvas.set_stroke_color(ui_state.pen_color);
                                     canvas.set_stroke_width_mm(ui_state.pen_stroke_width_mm);
-                                    update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
+                                    update_window_title(
+                                        &window,
+                                        &notebook,
+                                        &manifest,
+                                        ui_state.active_tool,
+                                        autosave.status(),
+                                    );
                                     window.request_redraw();
                                 }
                             }
@@ -2636,40 +2965,61 @@ pub fn run_with(
                                 };
                                 canvas.sync_page(page);
                                 autosave.mark_dirty(&notebook, &mut manifest);
-                                update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
+                                update_window_title(
+                                    &window,
+                                    &notebook,
+                                    &manifest,
+                                    ui_state.active_tool,
+                                    autosave.status(),
+                                );
                                 window.request_redraw();
                             }
 
                             // Nächste Seite: PageDown oder N (mit Lazy Loading)
                             // View only: never append a new page at the end
                             Key::Named(NamedKey::PageDown)
-                                if ui_state.view_mode && notebook.current_page_index + 1 >= notebook.pages.len() => {}
+                                if ui_state.view_mode
+                                    && notebook.current_page_index + 1 >= notebook.pages.len() => {}
                             Key::Named(NamedKey::PageDown) => {
                                 selection_state.clear();
                                 notebook.next_page();
                                 let curr = notebook.current_page_index;
-                                let _ = storage::ensure_page_loaded(&storage_dir, &mut notebook, curr);
+                                let _ =
+                                    storage::ensure_page_loaded(&storage_dir, &mut notebook, curr);
                                 canvas.sync_page(notebook.current_page_mut());
                                 manifest.current_page_index = notebook.current_page_index;
                                 manifest.next_page_id = notebook.next_page_id;
                                 manifest.sync_from_notebook(&notebook);
                                 autosave.mark_manifest_dirty(&manifest);
                                 autosave.mark_dirty(&notebook, &mut manifest);
-                                update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
+                                update_window_title(
+                                    &window,
+                                    &notebook,
+                                    &manifest,
+                                    ui_state.active_tool,
+                                    autosave.status(),
+                                );
                                 window.request_redraw();
                             }
                             Key::Character(c) if c.eq_ignore_ascii_case("n") && !ctrl => {
                                 selection_state.clear();
                                 notebook.next_page();
                                 let curr = notebook.current_page_index;
-                                let _ = storage::ensure_page_loaded(&storage_dir, &mut notebook, curr);
+                                let _ =
+                                    storage::ensure_page_loaded(&storage_dir, &mut notebook, curr);
                                 canvas.sync_page(notebook.current_page_mut());
                                 manifest.current_page_index = notebook.current_page_index;
                                 manifest.next_page_id = notebook.next_page_id;
                                 manifest.sync_from_notebook(&notebook);
                                 autosave.mark_manifest_dirty(&manifest);
                                 autosave.mark_dirty(&notebook, &mut manifest);
-                                update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
+                                update_window_title(
+                                    &window,
+                                    &notebook,
+                                    &manifest,
+                                    ui_state.active_tool,
+                                    autosave.status(),
+                                );
                                 window.request_redraw();
                             }
 
@@ -2678,13 +3028,20 @@ pub fn run_with(
                                 selection_state.clear();
                                 notebook.previous_page();
                                 let curr = notebook.current_page_index;
-                                let _ = storage::ensure_page_loaded(&storage_dir, &mut notebook, curr);
+                                let _ =
+                                    storage::ensure_page_loaded(&storage_dir, &mut notebook, curr);
                                 canvas.sync_page(notebook.current_page_mut());
                                 manifest.current_page_index = notebook.current_page_index;
                                 manifest.sync_from_notebook(&notebook);
                                 autosave.mark_manifest_dirty(&manifest);
                                 autosave.mark_dirty(&notebook, &mut manifest);
-                                update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
+                                update_window_title(
+                                    &window,
+                                    &notebook,
+                                    &manifest,
+                                    ui_state.active_tool,
+                                    autosave.status(),
+                                );
                                 window.request_redraw();
                             }
 
@@ -2693,13 +3050,20 @@ pub fn run_with(
                                 selection_state.clear();
                                 notebook.first_page();
                                 let curr = notebook.current_page_index;
-                                let _ = storage::ensure_page_loaded(&storage_dir, &mut notebook, curr);
+                                let _ =
+                                    storage::ensure_page_loaded(&storage_dir, &mut notebook, curr);
                                 canvas.sync_page(notebook.current_page_mut());
                                 manifest.current_page_index = notebook.current_page_index;
                                 manifest.sync_from_notebook(&notebook);
                                 autosave.mark_manifest_dirty(&manifest);
                                 autosave.mark_dirty(&notebook, &mut manifest);
-                                update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
+                                update_window_title(
+                                    &window,
+                                    &notebook,
+                                    &manifest,
+                                    ui_state.active_tool,
+                                    autosave.status(),
+                                );
                                 window.request_redraw();
                             }
 
@@ -2708,13 +3072,20 @@ pub fn run_with(
                                 selection_state.clear();
                                 notebook.last_page();
                                 let curr = notebook.current_page_index;
-                                let _ = storage::ensure_page_loaded(&storage_dir, &mut notebook, curr);
+                                let _ =
+                                    storage::ensure_page_loaded(&storage_dir, &mut notebook, curr);
                                 canvas.sync_page(notebook.current_page_mut());
                                 manifest.current_page_index = notebook.current_page_index;
                                 manifest.sync_from_notebook(&notebook);
                                 autosave.mark_manifest_dirty(&manifest);
                                 autosave.mark_dirty(&notebook, &mut manifest);
-                                update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
+                                update_window_title(
+                                    &window,
+                                    &notebook,
+                                    &manifest,
+                                    ui_state.active_tool,
+                                    autosave.status(),
+                                );
                                 window.request_redraw();
                             }
 
@@ -2727,14 +3098,22 @@ pub fn run_with(
 
                             // Zoom In: Strg + '+' oder Strg + '='
                             Key::Character(c) if (c == "+" || c == "=") && ctrl => {
-                                canvas.zoom_at(canvas.size.width as f32 * 0.5, canvas.size.height as f32 * 0.5, 1.15);
+                                canvas.zoom_at(
+                                    canvas.size.width as f32 * 0.5,
+                                    canvas.size.height as f32 * 0.5,
+                                    1.15,
+                                );
                                 ui_state.current_zoom = canvas.camera.zoom;
                                 window.request_redraw();
                             }
 
                             // Zoom Out: Strg + '-' oder Strg + '_'
                             Key::Character(c) if (c == "-" || c == "_") && ctrl => {
-                                canvas.zoom_at(canvas.size.width as f32 * 0.5, canvas.size.height as f32 * 0.5, 1.0 / 1.15);
+                                canvas.zoom_at(
+                                    canvas.size.width as f32 * 0.5,
+                                    canvas.size.height as f32 * 0.5,
+                                    1.0 / 1.15,
+                                );
                                 ui_state.current_zoom = canvas.camera.zoom;
                                 window.request_redraw();
                             }
@@ -2748,24 +3127,46 @@ pub fn run_with(
                                 };
                                 ui_state.is_pen_menu_open = false;
                                 ui_state.is_highlighter_menu_open = false;
-                                update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
+                                update_window_title(
+                                    &window,
+                                    &notebook,
+                                    &manifest,
+                                    ui_state.active_tool,
+                                    autosave.status(),
+                                );
                                 window.request_redraw();
                             }
 
                             // Formen-Werkzeug umschalten: S (ohne Strg) oder F
-                            Key::Character(c) if (c.eq_ignore_ascii_case("s") || c.eq_ignore_ascii_case("f")) && !ctrl => {
-                                ui_state.active_tool = if ui_state.active_tool == ActiveTool::Shape {
+                            Key::Character(c)
+                                if (c.eq_ignore_ascii_case("s") || c.eq_ignore_ascii_case("f"))
+                                    && !ctrl =>
+                            {
+                                ui_state.active_tool = if ui_state.active_tool == ActiveTool::Shape
+                                {
                                     ActiveTool::Pen
                                 } else {
                                     ActiveTool::Shape
                                 };
-                                update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
+                                update_window_title(
+                                    &window,
+                                    &notebook,
+                                    &manifest,
+                                    ui_state.active_tool,
+                                    autosave.status(),
+                                );
                                 window.request_redraw();
                             }
 
                             // Beenden: Strg + Q
                             Key::Character(c) if c.eq_ignore_ascii_case("q") && ctrl => {
-                                finish_text_edit(&mut canvas, &mut notebook, &mut manifest, &mut autosave, &mut ui_state);
+                                finish_text_edit(
+                                    &mut canvas,
+                                    &mut notebook,
+                                    &mut manifest,
+                                    &mut autosave,
+                                    &mut ui_state,
+                                );
                                 println!("[Shutdown] Sichere alle ungespeicherten Daten auf Festplatte...");
                                 match autosave.shutdown() {
                                     Ok(()) => {
@@ -2778,7 +3179,6 @@ pub fn run_with(
                                     }
                                 }
                             }
-
 
                             _ => {}
                         }
@@ -2796,7 +3196,10 @@ pub fn run_with(
                             ElementState::Pressed => {
                                 // Palm-Rejection: Keine Mausevents verarbeiten, wenn der Stift aktiv
                                 // zeichnet oder auswählt (manche Systeme melden ihn zusätzlich als Maus)
-                                if is_stylus_drawing || is_stylus_selecting || stylus_pan_last.is_some() {
+                                if is_stylus_drawing
+                                    || is_stylus_selecting
+                                    || stylus_pan_last.is_some()
+                                {
                                     return;
                                 }
 
@@ -2810,7 +3213,8 @@ pub fn run_with(
                                 // In view-only mode the left and right buttons move the page too (Issue #35)
                                 if button == MouseButton::Middle
                                     || (button == MouseButton::Left && is_space_pressed)
-                                    || (ui_state.view_mode && matches!(button, MouseButton::Left | MouseButton::Right))
+                                    || (ui_state.view_mode
+                                        && matches!(button, MouseButton::Left | MouseButton::Right))
                                 {
                                     is_panning = true;
                                     pan_last_screen_pos = cursor_screen_pos;
@@ -2822,10 +3226,21 @@ pub fn run_with(
                                     is_erasing = true;
                                     let (sx, sy) = cursor_screen_pos;
                                     if let Some(page_pt) = canvas.screen_to_page(sx, sy) {
-                                        if notebook.erase_at(page_pt, ui_state.eraser_radius(), stroke_max_radius, ui_state.eraser_mode) {
+                                        if notebook.erase_at(
+                                            page_pt,
+                                            ui_state.eraser_radius(),
+                                            stroke_max_radius,
+                                            ui_state.eraser_mode,
+                                        ) {
                                             canvas.sync_page(notebook.current_page_mut());
                                             autosave.mark_dirty(&notebook, &mut manifest);
-                                            update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
+                                            update_window_title(
+                                                &window,
+                                                &notebook,
+                                                &manifest,
+                                                ui_state.active_tool,
+                                                autosave.status(),
+                                            );
                                             window.request_redraw();
                                         }
                                     }
@@ -2842,8 +3257,21 @@ pub fn run_with(
                                     // Text-Werkzeug: Textfeld öffnen
                                     if ui_state.active_tool == ActiveTool::Text {
                                         if let Some(page_pt) = canvas.screen_to_page(sx, sy) {
-                                            text_tool_click(page_pt, &mut canvas, &mut notebook, &mut manifest, &mut autosave, &mut ui_state);
-                                            update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
+                                            text_tool_click(
+                                                page_pt,
+                                                &mut canvas,
+                                                &mut notebook,
+                                                &mut manifest,
+                                                &mut autosave,
+                                                &mut ui_state,
+                                            );
+                                            update_window_title(
+                                                &window,
+                                                &notebook,
+                                                &manifest,
+                                                ui_state.active_tool,
+                                                autosave.status(),
+                                            );
                                             window.request_redraw();
                                         }
                                         return;
@@ -2851,7 +3279,14 @@ pub fn run_with(
 
                                     // 2. Objektauswahl & Transformation im Select-Modus
                                     if ui_state.active_tool == ActiveTool::Select {
-                                        if selection_press((sx, sy), modifiers.shift_key(), &canvas, notebook.current_page(), egui_ctx.pixels_per_point(), &mut selection_state) {
+                                        if selection_press(
+                                            (sx, sy),
+                                            modifiers.shift_key(),
+                                            &canvas,
+                                            notebook.current_page(),
+                                            egui_ctx.pixels_per_point(),
+                                            &mut selection_state,
+                                        ) {
                                             window.request_redraw();
                                         }
                                         return;
@@ -2860,14 +3295,27 @@ pub fn run_with(
                                     // 3. Tap-to-Convert im Shape-Modus
                                     if ui_state.active_tool == ActiveTool::Shape {
                                         if let Some(page_pt) = canvas.screen_to_page(sx, sy) {
-                                            if let Some(stroke) = notebook.current_page().find_stroke_at(page_pt, 40.0) {
-                                                if let Some(shape) = geometry::detect_shape(&stroke.points) {
+                                            if let Some(stroke) = notebook
+                                                .current_page()
+                                                .find_stroke_at(page_pt, 40.0)
+                                            {
+                                                if let Some(shape) =
+                                                    geometry::detect_shape(&stroke.points)
+                                                {
                                                     let old_id = stroke.id;
                                                     let shape_name = shape.name();
                                                     let stroke_color = stroke.color;
-                                                    let stroke_width = ui_state.pen_stroke_width_mm * crate::document::UNITS_PER_MM;
-                                                    let new_stroke = geometry::shape_to_stroke(shape, old_id, stroke_color, stroke_width);
-                                                    notebook.current_page_mut().replace_stroke(old_id, new_stroke);
+                                                    let stroke_width = ui_state.pen_stroke_width_mm
+                                                        * crate::document::UNITS_PER_MM;
+                                                    let new_stroke = geometry::shape_to_stroke(
+                                                        shape,
+                                                        old_id,
+                                                        stroke_color,
+                                                        stroke_width,
+                                                    );
+                                                    notebook
+                                                        .current_page_mut()
+                                                        .replace_stroke(old_id, new_stroke);
                                                     canvas.sync_page(notebook.current_page_mut());
                                                     autosave.mark_dirty(&notebook, &mut manifest);
                                                     ui_state.set_export_message(t!("{shape_name} ausgerichtet! (Undo mit Strg+Z)", shape_name = shape_name));
@@ -2879,7 +3327,9 @@ pub fn run_with(
                                     }
 
                                     // 4. Strich zeichnen
-                                    if ui_state.active_tool.is_drawing() || ui_state.active_tool == ActiveTool::Shape {
+                                    if ui_state.active_tool.is_drawing()
+                                        || ui_state.active_tool == ActiveTool::Shape
+                                    {
                                         if let Some(page_pt) = canvas.screen_to_page(sx, sy) {
                                             is_mouse_drawing = true;
                                             is_drawing = true;
@@ -2887,7 +3337,12 @@ pub fn run_with(
                                             stroke_hold_anchor_pos = cursor_screen_pos;
                                             stroke_already_snapped = false;
                                             stroke_snapped_shape = None;
-                                            canvas.start_stroke(page_pt.x, page_pt.y, current_pressure, now);
+                                            canvas.start_stroke(
+                                                page_pt.x,
+                                                page_pt.y,
+                                                current_pressure,
+                                                now,
+                                            );
                                             window.request_redraw();
                                         }
                                     }
@@ -2895,20 +3350,38 @@ pub fn run_with(
                             }
                             ElementState::Released => {
                                 if button == MouseButton::Middle
-                                    || (matches!(button, MouseButton::Left | MouseButton::Right) && is_panning)
+                                    || (matches!(button, MouseButton::Left | MouseButton::Right)
+                                        && is_panning)
                                 {
                                     is_panning = false;
                                 }
                                 if is_erasing {
                                     is_erasing = false;
                                 }
-                                if ui_state.space_drag.is_some() && !is_stylus_spacing && !is_touch_spacing {
-                                    space_release(&mut canvas, &mut notebook, &mut manifest, &mut autosave, &storage_dir, &mut ui_state);
+                                if ui_state.space_drag.is_some()
+                                    && !is_stylus_spacing
+                                    && !is_touch_spacing
+                                {
+                                    space_release(
+                                        &mut canvas,
+                                        &mut notebook,
+                                        &mut manifest,
+                                        &mut autosave,
+                                        &storage_dir,
+                                        &mut ui_state,
+                                    );
                                     window.request_redraw();
                                 }
                                 if ui_state.active_tool == ActiveTool::Select
                                     && !is_stylus_selecting
-                                    && selection_release(modifiers.shift_key(), &mut notebook, &mut manifest, &mut autosave, &mut selection_state, &mut canvas)
+                                    && selection_release(
+                                        modifiers.shift_key(),
+                                        &mut notebook,
+                                        &mut manifest,
+                                        &mut autosave,
+                                        &mut selection_state,
+                                        &mut canvas,
+                                    )
                                 {
                                     window.request_redraw();
                                 }
@@ -2919,7 +3392,12 @@ pub fn run_with(
                                         let (sx, sy) = cursor_screen_pos;
                                         let page_pt = canvas.screen_to_page_clamped(sx, sy);
                                         let now = start_time.elapsed().as_secs_f64();
-                                        canvas.extend_stroke(page_pt.x, page_pt.y, current_pressure, now);
+                                        canvas.extend_stroke(
+                                            page_pt.x,
+                                            page_pt.y,
+                                            current_pressure,
+                                            now,
+                                        );
                                     }
                                     let snapped_shape = stroke_snapped_shape.take().or_else(|| {
                                         if ui_state.active_tool == ActiveTool::Shape {
@@ -2959,10 +3437,15 @@ pub fn run_with(
 
                         // Wenn der Stylus aktiv zeichnet, keine Mauscursor-Bewegungen verarbeiten
                         if !is_stylus_drawing && !is_stylus_selecting {
-                            if ui_state.space_drag.is_some() && !is_stylus_spacing && !is_touch_spacing {
+                            if ui_state.space_drag.is_some()
+                                && !is_stylus_spacing
+                                && !is_touch_spacing
+                            {
                                 space_move((sx, sy), &canvas, &mut ui_state);
                                 window.request_redraw();
-                            } else if ui_state.active_tool == ActiveTool::Select && selection_state.drag_mode != DragMode::None {
+                            } else if ui_state.active_tool == ActiveTool::Select
+                                && selection_state.drag_mode != DragMode::None
+                            {
                                 if let Some(page_pt) = canvas.screen_to_page(sx, sy) {
                                     selection_state.pending_drag = Some(page_pt);
                                     window.request_redraw();
@@ -2970,10 +3453,21 @@ pub fn run_with(
                             } else if is_erasing {
                                 focus_page_at!((sx, sy));
                                 if let Some(page_pt) = canvas.screen_to_page(sx, sy) {
-                                    if notebook.erase_at(page_pt, ui_state.eraser_radius(), stroke_max_radius, ui_state.eraser_mode) {
+                                    if notebook.erase_at(
+                                        page_pt,
+                                        ui_state.eraser_radius(),
+                                        stroke_max_radius,
+                                        ui_state.eraser_mode,
+                                    ) {
                                         canvas.sync_page(notebook.current_page_mut());
                                         autosave.mark_dirty(&notebook, &mut manifest);
-                                        update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
+                                        update_window_title(
+                                            &window,
+                                            &notebook,
+                                            &manifest,
+                                            ui_state.active_tool,
+                                            autosave.status(),
+                                        );
                                         window.request_redraw();
                                     }
                                 }
@@ -2989,7 +3483,12 @@ pub fn run_with(
                                 if !stroke_already_snapped {
                                     let page_pt = canvas.screen_to_page_clamped(sx, sy);
                                     let now = start_time.elapsed().as_secs_f64();
-                                    canvas.extend_stroke(page_pt.x, page_pt.y, current_pressure, now);
+                                    canvas.extend_stroke(
+                                        page_pt.x,
+                                        page_pt.y,
+                                        current_pressure,
+                                        now,
+                                    );
                                     window.request_redraw();
                                 }
                             }
@@ -3006,7 +3505,9 @@ pub fn run_with(
                         }
                         // Durchgehende Ansicht und endlose Fläche: Mausrad scrollt (mit Umschalt
                         // waagerecht), Strg + Mausrad zoomt
-                        if (ui_state.continuous_scroll || ui_state.endless) && !modifiers.control_key() {
+                        if (ui_state.continuous_scroll || ui_state.endless)
+                            && !modifiers.control_key()
+                        {
                             let (mut dx, mut dy) = match delta {
                                 MouseScrollDelta::LineDelta(x, y) => {
                                     let line = 120.0 * window.scale_factor() as f32;
@@ -3100,7 +3601,10 @@ pub fn run_with(
                                 palm_touch_ids.remove(&touch.id);
                             }
                             if debug_fling && touch.phase != TouchPhase::Moved {
-                                eprintln!("[Nachgleiten] Finger ignoriert ({:?}): Stift in der Nähe", touch.phase);
+                                eprintln!(
+                                    "[Nachgleiten] Finger ignoriert ({:?}): Stift in der Nähe",
+                                    touch.phase
+                                );
                             }
                             return;
                         }
@@ -3167,11 +3671,13 @@ pub fn run_with(
                                     }
                                     is_pinch_gesturing = true;
 
-                                    let pts: Vec<(f32, f32)> = active_touches.values().copied().take(2).collect();
+                                    let pts: Vec<(f32, f32)> =
+                                        active_touches.values().copied().take(2).collect();
                                     let p1 = pts[0];
                                     let p2 = pts[1];
                                     let center = ((p1.0 + p2.0) * 0.5, (p1.1 + p2.1) * 0.5);
-                                    let dist = ((p2.0 - p1.0).powi(2) + (p2.1 - p1.1).powi(2)).sqrt();
+                                    let dist =
+                                        ((p2.0 - p1.0).powi(2) + (p2.1 - p1.1).powi(2)).sqrt();
                                     pinch_prev_center = Some(center);
                                     pinch_prev_distance = Some(dist);
                                 } else if active_touches.len() == 1 && !is_pinch_gesturing {
@@ -3201,7 +3707,9 @@ pub fn run_with(
                                         // Halten soll hier kein Kontextmenü öffnen
                                         long_press.cancel();
                                     }
-                                    if (!ui_state.touch_draw_enabled || ui_state.view_mode) && !finger_uses_tool {
+                                    if (!ui_state.touch_draw_enabled || ui_state.view_mode)
+                                        && !finger_uses_tool
+                                    {
                                         // Standard: 1 Finger scrollt / verschiebt den Canvas (Pan)
                                         is_touch_panning = true;
                                         touch_pan_last_pos = (tx, ty);
@@ -3212,27 +3720,65 @@ pub fn run_with(
                                         if is_eraser_action {
                                             is_erasing = true;
                                             if let Some(page_pt) = canvas.screen_to_page(tx, ty) {
-                                                if notebook.erase_at(page_pt, ui_state.eraser_radius(), stroke_max_radius, ui_state.eraser_mode) {
+                                                if notebook.erase_at(
+                                                    page_pt,
+                                                    ui_state.eraser_radius(),
+                                                    stroke_max_radius,
+                                                    ui_state.eraser_mode,
+                                                ) {
                                                     canvas.sync_page(notebook.current_page_mut());
                                                     autosave.mark_dirty(&notebook, &mut manifest);
-                                                    update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
+                                                    update_window_title(
+                                                        &window,
+                                                        &notebook,
+                                                        &manifest,
+                                                        ui_state.active_tool,
+                                                        autosave.status(),
+                                                    );
                                                     window.request_redraw();
                                                 }
                                             }
                                         } else if ui_state.active_tool == ActiveTool::Text {
                                             if let Some(page_pt) = canvas.screen_to_page(tx, ty) {
-                                                text_tool_click(page_pt, &mut canvas, &mut notebook, &mut manifest, &mut autosave, &mut ui_state);
-                                                update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
+                                                text_tool_click(
+                                                    page_pt,
+                                                    &mut canvas,
+                                                    &mut notebook,
+                                                    &mut manifest,
+                                                    &mut autosave,
+                                                    &mut ui_state,
+                                                );
+                                                update_window_title(
+                                                    &window,
+                                                    &notebook,
+                                                    &manifest,
+                                                    ui_state.active_tool,
+                                                    autosave.status(),
+                                                );
                                                 window.request_redraw();
                                             }
                                         } else if ui_state.active_tool == ActiveTool::Select {
-                                            if selection_press((tx, ty), false, &canvas, notebook.current_page(), egui_ctx.pixels_per_point(), &mut selection_state) {
+                                            if selection_press(
+                                                (tx, ty),
+                                                false,
+                                                &canvas,
+                                                notebook.current_page(),
+                                                egui_ctx.pixels_per_point(),
+                                                &mut selection_state,
+                                            ) {
                                                 window.request_redraw();
                                             }
                                         } else if ui_state.active_tool == ActiveTool::Space {
-                                            is_touch_spacing = space_press((tx, ty), &canvas, &notebook, &mut ui_state);
+                                            is_touch_spacing = space_press(
+                                                (tx, ty),
+                                                &canvas,
+                                                &notebook,
+                                                &mut ui_state,
+                                            );
                                             window.request_redraw();
-                                        } else if ui_state.active_tool.is_drawing() || ui_state.active_tool == ActiveTool::Shape {
+                                        } else if ui_state.active_tool.is_drawing()
+                                            || ui_state.active_tool == ActiveTool::Shape
+                                        {
                                             if let Some(page_pt) = canvas.screen_to_page(tx, ty) {
                                                 is_touch_drawing = true;
                                                 is_drawing = true;
@@ -3240,7 +3786,9 @@ pub fn run_with(
                                                 stroke_hold_anchor_pos = (tx, ty);
                                                 stroke_already_snapped = false;
                                                 stroke_snapped_shape = None;
-                                                canvas.start_stroke(page_pt.x, page_pt.y, pressure, now);
+                                                canvas.start_stroke(
+                                                    page_pt.x, page_pt.y, pressure, now,
+                                                );
                                                 window.request_redraw();
                                             }
                                         }
@@ -3252,13 +3800,17 @@ pub fn run_with(
                                 long_press.moved(touch.id, (tx, ty), window.scale_factor() as f32);
 
                                 if active_touches.len() >= 2 {
-                                    let pts: Vec<(f32, f32)> = active_touches.values().copied().take(2).collect();
+                                    let pts: Vec<(f32, f32)> =
+                                        active_touches.values().copied().take(2).collect();
                                     let p1 = pts[0];
                                     let p2 = pts[1];
                                     let curr_center = ((p1.0 + p2.0) * 0.5, (p1.1 + p2.1) * 0.5);
-                                    let curr_dist = ((p2.0 - p1.0).powi(2) + (p2.1 - p1.1).powi(2)).sqrt();
+                                    let curr_dist =
+                                        ((p2.0 - p1.0).powi(2) + (p2.1 - p1.1).powi(2)).sqrt();
 
-                                    if let (Some(prev_dist), Some(prev_center)) = (pinch_prev_distance, pinch_prev_center) {
+                                    if let (Some(prev_dist), Some(prev_center)) =
+                                        (pinch_prev_distance, pinch_prev_center)
+                                    {
                                         let dx = curr_center.0 - prev_center.0;
                                         let dy = curr_center.1 - prev_center.1;
                                         if dx.abs() > 0.05 || dy.abs() > 0.05 {
@@ -3267,7 +3819,11 @@ pub fn run_with(
                                         if prev_dist > 5.0 && curr_dist > 5.0 {
                                             let zoom_factor = curr_dist / prev_dist;
                                             if (zoom_factor - 1.0).abs() > 0.001 {
-                                                canvas.zoom_at(curr_center.0, curr_center.1, zoom_factor);
+                                                canvas.zoom_at(
+                                                    curr_center.0,
+                                                    curr_center.1,
+                                                    zoom_factor,
+                                                );
                                                 ui_state.current_zoom = canvas.camera.zoom;
                                             }
                                         }
@@ -3299,7 +3855,8 @@ pub fn run_with(
 
                                         if !stroke_already_snapped {
                                             let page_pt = canvas.screen_to_page_clamped(tx, ty);
-                                            canvas.extend_stroke(page_pt.x, page_pt.y, pressure, now);
+                                            canvas
+                                                .extend_stroke(page_pt.x, page_pt.y, pressure, now);
                                             window.request_redraw();
                                         }
                                     } else if is_touch_spacing {
@@ -3308,14 +3865,27 @@ pub fn run_with(
                                     } else if is_erasing {
                                         focus_page_at!((tx, ty));
                                         if let Some(page_pt) = canvas.screen_to_page(tx, ty) {
-                                            if notebook.erase_at(page_pt, ui_state.eraser_radius(), stroke_max_radius, ui_state.eraser_mode) {
+                                            if notebook.erase_at(
+                                                page_pt,
+                                                ui_state.eraser_radius(),
+                                                stroke_max_radius,
+                                                ui_state.eraser_mode,
+                                            ) {
                                                 canvas.sync_page(notebook.current_page_mut());
                                                 autosave.mark_dirty(&notebook, &mut manifest);
-                                                update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
+                                                update_window_title(
+                                                    &window,
+                                                    &notebook,
+                                                    &manifest,
+                                                    ui_state.active_tool,
+                                                    autosave.status(),
+                                                );
                                                 window.request_redraw();
                                             }
                                         }
-                                    } else if ui_state.active_tool == ActiveTool::Select && selection_state.drag_mode != DragMode::None {
+                                    } else if ui_state.active_tool == ActiveTool::Select
+                                        && selection_state.drag_mode != DragMode::None
+                                    {
                                         if let Some(page_pt) = canvas.screen_to_page(tx, ty) {
                                             selection_state.pending_drag = Some(page_pt);
                                             window.request_redraw();
@@ -3341,7 +3911,8 @@ pub fn run_with(
                                     pinch_prev_center = None;
                                     if is_touch_panning && touch.phase == TouchPhase::Ended {
                                         // Letztes Stück bis zum Abheben noch mitnehmen
-                                        let (dx, dy) = (tx - touch_pan_last_pos.0, ty - touch_pan_last_pos.1);
+                                        let (dx, dy) =
+                                            (tx - touch_pan_last_pos.0, ty - touch_pan_last_pos.1);
                                         canvas.pan(dx, dy);
                                         fling.track(Vec2::new(dx, dy), touch_at);
                                         let velocity = fling.release(touch_at);
@@ -3349,7 +3920,9 @@ pub fn run_with(
                                         fling.restart_clock(Instant::now());
                                         if debug_fling {
                                             let (moves, path, last_move) = touch_pan_trace;
-                                            let ms = |d: Option<Duration>| d.map_or(-1, |d| d.as_millis() as i64);
+                                            let ms = |d: Option<Duration>| {
+                                                d.map_or(-1, |d| d.as_millis() as i64)
+                                            };
                                             eprintln!(
                                                 "[Nachgleiten] {:.0} px/s beim Abheben, gleitet: {} ({moves} Bewegungen, {path:.0} px, letzte vor {} ms, laut System vor {} ms{})",
                                                 velocity.length(),
@@ -3369,12 +3942,26 @@ pub fn run_with(
 
                                     if is_touch_spacing {
                                         is_touch_spacing = false;
-                                        space_release(&mut canvas, &mut notebook, &mut manifest, &mut autosave, &storage_dir, &mut ui_state);
+                                        space_release(
+                                            &mut canvas,
+                                            &mut notebook,
+                                            &mut manifest,
+                                            &mut autosave,
+                                            &storage_dir,
+                                            &mut ui_state,
+                                        );
                                         window.request_redraw();
                                     }
 
                                     if ui_state.active_tool == ActiveTool::Select
-                                        && selection_release(false, &mut notebook, &mut manifest, &mut autosave, &mut selection_state, &mut canvas)
+                                        && selection_release(
+                                            false,
+                                            &mut notebook,
+                                            &mut manifest,
+                                            &mut autosave,
+                                            &mut selection_state,
+                                            &mut canvas,
+                                        )
                                     {
                                         window.request_redraw();
                                     }
@@ -3385,16 +3972,18 @@ pub fn run_with(
 
                                         if !stroke_already_snapped {
                                             let page_pt = canvas.screen_to_page_clamped(tx, ty);
-                                            canvas.extend_stroke(page_pt.x, page_pt.y, pressure, now);
+                                            canvas
+                                                .extend_stroke(page_pt.x, page_pt.y, pressure, now);
                                         }
 
-                                        let snapped_shape = stroke_snapped_shape.take().or_else(|| {
-                                            if ui_state.active_tool == ActiveTool::Shape {
-                                                geometry::detect_shape(&canvas.live_samples)
-                                            } else {
-                                                None
-                                            }
-                                        });
+                                        let snapped_shape =
+                                            stroke_snapped_shape.take().or_else(|| {
+                                                if ui_state.active_tool == ActiveTool::Shape {
+                                                    geometry::detect_shape(&canvas.live_samples)
+                                                } else {
+                                                    None
+                                                }
+                                            });
 
                                         commit_stroke_to_notebook(
                                             &mut canvas,
@@ -3417,14 +4006,20 @@ pub fn run_with(
                     }
 
                     WindowEvent::RedrawRequested => {
-                        flush_selection_drag(notebook.current_page_mut(), &mut canvas, &mut selection_state);
+                        flush_selection_drag(
+                            notebook.current_page_mut(),
+                            &mut canvas,
+                            &mut selection_state,
+                        );
                         // 0. Durchgehende Ansicht: Nach dem Scrollen oder Zoomen wird die Seite in
                         //    der Fenstermitte zur aktuellen (nicht während eines Strichs, einer
                         //    Auswahl oder beim Ziehen des Lineals). Wer auf einer Nachbarseite
                         //    schreibt, bleibt dort, bis wieder gescrollt wird (Undo betrifft sie).
                         canvas.set_fit_box(notebook.fit_box());
                         if notebook.is_endless() {
-                            if canvas.clamp_endless(notebook.current_page().endless_scroll_limit()) && fling.is_active() {
+                            if canvas.clamp_endless(notebook.current_page().endless_scroll_limit())
+                                && fling.is_active()
+                            {
                                 fling.stop();
                             }
                         } else if ui_state.continuous_scroll {
@@ -3440,8 +4035,9 @@ pub fn run_with(
                                 canvas.camera.pan_offset[0],
                                 canvas.camera.pan_offset[1] + stack.origins[0].y,
                             ];
-                            let scrolled = last_scroll
-                                .is_none_or(|last: [f32; 3]| last.iter().zip(scroll).any(|(a, b)| (a - b).abs() > 1e-3));
+                            let scrolled = last_scroll.is_none_or(|last: [f32; 3]| {
+                                last.iter().zip(scroll).any(|(a, b)| (a - b).abs() > 1e-3)
+                            });
                             let busy = is_drawing
                                 || is_erasing
                                 || ui_state.space_drag.is_some()
@@ -3480,7 +4076,12 @@ pub fn run_with(
                         egui_ctx.begin_frame(raw_input);
 
                         // 2. Auswahl-Overlay rendern (Bounding Box, Griffe, Lasso)
-                        render_selection_overlay(&egui_ctx, &selection_state, notebook.current_page(), &canvas);
+                        render_selection_overlay(
+                            &egui_ctx,
+                            &selection_state,
+                            notebook.current_page(),
+                            &canvas,
+                        );
 
                         // 3. Toolbar & Widgets rendern
                         updater.update();
@@ -3491,11 +4092,18 @@ pub fn run_with(
                             .as_ref()
                             .filter(|(id, _, _)| *id == manifest.id)
                             .map(|(_, index, _)| index + 1);
-                        let actions = ui::render_ui(&egui_ctx, &mut ui_state, &notebook, autosave.status(), &updater);
+                        let actions = ui::render_ui(
+                            &egui_ctx,
+                            &mut ui_state,
+                            &notebook,
+                            autosave.status(),
+                            &updater,
+                        );
                         canvas.ruler = ui_state.ruler;
 
                         // Seite neben der Werkzeugleiste zentrieren (Leistenbreite in physischen Pixeln)
-                        let reserved = ui_state.sidebar_reserved_width() * window.scale_factor() as f32;
+                        let reserved =
+                            ui_state.sidebar_reserved_width() * window.scale_factor() as f32;
                         let (inset_left, inset_right) = match ui_state.sidebar_side {
                             SidebarSide::Left => (reserved, 0.0),
                             SidebarSide::Right => (0.0, reserved),
@@ -3510,30 +4118,54 @@ pub fn run_with(
                             match action {
                                 UiAction::SetTool(tool) => {
                                     activate_tool(tool, &mut ui_state, &mut canvas);
-                                    update_window_title(&window, &notebook, &manifest, tool, autosave.status());
+                                    update_window_title(
+                                        &window,
+                                        &notebook,
+                                        &manifest,
+                                        tool,
+                                        autosave.status(),
+                                    );
                                     window.request_redraw();
                                 }
                                 UiAction::SetViewMode(on) => {
                                     ui_state.view_mode = on;
                                     if on {
                                         // Nothing may stay half-edited while only viewing
-                                        finish_text_edit(&mut canvas, &mut notebook, &mut manifest, &mut autosave, &mut ui_state);
+                                        finish_text_edit(
+                                            &mut canvas,
+                                            &mut notebook,
+                                            &mut manifest,
+                                            &mut autosave,
+                                            &mut ui_state,
+                                        );
                                         selection_state.clear();
                                         ui_state.ruler = None;
                                         ui_state.ruler_drag = None;
                                         canvas.ruler = None;
-                                        ui_state.set_export_message(t!("Nur ansehen – 👁 erneut tippen, um zu schreiben"));
+                                        ui_state.set_export_message(t!(
+                                            "Nur ansehen – 👁 erneut tippen, um zu schreiben"
+                                        ));
                                     }
-                                    update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
+                                    update_window_title(
+                                        &window,
+                                        &notebook,
+                                        &manifest,
+                                        ui_state.active_tool,
+                                        autosave.status(),
+                                    );
                                     window.request_redraw();
                                 }
                                 UiAction::SetColor(color) => {
                                     if !selection_state.is_empty()
-                                        && selection_state.recolor_selected(notebook.current_page_mut(), color) {
-                                            canvas.sync_page(notebook.current_page_mut());
-                                            autosave.mark_dirty(&notebook, &mut manifest);
-                                            ui_state.set_export_message(t!("Auswahl umgefärbt").to_string());
-                                        }
+                                        && selection_state
+                                            .recolor_selected(notebook.current_page_mut(), color)
+                                    {
+                                        canvas.sync_page(notebook.current_page_mut());
+                                        autosave.mark_dirty(&notebook, &mut manifest);
+                                        ui_state.set_export_message(
+                                            t!("Auswahl umgefärbt").to_string(),
+                                        );
+                                    }
                                     match ui_state.active_tool {
                                         ActiveTool::Pen | ActiveTool::Shape => {
                                             ui_state.pen_color = color;
@@ -3543,7 +4175,10 @@ pub fn run_with(
                                             ui_state.highlighter_color = color;
                                             canvas.set_stroke_color(color);
                                         }
-                                        ActiveTool::Eraser | ActiveTool::Select | ActiveTool::Text | ActiveTool::Space => {}
+                                        ActiveTool::Eraser
+                                        | ActiveTool::Select
+                                        | ActiveTool::Text
+                                        | ActiveTool::Space => {}
                                     }
                                     window.request_redraw();
                                 }
@@ -3557,25 +4192,37 @@ pub fn run_with(
                                             ui_state.highlighter_stroke_width_mm = width;
                                             canvas.set_stroke_width_mm(width);
                                         }
-                                        ActiveTool::Eraser | ActiveTool::Select | ActiveTool::Text | ActiveTool::Space => {}
+                                        ActiveTool::Eraser
+                                        | ActiveTool::Select
+                                        | ActiveTool::Text
+                                        | ActiveTool::Space => {}
                                     }
                                     window.request_redraw();
                                 }
                                 UiAction::DeleteSelected => {
                                     if !selection_state.is_empty() {
-                                        let removed = selection_state.delete_selected(notebook.current_page_mut());
+                                        let removed = selection_state
+                                            .delete_selected(notebook.current_page_mut());
                                         if !removed.is_empty() {
                                             canvas.sync_page(notebook.current_page_mut());
                                             autosave.mark_dirty(&notebook, &mut manifest);
-                                            ui_state.set_export_message(t!("{count} Objekt(e) gelöscht", count = removed.len()));
+                                            ui_state.set_export_message(t!(
+                                                "{count} Objekt(e) gelöscht",
+                                                count = removed.len()
+                                            ));
                                             window.request_redraw();
                                         }
                                     }
                                 }
                                 UiAction::CopySelected => {
-                                    let count = selection_state.copy_to_clipboard(notebook.current_page());
+                                    let count =
+                                        selection_state.copy_to_clipboard(notebook.current_page());
                                     if count > 0 {
-                                        let as_image = clipboard.copy_selection(notebook.current_page(), &selection_state.selected_ids, &storage_dir);
+                                        let as_image = clipboard.copy_selection(
+                                            notebook.current_page(),
+                                            &selection_state.selected_ids,
+                                            &storage_dir,
+                                        );
                                         clipboard.note_internal_copy(&storage_dir);
                                         ui_state.set_export_message(copy_message(count, as_image));
                                         window.request_redraw();
@@ -3587,19 +4234,45 @@ pub fn run_with(
                                         _ => None,
                                     };
                                     paste(
-                                        at, &mut clipboard, &storage_dir, &mut canvas, &mut notebook, &mut manifest,
-                                        &mut autosave, &mut selection_state, &mut ui_state,
+                                        at,
+                                        &mut clipboard,
+                                        &storage_dir,
+                                        &mut canvas,
+                                        &mut notebook,
+                                        &mut manifest,
+                                        &mut autosave,
+                                        &mut selection_state,
+                                        &mut ui_state,
                                     );
-                                    update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
+                                    update_window_title(
+                                        &window,
+                                        &notebook,
+                                        &manifest,
+                                        ui_state.active_tool,
+                                        autosave.status(),
+                                    );
                                     window.request_redraw();
                                 }
                                 UiAction::InsertImageFile(path) => {
                                     let center = visible_page_center(&canvas);
                                     insert_image_file(
-                                        &path, center, &storage_dir, &mut canvas, &mut notebook, &mut manifest,
-                                        &mut autosave, &mut selection_state, &mut ui_state,
+                                        &path,
+                                        center,
+                                        &storage_dir,
+                                        &mut canvas,
+                                        &mut notebook,
+                                        &mut manifest,
+                                        &mut autosave,
+                                        &mut selection_state,
+                                        &mut ui_state,
                                     );
-                                    update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
+                                    update_window_title(
+                                        &window,
+                                        &notebook,
+                                        &manifest,
+                                        ui_state.active_tool,
+                                        autosave.status(),
+                                    );
                                     window.request_redraw();
                                 }
                                 UiAction::ToggleAspectLock => {
@@ -3610,12 +4283,16 @@ pub fn run_with(
                                 }
                                 UiAction::RotateSelected => {
                                     if !selection_state.is_empty()
-                                        && selection_state.rotate_selected_90_deg(notebook.current_page_mut()) {
-                                            canvas.sync_page(notebook.current_page_mut());
-                                            autosave.mark_dirty(&notebook, &mut manifest);
-                                            ui_state.set_export_message(t!("Auswahl um 90° gedreht").to_string());
-                                            window.request_redraw();
-                                        }
+                                        && selection_state
+                                            .rotate_selected_90_deg(notebook.current_page_mut())
+                                    {
+                                        canvas.sync_page(notebook.current_page_mut());
+                                        autosave.mark_dirty(&notebook, &mut manifest);
+                                        ui_state.set_export_message(
+                                            t!("Auswahl um 90° gedreht").to_string(),
+                                        );
+                                        window.request_redraw();
+                                    }
                                 }
                                 UiAction::ZoomIn => {
                                     let center_x = canvas.size.width as f32 * 0.5;
@@ -3637,22 +4314,56 @@ pub fn run_with(
                                     window.request_redraw();
                                 }
                                 UiAction::Undo => {
-                                    finish_text_edit(&mut canvas, &mut notebook, &mut manifest, &mut autosave, &mut ui_state);
+                                    finish_text_edit(
+                                        &mut canvas,
+                                        &mut notebook,
+                                        &mut manifest,
+                                        &mut autosave,
+                                        &mut ui_state,
+                                    );
                                     if let Some(changed) = notebook.undo() {
                                         selection_state.clear();
                                         canvas.sync_page(notebook.current_page_mut());
-                                        persist_pages(&changed, &notebook, &mut manifest, &mut autosave);
-                                        update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
+                                        persist_pages(
+                                            &changed,
+                                            &notebook,
+                                            &mut manifest,
+                                            &mut autosave,
+                                        );
+                                        update_window_title(
+                                            &window,
+                                            &notebook,
+                                            &manifest,
+                                            ui_state.active_tool,
+                                            autosave.status(),
+                                        );
                                         window.request_redraw();
                                     }
                                 }
                                 UiAction::Redo => {
-                                    finish_text_edit(&mut canvas, &mut notebook, &mut manifest, &mut autosave, &mut ui_state);
+                                    finish_text_edit(
+                                        &mut canvas,
+                                        &mut notebook,
+                                        &mut manifest,
+                                        &mut autosave,
+                                        &mut ui_state,
+                                    );
                                     if let Some(changed) = notebook.redo() {
                                         selection_state.clear();
                                         canvas.sync_page(notebook.current_page_mut());
-                                        persist_pages(&changed, &notebook, &mut manifest, &mut autosave);
-                                        update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
+                                        persist_pages(
+                                            &changed,
+                                            &notebook,
+                                            &mut manifest,
+                                            &mut autosave,
+                                        );
+                                        update_window_title(
+                                            &window,
+                                            &notebook,
+                                            &manifest,
+                                            ui_state.active_tool,
+                                            autosave.status(),
+                                        );
                                         window.request_redraw();
                                     }
                                 }
@@ -3660,41 +4371,79 @@ pub fn run_with(
                                     selection_state.clear();
                                     notebook.previous_page();
                                     let curr = notebook.current_page_index;
-                                    let _ = storage::ensure_page_loaded(&storage_dir, &mut notebook, curr);
+                                    let _ = storage::ensure_page_loaded(
+                                        &storage_dir,
+                                        &mut notebook,
+                                        curr,
+                                    );
                                     canvas.sync_page(notebook.current_page_mut());
                                     manifest.current_page_index = notebook.current_page_index;
                                     manifest.sync_from_notebook(&notebook);
                                     autosave.mark_manifest_dirty(&manifest);
                                     autosave.mark_dirty(&notebook, &mut manifest);
-                                    update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
+                                    update_window_title(
+                                        &window,
+                                        &notebook,
+                                        &manifest,
+                                        ui_state.active_tool,
+                                        autosave.status(),
+                                    );
                                     window.request_redraw();
                                 }
                                 UiAction::NextPage => {
                                     selection_state.clear();
                                     notebook.next_page();
                                     let curr = notebook.current_page_index;
-                                    let _ = storage::ensure_page_loaded(&storage_dir, &mut notebook, curr);
+                                    let _ = storage::ensure_page_loaded(
+                                        &storage_dir,
+                                        &mut notebook,
+                                        curr,
+                                    );
                                     canvas.sync_page(notebook.current_page_mut());
                                     manifest.current_page_index = notebook.current_page_index;
                                     manifest.next_page_id = notebook.next_page_id;
                                     manifest.sync_from_notebook(&notebook);
                                     autosave.mark_manifest_dirty(&manifest);
                                     autosave.mark_dirty(&notebook, &mut manifest);
-                                    update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
+                                    update_window_title(
+                                        &window,
+                                        &notebook,
+                                        &manifest,
+                                        ui_state.active_tool,
+                                        autosave.status(),
+                                    );
                                     window.request_redraw();
                                 }
                                 UiAction::ExportPage(kind) => {
-                                    start_page_export(kind, &notebook, &storage_dir, &manifest.title, ui_state.pattern_color, export_tx.clone(), window.clone());
-                                    ui_state.set_export_message(t!("Seite wird exportiert …").to_string());
+                                    start_page_export(
+                                        kind,
+                                        &notebook,
+                                        &storage_dir,
+                                        &manifest.title,
+                                        ui_state.pattern_color,
+                                        export_tx.clone(),
+                                        window.clone(),
+                                    );
+                                    ui_state.set_export_message(
+                                        t!("Seite wird exportiert …").to_string(),
+                                    );
                                     window.request_redraw();
                                 }
                                 UiAction::SetPageTitle { page_id, title } => {
                                     if notebook.set_page_title(page_id, &title) {
-                                        if let Some(page) = notebook.pages.iter().find(|p| p.id == page_id) {
+                                        if let Some(page) =
+                                            notebook.pages.iter().find(|p| p.id == page_id)
+                                        {
                                             manifest.sync_from_notebook(&notebook);
                                             autosave.mark_page_dirty(page, &manifest);
                                         }
-                                        update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
+                                        update_window_title(
+                                            &window,
+                                            &notebook,
+                                            &manifest,
+                                            ui_state.active_tool,
+                                            autosave.status(),
+                                        );
                                     }
                                 }
                                 // Die endlose Fläche bleibt eine einzige Seite
@@ -3717,23 +4466,37 @@ pub fn run_with(
                                         &mut ui_state,
                                         &window,
                                     );
-                                    ui_state.set_export_message(t!("Seite {number} eingefügt", number = index + 1));
+                                    ui_state.set_export_message(t!(
+                                        "Seite {number} eingefügt",
+                                        number = index + 1
+                                    ));
                                 }
                                 UiAction::DeleteCurrentPage => {
                                     let index = notebook.current_page_index;
                                     if let Some(page) = notebook.remove_current_page() {
                                         selection_state.clear();
                                         let curr = notebook.current_page_index;
-                                        let _ = storage::ensure_page_loaded(&storage_dir, &mut notebook, curr);
+                                        let _ = storage::ensure_page_loaded(
+                                            &storage_dir,
+                                            &mut notebook,
+                                            curr,
+                                        );
                                         canvas.sync_page(notebook.current_page_mut());
                                         manifest.sync_from_notebook(&notebook);
                                         autosave.mark_manifest_dirty(&manifest);
-                                        last_deleted_page = Some((manifest.id.clone(), index, page));
+                                        last_deleted_page =
+                                            Some((manifest.id.clone(), index, page));
                                         ui_state.set_export_message(t!(
                                             "Seite {number} gelöscht – im Menü ☰ wiederherstellbar",
                                             number = index + 1
                                         ));
-                                        update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
+                                        update_window_title(
+                                            &window,
+                                            &notebook,
+                                            &manifest,
+                                            ui_state.active_tool,
+                                            autosave.status(),
+                                        );
                                         window.request_redraw();
                                     }
                                 }
@@ -3745,10 +4508,22 @@ pub fn run_with(
                                             canvas.sync_page(notebook.current_page_mut());
                                             manifest.sync_from_notebook(&notebook);
                                             // Die Seitendatei neu schreiben (sie kann inzwischen fehlen)
-                                            autosave.mark_page_dirty(notebook.current_page(), &manifest);
+                                            autosave.mark_page_dirty(
+                                                notebook.current_page(),
+                                                &manifest,
+                                            );
                                             autosave.mark_manifest_dirty(&manifest);
-                                            ui_state.set_export_message(t!("Seite {number} wiederhergestellt", number = index + 1));
-                                            update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
+                                            ui_state.set_export_message(t!(
+                                                "Seite {number} wiederhergestellt",
+                                                number = index + 1
+                                            ));
+                                            update_window_title(
+                                                &window,
+                                                &notebook,
+                                                &manifest,
+                                                ui_state.active_tool,
+                                                autosave.status(),
+                                            );
                                             window.request_redraw();
                                         } else {
                                             last_deleted_page = Some((id, index, page));
@@ -3763,7 +4538,11 @@ pub fn run_with(
                                     // Blättern behandelt (Ersatzseite, Warnung beim Öffnen der Seite)
                                     for idx in 0..notebook.pages.len() {
                                         if !notebook.pages[idx].is_loaded {
-                                            let _ = storage::ensure_page_loaded(&storage_dir, &mut notebook, idx);
+                                            let _ = storage::ensure_page_loaded(
+                                                &storage_dir,
+                                                &mut notebook,
+                                                idx,
+                                            );
                                         }
                                     }
                                     window.request_redraw();
@@ -3772,13 +4551,23 @@ pub fn run_with(
                                     if idx < notebook.pages.len() {
                                         selection_state.clear();
                                         notebook.current_page_index = idx;
-                                        let _ = storage::ensure_page_loaded(&storage_dir, &mut notebook, idx);
+                                        let _ = storage::ensure_page_loaded(
+                                            &storage_dir,
+                                            &mut notebook,
+                                            idx,
+                                        );
                                         canvas.sync_page(notebook.current_page_mut());
                                         manifest.current_page_index = idx;
                                         manifest.sync_from_notebook(&notebook);
                                         autosave.mark_manifest_dirty(&manifest);
                                         autosave.mark_dirty(&notebook, &mut manifest);
-                                        update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
+                                        update_window_title(
+                                            &window,
+                                            &notebook,
+                                            &manifest,
+                                            ui_state.active_tool,
+                                            autosave.status(),
+                                        );
                                         window.request_redraw();
                                     }
                                 }
@@ -3787,19 +4576,34 @@ pub fn run_with(
                                     page.background = bg;
                                     canvas.sync_page(page);
                                     autosave.mark_dirty(&notebook, &mut manifest);
-                                    update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
+                                    update_window_title(
+                                        &window,
+                                        &notebook,
+                                        &manifest,
+                                        ui_state.active_tool,
+                                        autosave.status(),
+                                    );
                                     window.request_redraw();
                                 }
                                 UiAction::ExportPdf => {
-                                    start_pdf_export(&notebook, &storage_dir, &manifest.title, ui_state.pattern_color, export_tx.clone(), window.clone());
+                                    start_pdf_export(
+                                        &notebook,
+                                        &storage_dir,
+                                        &manifest.title,
+                                        ui_state.pattern_color,
+                                        export_tx.clone(),
+                                        window.clone(),
+                                    );
                                     ui_state.set_export_message(t!("PDF-Export läuft…"));
                                     window.request_redraw();
                                 }
 
                                 UiAction::CreateFolder { parent, name } => {
-                                    if let Some(path) = change_library(&storage_base_dir, &mut ui_state, |library| {
-                                        library.create_folder(&parent, &name)
-                                    }) {
+                                    if let Some(path) = change_library(
+                                        &storage_base_dir,
+                                        &mut ui_state,
+                                        |library| library.create_folder(&parent, &name),
+                                    ) {
                                         ui_state.set_export_message(t!(
                                             "Ordner „{name}“ angelegt",
                                             name = crate::library::folder_name(&path)
@@ -3808,13 +4612,17 @@ pub fn run_with(
                                     window.request_redraw();
                                 }
                                 UiAction::RenameFolder { path, new_name } => {
-                                    if let Some(new_path) = change_library(&storage_base_dir, &mut ui_state, |library| {
-                                        library.rename_folder(&path, &new_name)
-                                    }) {
+                                    if let Some(new_path) = change_library(
+                                        &storage_base_dir,
+                                        &mut ui_state,
+                                        |library| library.rename_folder(&path, &new_name),
+                                    ) {
                                         // Der gezeigte Ordner kann darin liegen
                                         let shown = &ui_state.notebook_folder;
-                                        if shown == &path || shown.starts_with(&format!("{path}/")) {
-                                            ui_state.notebook_folder = format!("{new_path}{}", &shown[path.len()..]);
+                                        if shown == &path || shown.starts_with(&format!("{path}/"))
+                                        {
+                                            ui_state.notebook_folder =
+                                                format!("{new_path}{}", &shown[path.len()..]);
                                         }
                                     }
                                     window.request_redraw();
@@ -3834,18 +4642,25 @@ pub fn run_with(
                                     window.request_redraw();
                                 }
                                 UiAction::MoveFolder { path, new_parent } => {
-                                    if let Some(new_path) = change_library(&storage_base_dir, &mut ui_state, |library| {
-                                        library.move_folder(&path, &new_parent)
-                                    }) {
+                                    if let Some(new_path) = change_library(
+                                        &storage_base_dir,
+                                        &mut ui_state,
+                                        |library| library.move_folder(&path, &new_parent),
+                                    ) {
                                         // Der gezeigte Ordner kann darin liegen
                                         let shown = &ui_state.notebook_folder;
-                                        if shown == &path || shown.starts_with(&format!("{path}/")) {
-                                            ui_state.notebook_folder = format!("{new_path}{}", &shown[path.len()..]);
+                                        if shown == &path || shown.starts_with(&format!("{path}/"))
+                                        {
+                                            ui_state.notebook_folder =
+                                                format!("{new_path}{}", &shown[path.len()..]);
                                         }
                                         let target = if new_parent.is_empty() {
                                             t!("die oberste Ebene").to_string()
                                         } else {
-                                            format!("„{}“", crate::library::folder_name(&new_parent))
+                                            format!(
+                                                "„{}“",
+                                                crate::library::folder_name(&new_parent)
+                                            )
                                         };
                                         ui_state.set_export_message(t!(
                                             "Ordner „{name}“ verschoben in {target}",
@@ -3866,7 +4681,10 @@ pub fn run_with(
                                         } else {
                                             format!("„{}“", crate::library::folder_name(&folder))
                                         };
-                                        ui_state.set_export_message(t!("Verschoben in {target}", target = target));
+                                        ui_state.set_export_message(t!(
+                                            "Verschoben in {target}",
+                                            target = target
+                                        ));
                                     }
                                     window.request_redraw();
                                 }
@@ -3883,12 +4701,16 @@ pub fn run_with(
                                         match storage::load_notebook(&new_notebook_dir) {
                                             Ok((loaded_nb, loaded_manifest)) => {
                                                 let _ = autosave.flush();
-                                                match storage::NotebookLock::acquire(&new_notebook_dir) {
+                                                match storage::NotebookLock::acquire(
+                                                    &new_notebook_dir,
+                                                ) {
                                                     Ok(lock) => {
                                                         _notebook_lock = Some(lock);
                                                         autosave.set_read_only(false);
                                                     }
-                                                    Err(storage::StorageError::AlreadyLocked(msg)) => {
+                                                    Err(storage::StorageError::AlreadyLocked(
+                                                        msg,
+                                                    )) => {
                                                         eprintln!("[Storage-Lock] {msg}");
                                                         _notebook_lock = None;
                                                         autosave.set_read_only(true);
@@ -3900,7 +4722,8 @@ pub fn run_with(
                                                         autosave.set_read_only(true);
                                                     }
                                                 }
-                                                autosave.switch_notebook_dir(new_notebook_dir.clone());
+                                                autosave
+                                                    .switch_notebook_dir(new_notebook_dir.clone());
                                                 notebook = loaded_nb;
                                                 manifest = loaded_manifest;
                                                 storage_dir = new_notebook_dir;
@@ -3910,35 +4733,58 @@ pub fn run_with(
                                                 refresh_notebooks(&storage_base_dir, &mut ui_state);
                                                 ui_state.is_document_menu_open = false;
                                                 canvas.sync_page(notebook.current_page_mut());
-                                                update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
+                                                update_window_title(
+                                                    &window,
+                                                    &notebook,
+                                                    &manifest,
+                                                    ui_state.active_tool,
+                                                    autosave.status(),
+                                                );
                                                 if _notebook_lock.is_some() {
-                                                    ui_state.set_export_message(t!("Dokument '{title}' geöffnet", title = manifest.title));
+                                                    ui_state.set_export_message(t!(
+                                                        "Dokument '{title}' geöffnet",
+                                                        title = manifest.title
+                                                    ));
                                                 }
-                                                warn_if_open_elsewhere(_notebook_lock.as_ref(), &mut ui_state);
+                                                warn_if_open_elsewhere(
+                                                    _notebook_lock.as_ref(),
+                                                    &mut ui_state,
+                                                );
                                                 window.request_redraw();
                                             }
                                             Err(err) => {
                                                 eprintln!("[Dokument-Fehler] Konnte Dokument '{id}' nicht laden: {err}");
-                                                ui_state.set_export_message(t!("Fehler beim Öffnen: {err}", err = err));
+                                                ui_state.set_export_message(t!(
+                                                    "Fehler beim Öffnen: {err}",
+                                                    err = err
+                                                ));
                                             }
                                         }
                                     }
                                 }
                                 UiAction::ImportFile(path) => {
                                     // Neben das gerade geöffnete Notizbuch
-                                    let folder = ui_state.library.folder_of(&manifest.id).to_string();
+                                    let folder =
+                                        ui_state.library.folder_of(&manifest.id).to_string();
                                     let title = path
                                         .file_stem()
                                         .map(|s| s.to_string_lossy().into_owned())
                                         .unwrap_or_else(|| "Import".to_string());
-                                    match crate::import::import_file(&storage_base_dir, &title, &path) {
+                                    match crate::import::import_file(
+                                        &storage_base_dir,
+                                        &title,
+                                        &path,
+                                    ) {
                                         Ok((new_nb, new_manifest, new_dir, report)) => {
                                             let id = new_manifest.id.clone();
-                                            change_library(&storage_base_dir, &mut ui_state, |library| {
-                                                library.move_notebook(&id, &folder)
-                                            });
+                                            change_library(
+                                                &storage_base_dir,
+                                                &mut ui_state,
+                                                |library| library.move_notebook(&id, &folder),
+                                            );
                                             let _ = autosave.flush();
-                                            _notebook_lock = storage::NotebookLock::acquire(&new_dir).ok();
+                                            _notebook_lock =
+                                                storage::NotebookLock::acquire(&new_dir).ok();
                                             autosave.set_read_only(_notebook_lock.is_none());
                                             autosave.switch_notebook_dir(new_dir.clone());
                                             notebook = new_nb;
@@ -3950,28 +4796,47 @@ pub fn run_with(
                                             refresh_notebooks(&storage_base_dir, &mut ui_state);
                                             canvas.reset_view();
                                             canvas.sync_page(notebook.current_page_mut());
-                                            update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
+                                            update_window_title(
+                                                &window,
+                                                &notebook,
+                                                &manifest,
+                                                ui_state.active_tool,
+                                                autosave.status(),
+                                            );
                                             let mut message = t!(
                                                 "'{title}' importiert ({count} Seiten)",
                                                 title = manifest.title,
                                                 count = notebook.pages.len()
                                             );
                                             if let Some(pdf) = &report.missing_pdf {
-                                                message.push_str(&t!(", PDF-Hintergrund nicht gefunden: {file}", file = pdf));
+                                                message.push_str(&t!(
+                                                    ", PDF-Hintergrund nicht gefunden: {file}",
+                                                    file = pdf
+                                                ));
                                             }
                                             if report.skipped > 0 {
-                                                message.push_str(&t!(", {count} Elemente übersprungen", count = report.skipped));
+                                                message.push_str(&t!(
+                                                    ", {count} Elemente übersprungen",
+                                                    count = report.skipped
+                                                ));
                                             }
                                             ui_state.set_export_message(message);
                                         }
                                         Err(err) => {
                                             eprintln!("[Import] '{}': {err}", path.display());
-                                            ui_state.set_export_message(t!("Nicht importiert: {err}", err = err));
+                                            ui_state.set_export_message(t!(
+                                                "Nicht importiert: {err}",
+                                                err = err
+                                            ));
                                         }
                                     }
                                     window.request_redraw();
                                 }
-                                UiAction::CreateNotebook { title, folder, layout } => {
+                                UiAction::CreateNotebook {
+                                    title,
+                                    folder,
+                                    layout,
+                                } => {
                                     let _ = autosave.flush();
                                     match storage::create_new_notebook(&storage_base_dir, &title) {
                                         Ok((mut new_nb, mut new_manifest, new_dir)) => {
@@ -3980,10 +4845,13 @@ pub fn run_with(
                                             if layout == NotebookLayout::Endless {
                                                 new_nb.make_endless();
                                             }
-                                            change_library(&storage_base_dir, &mut ui_state, |library| {
-                                                library.move_notebook(&id, &folder)
-                                            });
-                                            _notebook_lock = storage::NotebookLock::acquire(&new_dir).ok();
+                                            change_library(
+                                                &storage_base_dir,
+                                                &mut ui_state,
+                                                |library| library.move_notebook(&id, &folder),
+                                            );
+                                            _notebook_lock =
+                                                storage::NotebookLock::acquire(&new_dir).ok();
                                             autosave.set_read_only(_notebook_lock.is_none());
                                             autosave.switch_notebook_dir(new_dir.clone());
                                             notebook = new_nb;
@@ -3997,41 +4865,79 @@ pub fn run_with(
                                             refresh_notebooks(&storage_base_dir, &mut ui_state);
                                             ui_state.is_document_menu_open = false;
                                             canvas.sync_page(notebook.current_page_mut());
-                                            update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
-                                            ui_state.set_export_message(t!("Dokument '{title}' erstellt", title = manifest.title));
+                                            update_window_title(
+                                                &window,
+                                                &notebook,
+                                                &manifest,
+                                                ui_state.active_tool,
+                                                autosave.status(),
+                                            );
+                                            ui_state.set_export_message(t!(
+                                                "Dokument '{title}' erstellt",
+                                                title = manifest.title
+                                            ));
                                             window.request_redraw();
                                         }
                                         Err(err) => {
                                             eprintln!("[Dokument-Fehler] Konnte Dokument '{title}' nicht erstellen: {err}");
-                                            ui_state.set_export_message(t!("Fehler beim Erstellen: {err}", err = err));
+                                            ui_state.set_export_message(t!(
+                                                "Fehler beim Erstellen: {err}",
+                                                err = err
+                                            ));
                                         }
                                     }
                                 }
                                 UiAction::RenameNotebook { id, new_title } => {
                                     let target_dir = storage_base_dir.join(&id);
                                     if id == manifest.id {
-                                        match storage::rename_notebook(&target_dir, &mut manifest, &new_title) {
+                                        match storage::rename_notebook(
+                                            &target_dir,
+                                            &mut manifest,
+                                            &new_title,
+                                        ) {
                                             Ok(()) => {
                                                 ui_state.document_title = manifest.title.clone();
                                                 refresh_notebooks(&storage_base_dir, &mut ui_state);
                                                 manifest.sync_from_notebook(&notebook);
                                                 autosave.mark_manifest_dirty(&manifest);
-                                                update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
-                                                ui_state.set_export_message(t!("Umbenannt in '{title}'", title = new_title));
+                                                update_window_title(
+                                                    &window,
+                                                    &notebook,
+                                                    &manifest,
+                                                    ui_state.active_tool,
+                                                    autosave.status(),
+                                                );
+                                                ui_state.set_export_message(t!(
+                                                    "Umbenannt in '{title}'",
+                                                    title = new_title
+                                                ));
                                                 window.request_redraw();
                                             }
                                             Err(err) => {
                                                 eprintln!("[Dokument-Fehler] Konnte Dokument '{id}' nicht umbenennen: {err}");
-                                                ui_state.set_export_message(t!("Fehler beim Umbenennen: {err}", err = err));
+                                                ui_state.set_export_message(t!(
+                                                    "Fehler beim Umbenennen: {err}",
+                                                    err = err
+                                                ));
                                             }
                                         }
                                     } else {
                                         let manifest_path = target_dir.join("manifest.json");
-                                        if let Ok(content) = std::fs::read_to_string(&manifest_path) {
-                                            if let Ok(mut other_manifest) = serde_json::from_str::<NotebookManifest>(&content) {
-                                                let _ = storage::rename_notebook(&target_dir, &mut other_manifest, &new_title);
+                                        if let Ok(content) = std::fs::read_to_string(&manifest_path)
+                                        {
+                                            if let Ok(mut other_manifest) =
+                                                serde_json::from_str::<NotebookManifest>(&content)
+                                            {
+                                                let _ = storage::rename_notebook(
+                                                    &target_dir,
+                                                    &mut other_manifest,
+                                                    &new_title,
+                                                );
                                                 refresh_notebooks(&storage_base_dir, &mut ui_state);
-                                                ui_state.set_export_message(t!("Umbenannt in '{title}'", title = new_title));
+                                                ui_state.set_export_message(t!(
+                                                    "Umbenannt in '{title}'",
+                                                    title = new_title
+                                                ));
                                                 window.request_redraw();
                                             }
                                         }
@@ -4054,73 +4960,140 @@ pub fn run_with(
 
                                     match storage::delete_notebook(&target_dir, &storage_base_dir) {
                                         Ok(trash_path) => {
-                                            ui_state.last_deleted_notebook = Some((trash_path, deleted_title));
+                                            ui_state.last_deleted_notebook =
+                                                Some((trash_path, deleted_title));
                                             refresh_notebooks(&storage_base_dir, &mut ui_state);
                                             if is_current {
                                                 if let Some(first) = ui_state
                                                     .available_notebooks
                                                     .iter()
-                                                    .find(|s| s.status != storage::NotebookStatus::Damaged)
+                                                    .find(|s| {
+                                                        s.status != storage::NotebookStatus::Damaged
+                                                    })
                                                     .cloned()
                                                 {
-                                                    let new_notebook_dir = storage_base_dir.join(&first.id);
-                                                    match storage::load_notebook(&new_notebook_dir) {
+                                                    let new_notebook_dir =
+                                                        storage_base_dir.join(&first.id);
+                                                    match storage::load_notebook(&new_notebook_dir)
+                                                    {
                                                         Ok((loaded_nb, loaded_manifest)) => {
-                                                            _notebook_lock = storage::NotebookLock::acquire(&new_notebook_dir).ok();
-                                                            autosave.set_read_only(_notebook_lock.is_none());
-                                                            autosave.switch_notebook_dir(new_notebook_dir.clone());
+                                                            _notebook_lock =
+                                                                storage::NotebookLock::acquire(
+                                                                    &new_notebook_dir,
+                                                                )
+                                                                .ok();
+                                                            autosave.set_read_only(
+                                                                _notebook_lock.is_none(),
+                                                            );
+                                                            autosave.switch_notebook_dir(
+                                                                new_notebook_dir.clone(),
+                                                            );
                                                             notebook = loaded_nb;
                                                             manifest = loaded_manifest;
                                                             storage_dir = new_notebook_dir;
                                                             selection_state.clear();
-                                                            ui_state.current_notebook_id = manifest.id.clone();
-                                                            ui_state.document_title = manifest.title.clone();
-                                                            canvas.sync_page(notebook.current_page_mut());
-                                                            update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
-                                                            ui_state.set_export_message(t!("Gewechselt zu '{title}'", title = manifest.title));
-                                                            warn_if_open_elsewhere(_notebook_lock.as_ref(), &mut ui_state);
+                                                            ui_state.current_notebook_id =
+                                                                manifest.id.clone();
+                                                            ui_state.document_title =
+                                                                manifest.title.clone();
+                                                            canvas.sync_page(
+                                                                notebook.current_page_mut(),
+                                                            );
+                                                            update_window_title(
+                                                                &window,
+                                                                &notebook,
+                                                                &manifest,
+                                                                ui_state.active_tool,
+                                                                autosave.status(),
+                                                            );
+                                                            ui_state.set_export_message(t!(
+                                                                "Gewechselt zu '{title}'",
+                                                                title = manifest.title
+                                                            ));
+                                                            warn_if_open_elsewhere(
+                                                                _notebook_lock.as_ref(),
+                                                                &mut ui_state,
+                                                            );
                                                         }
                                                         Err(err) => {
                                                             eprintln!("[Dokument-Fehler] Konnte Dokument '{}' nicht laden: {err}", first.id);
                                                         }
                                                     }
-                                                } else if let Ok((new_nb, new_manifest, new_dir)) = storage::create_new_notebook(&storage_base_dir, t!("Standard-Notizbuch")) {
-                                                    _notebook_lock = storage::NotebookLock::acquire(&new_dir).ok();
-                                                    autosave.set_read_only(_notebook_lock.is_none());
+                                                } else if let Ok((new_nb, new_manifest, new_dir)) =
+                                                    storage::create_new_notebook(
+                                                        &storage_base_dir,
+                                                        t!("Standard-Notizbuch"),
+                                                    )
+                                                {
+                                                    _notebook_lock =
+                                                        storage::NotebookLock::acquire(&new_dir)
+                                                            .ok();
+                                                    autosave
+                                                        .set_read_only(_notebook_lock.is_none());
                                                     autosave.switch_notebook_dir(new_dir.clone());
                                                     notebook = new_nb;
                                                     manifest = new_manifest;
                                                     storage_dir = new_dir;
                                                     selection_state.clear();
-                                                    ui_state.current_notebook_id = manifest.id.clone();
-                                                    ui_state.document_title = manifest.title.clone();
-                                                    refresh_notebooks(&storage_base_dir, &mut ui_state);
+                                                    ui_state.current_notebook_id =
+                                                        manifest.id.clone();
+                                                    ui_state.document_title =
+                                                        manifest.title.clone();
+                                                    refresh_notebooks(
+                                                        &storage_base_dir,
+                                                        &mut ui_state,
+                                                    );
                                                     canvas.sync_page(notebook.current_page_mut());
-                                                    update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
-                                                    ui_state.set_export_message(t!("Standard-Notizbuch erstellt").to_string());
+                                                    update_window_title(
+                                                        &window,
+                                                        &notebook,
+                                                        &manifest,
+                                                        ui_state.active_tool,
+                                                        autosave.status(),
+                                                    );
+                                                    ui_state.set_export_message(
+                                                        t!("Standard-Notizbuch erstellt")
+                                                            .to_string(),
+                                                    );
                                                 }
                                             } else {
-                                                ui_state.set_export_message(t!("Dokument in Papierkorb verschoben").to_string());
+                                                ui_state.set_export_message(
+                                                    t!("Dokument in Papierkorb verschoben")
+                                                        .to_string(),
+                                                );
                                             }
                                             window.request_redraw();
                                         }
                                         Err(err) => {
                                             eprintln!("[Dokument-Fehler] Konnte Dokument '{id}' nicht löschen: {err}");
-                                            ui_state.set_export_message(t!("Fehler beim Löschen: {err}", err = err));
+                                            ui_state.set_export_message(t!(
+                                                "Fehler beim Löschen: {err}",
+                                                err = err
+                                            ));
                                         }
                                     }
                                 }
                                 UiAction::UndoDeleteNotebook => {
-                                    if let Some((trash_path, _title)) = ui_state.last_deleted_notebook.take() {
-                                        match storage::restore_notebook_from_trash(&storage_base_dir, &trash_path) {
+                                    if let Some((trash_path, _title)) =
+                                        ui_state.last_deleted_notebook.take()
+                                    {
+                                        match storage::restore_notebook_from_trash(
+                                            &storage_base_dir,
+                                            &trash_path,
+                                        ) {
                                             Ok(_restored_dir) => {
                                                 refresh_notebooks(&storage_base_dir, &mut ui_state);
-                                                ui_state.set_export_message(t!("Notizbuch wiederhergestellt").to_string());
+                                                ui_state.set_export_message(
+                                                    t!("Notizbuch wiederhergestellt").to_string(),
+                                                );
                                                 window.request_redraw();
                                             }
                                             Err(err) => {
                                                 eprintln!("[Dokument-Fehler] Konnte Notizbuch nicht wiederherstellen: {err}");
-                                                ui_state.set_export_message(t!("Fehler beim Wiederherstellen: {err}", err = err));
+                                                ui_state.set_export_message(t!(
+                                                    "Fehler beim Wiederherstellen: {err}",
+                                                    err = err
+                                                ));
                                             }
                                         }
                                     }
@@ -4130,18 +5103,27 @@ pub fn run_with(
                                     match storage::restore_manifest_from_backup(&target_dir) {
                                         Ok(()) => {
                                             refresh_notebooks(&storage_base_dir, &mut ui_state);
-                                            ui_state.set_export_message(t!("Manifest aus Backup wiederhergestellt").to_string());
+                                            ui_state.set_export_message(
+                                                t!("Manifest aus Backup wiederhergestellt")
+                                                    .to_string(),
+                                            );
                                             window.request_redraw();
                                         }
                                         Err(err) => {
                                             eprintln!("[Dokument-Fehler] Konnte Backup für '{id}' nicht wiederherstellen: {err}");
-                                            ui_state.set_export_message(t!("Wiederherstellung fehlgeschlagen: {err}", err = err));
+                                            ui_state.set_export_message(t!(
+                                                "Wiederherstellung fehlgeschlagen: {err}",
+                                                err = err
+                                            ));
                                         }
                                     }
                                 }
                                 UiAction::OpenNotebookFolder(id) => {
                                     let target_dir = storage_base_dir.join(&id);
-                                    ui_state.set_export_message(t!("Ordner: {path}", path = target_dir.display()));
+                                    ui_state.set_export_message(t!(
+                                        "Ordner: {path}",
+                                        path = target_dir.display()
+                                    ));
                                     window.request_redraw();
                                 }
                                 UiAction::CheckForUpdates => {
@@ -4154,26 +5136,41 @@ pub fn run_with(
                                 }
                                 UiAction::InstallOrOpenUpdate(path) => {
                                     if let Err(err) = updater.install_or_open(&path) {
-                                        ui_state.set_export_message(t!("Update-Fehler: {err}", err = err));
-                                    } else if matches!(updater.runtime(), crate::updater::RuntimeEnvironment::WindowsExe { .. }) {
-                                        ui_state.set_export_message(t!("Update installiert – gilt ab dem nächsten Start"));
+                                        ui_state.set_export_message(t!(
+                                            "Update-Fehler: {err}",
+                                            err = err
+                                        ));
+                                    } else if matches!(
+                                        updater.runtime(),
+                                        crate::updater::RuntimeEnvironment::WindowsExe { .. }
+                                    ) {
+                                        ui_state.set_export_message(t!(
+                                            "Update installiert – gilt ab dem nächsten Start"
+                                        ));
                                     } else {
-                                        ui_state.set_export_message(t!("Update gestartet / geöffnet"));
+                                        ui_state
+                                            .set_export_message(t!("Update gestartet / geöffnet"));
                                     }
                                     window.request_redraw();
                                 }
                                 UiAction::OpenUrlInBrowser(url) => {
                                     let _ = webbrowser::open(&url);
                                 }
-                                UiAction::SaveUpdaterConfig { server_url, auth_token } => {
+                                UiAction::SaveUpdaterConfig {
+                                    server_url,
+                                    auth_token,
+                                } => {
                                     updater.set_server_url(server_url);
                                     updater.set_auth_token(auth_token);
-                                    ui_state.set_export_message(t!("Server-Einstellungen gespeichert"));
+                                    ui_state
+                                        .set_export_message(t!("Server-Einstellungen gespeichert"));
                                     window.request_redraw();
                                 }
                                 UiAction::UnlockCorruptedPage(page_id) => {
                                     notebook.load_warnings.remove(&page_id);
-                                    if let Some(page) = notebook.pages.iter_mut().find(|p| p.id == page_id) {
+                                    if let Some(page) =
+                                        notebook.pages.iter_mut().find(|p| p.id == page_id)
+                                    {
                                         page.unlock_after_load_error();
                                     }
                                     autosave.mark_dirty(&notebook, &mut manifest);
@@ -4206,7 +5203,10 @@ pub fn run_with(
                                         Err(err) => {
                                             eprintln!("[Recovery-Fehler] Konnte Notfall-Export nicht schreiben: {err}");
                                             if let Some(ref mut se) = ui_state.shutdown_error {
-                                                se.messages.push(t!("Notfall-Export fehlgeschlagen: {err}", err = err));
+                                                se.messages.push(t!(
+                                                    "Notfall-Export fehlgeschlagen: {err}",
+                                                    err = err
+                                                ));
                                             }
                                             window.request_redraw();
                                         }
@@ -4214,7 +5214,11 @@ pub fn run_with(
                                 }
                                 UiAction::SetSidebarSide(side) => {
                                     ui_settings.sidebar_side = side;
-                                    save_ui_settings(&ui_settings, ui_settings_path.as_deref(), &mut ui_state);
+                                    save_ui_settings(
+                                        &ui_settings,
+                                        ui_settings_path.as_deref(),
+                                        &mut ui_state,
+                                    );
                                     window.request_redraw();
                                 }
                                 UiAction::SetStorageDir(chosen) => {
@@ -4223,7 +5227,9 @@ pub fn run_with(
                                         None => storage::default_storage_dir(),
                                     };
                                     if new_base == storage_base_dir {
-                                        ui_state.set_export_message(t!("Die Notizbücher liegen bereits dort").to_string());
+                                        ui_state.set_export_message(
+                                            t!("Die Notizbücher liegen bereits dort").to_string(),
+                                        );
                                     } else {
                                         let _ = autosave.flush();
                                         match storage::copy_storage(&storage_base_dir, &new_base) {
@@ -4231,10 +5237,16 @@ pub fn run_with(
                                                 // Release lock and open marker in the old location
                                                 _notebook_lock = None;
                                                 storage_base_dir = new_base;
-                                                ui_settings.storage_dir = chosen.map(|_| storage_base_dir.clone());
-                                                save_ui_settings(&ui_settings, ui_settings_path.as_deref(), &mut ui_state);
+                                                ui_settings.storage_dir =
+                                                    chosen.map(|_| storage_base_dir.clone());
+                                                save_ui_settings(
+                                                    &ui_settings,
+                                                    ui_settings_path.as_deref(),
+                                                    &mut ui_state,
+                                                );
                                                 ui_state.storage_dir = storage_base_dir.clone();
-                                                ui_state.storage_dir_custom = ui_settings.storage_dir.is_some();
+                                                ui_state.storage_dir_custom =
+                                                    ui_settings.storage_dir.is_some();
                                                 refresh_notebooks(&storage_base_dir, &mut ui_state);
                                                 // Same notebook if it exists there, otherwise the first one
                                                 let open_id = ui_state
@@ -4247,42 +5259,74 @@ pub fn run_with(
                                                 let loaded = match open_id {
                                                     Some(id) => {
                                                         let dir = storage_base_dir.join(&id);
-                                                        storage::load_notebook(&dir).map(|(nb, m)| (nb, m, dir))
+                                                        storage::load_notebook(&dir)
+                                                            .map(|(nb, m)| (nb, m, dir))
                                                     }
-                                                    None => storage::create_new_notebook(&storage_base_dir, t!("Standard-Notizbuch")),
+                                                    None => storage::create_new_notebook(
+                                                        &storage_base_dir,
+                                                        t!("Standard-Notizbuch"),
+                                                    ),
                                                 };
                                                 match loaded {
                                                     Ok((new_nb, new_manifest, new_dir)) => {
-                                                        _notebook_lock = storage::NotebookLock::acquire(&new_dir).ok();
-                                                        autosave.set_read_only(_notebook_lock.is_none());
-                                                        autosave.switch_notebook_dir(new_dir.clone());
+                                                        _notebook_lock =
+                                                            storage::NotebookLock::acquire(
+                                                                &new_dir,
+                                                            )
+                                                            .ok();
+                                                        autosave.set_read_only(
+                                                            _notebook_lock.is_none(),
+                                                        );
+                                                        autosave
+                                                            .switch_notebook_dir(new_dir.clone());
                                                         notebook = new_nb;
                                                         manifest = new_manifest;
                                                         storage_dir = new_dir;
                                                         selection_state.clear();
-                                                        ui_state.current_notebook_id = manifest.id.clone();
-                                                        ui_state.document_title = manifest.title.clone();
-                                                        refresh_notebooks(&storage_base_dir, &mut ui_state);
-                                                        canvas.sync_page(notebook.current_page_mut());
-                                                        update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
+                                                        ui_state.current_notebook_id =
+                                                            manifest.id.clone();
+                                                        ui_state.document_title =
+                                                            manifest.title.clone();
+                                                        refresh_notebooks(
+                                                            &storage_base_dir,
+                                                            &mut ui_state,
+                                                        );
+                                                        canvas
+                                                            .sync_page(notebook.current_page_mut());
+                                                        update_window_title(
+                                                            &window,
+                                                            &notebook,
+                                                            &manifest,
+                                                            ui_state.active_tool,
+                                                            autosave.status(),
+                                                        );
                                                         ui_state.set_export_message(if copied > 0 {
                                                             t!("Speicherort geändert, {count} Notizbücher kopiert", count = copied)
                                                         } else {
                                                             t!("Speicherort geändert: {path}", path = storage_base_dir.display())
                                                         });
-                                                        warn_if_open_elsewhere(_notebook_lock.as_ref(), &mut ui_state);
+                                                        warn_if_open_elsewhere(
+                                                            _notebook_lock.as_ref(),
+                                                            &mut ui_state,
+                                                        );
                                                     }
                                                     Err(err) => {
                                                         // The old notebook stays open but is saved nowhere
                                                         autosave.set_read_only(true);
                                                         eprintln!("[Storage] Notizbuch am neuen Speicherort nicht geöffnet: {err}");
-                                                        ui_state.set_export_message(t!("Fehler beim Öffnen: {err}", err = err));
+                                                        ui_state.set_export_message(t!(
+                                                            "Fehler beim Öffnen: {err}",
+                                                            err = err
+                                                        ));
                                                     }
                                                 }
                                             }
                                             Err(err) => {
                                                 eprintln!("[Storage] Speicherort '{}' nicht nutzbar: {err}", new_base.display());
-                                                ui_state.set_export_message(t!("Speicherort nicht nutzbar: {err}", err = err));
+                                                ui_state.set_export_message(t!(
+                                                    "Speicherort nicht nutzbar: {err}",
+                                                    err = err
+                                                ));
                                             }
                                         }
                                     }
@@ -4291,8 +5335,18 @@ pub fn run_with(
                                 UiAction::SetLanguage(language) => {
                                     ui_settings.language = language;
                                     i18n::set_language(language.unwrap_or_else(Language::system));
-                                    save_ui_settings(&ui_settings, ui_settings_path.as_deref(), &mut ui_state);
-                                    update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
+                                    save_ui_settings(
+                                        &ui_settings,
+                                        ui_settings_path.as_deref(),
+                                        &mut ui_state,
+                                    );
+                                    update_window_title(
+                                        &window,
+                                        &notebook,
+                                        &manifest,
+                                        ui_state.active_tool,
+                                        autosave.status(),
+                                    );
                                     window.request_redraw();
                                 }
                                 UiAction::SetPaperTheme { theme, adapt_ink } => {
@@ -4300,13 +5354,21 @@ pub fn run_with(
                                     canvas.sync_page(notebook.current_page_mut());
                                     ui_settings.paper_theme = theme;
                                     ui_settings.adapt_ink_colors = adapt_ink;
-                                    save_ui_settings(&ui_settings, ui_settings_path.as_deref(), &mut ui_state);
+                                    save_ui_settings(
+                                        &ui_settings,
+                                        ui_settings_path.as_deref(),
+                                        &mut ui_state,
+                                    );
                                     window.request_redraw();
                                 }
                                 UiAction::SetPatternColor(pattern) => {
                                     canvas.set_pattern_color(pattern);
                                     ui_settings.pattern_color = pattern;
-                                    save_ui_settings(&ui_settings, ui_settings_path.as_deref(), &mut ui_state);
+                                    save_ui_settings(
+                                        &ui_settings,
+                                        ui_settings_path.as_deref(),
+                                        &mut ui_state,
+                                    );
                                     window.request_redraw();
                                 }
                                 UiAction::ScrollTo(y) => {
@@ -4332,7 +5394,8 @@ pub fn run_with(
                                     } else {
                                         manifest.layout = Some(layout);
                                         ui_state.endless = to_endless;
-                                        ui_state.continuous_scroll = layout == NotebookLayout::Continuous;
+                                        ui_state.continuous_scroll =
+                                            layout == NotebookLayout::Continuous;
                                         if was_endless != to_endless {
                                             selection_state.clear();
                                             canvas.sync_page(notebook.current_page_mut());
@@ -4346,11 +5409,19 @@ pub fn run_with(
                                 }
                                 UiAction::SaveStylusButtons => {
                                     ui_settings.stylus_buttons = ui_state.stylus_buttons.clone();
-                                    save_ui_settings(&ui_settings, ui_settings_path.as_deref(), &mut ui_state);
+                                    save_ui_settings(
+                                        &ui_settings,
+                                        ui_settings_path.as_deref(),
+                                        &mut ui_state,
+                                    );
                                 }
                                 UiAction::SavePressureCurve(curve) => {
                                     ui_settings.pressure_curve = curve;
-                                    save_ui_settings(&ui_settings, ui_settings_path.as_deref(), &mut ui_state);
+                                    save_ui_settings(
+                                        &ui_settings,
+                                        ui_settings_path.as_deref(),
+                                        &mut ui_state,
+                                    );
                                 }
                                 UiAction::ForceExit => {
                                     println!("[Shutdown] Beenden erzwungen trotz ungespeicherter Änderungen.");
@@ -4374,7 +5445,11 @@ pub fn run_with(
                             updated.eraser_radius_mm = ui_state.eraser_radius_mm;
                             if updated != ui_settings {
                                 ui_settings = updated;
-                                save_ui_settings(&ui_settings, ui_settings_path.as_deref(), &mut ui_state);
+                                save_ui_settings(
+                                    &ui_settings,
+                                    ui_settings_path.as_deref(),
+                                    &mut ui_state,
+                                );
                             }
                         }
 
@@ -4385,15 +5460,28 @@ pub fn run_with(
                                 || edit.page_id != notebook.current_page().id
                         });
                         if finish_text {
-                            finish_text_edit(&mut canvas, &mut notebook, &mut manifest, &mut autosave, &mut ui_state);
-                            update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
+                            finish_text_edit(
+                                &mut canvas,
+                                &mut notebook,
+                                &mut manifest,
+                                &mut autosave,
+                                &mut ui_state,
+                            );
+                            update_window_title(
+                                &window,
+                                &notebook,
+                                &manifest,
+                                ui_state.active_tool,
+                                autosave.status(),
+                            );
                             window.request_redraw();
                         }
 
                         // 4. egui Frame beenden & Primitives tessellieren
                         let full_output = egui_ctx.end_frame();
                         let ime_active = full_output.platform_output.ime.is_some();
-                        egui_winit_state.handle_platform_output(&window, full_output.platform_output);
+                        egui_winit_state
+                            .handle_platform_output(&window, full_output.platform_output);
                         if let Some(requester) = keyboard_requester.as_mut() {
                             let pressed = egui_ctx.input(|i| i.pointer.any_pressed());
                             if osk::should_request(ime_was_active, ime_active, pressed) {
@@ -4418,7 +5506,8 @@ pub fn run_with(
                             egui_repaint_at = None;
                         }
 
-                        let clipped_primitives = egui_ctx.tessellate(full_output.shapes, egui_ctx.pixels_per_point());
+                        let clipped_primitives =
+                            egui_ctx.tessellate(full_output.shapes, egui_ctx.pixels_per_point());
                         let screen_descriptor = egui_wgpu::ScreenDescriptor {
                             size_in_pixels: [canvas.size.width, canvas.size.height],
                             pixels_per_point: egui_ctx.pixels_per_point(),
@@ -4434,7 +5523,8 @@ pub fn run_with(
                             let stack = notebook.page_stack();
                             let visible = canvas.visible_neighbors(&stack);
                             for &index in &visible {
-                                let _ = storage::ensure_page_loaded(&storage_dir, &mut notebook, index);
+                                let _ =
+                                    storage::ensure_page_loaded(&storage_dir, &mut notebook, index);
                                 notebook.pages[index].rebuild_cache_if_dirty();
                             }
                             let neighbors: Vec<(Vec2, &crate::document::Page)> = visible
@@ -4449,13 +5539,17 @@ pub fn run_with(
                         // PDF-Seiten, die nach diesem Bild nicht mehr gebraucht werden (schnelles
                         // Scrollen), verwirft end_frame, bevor sie gerendert werden
                         pdf_renderer.begin_frame();
-                        canvas.prepare_images(&mut |key| texture_for(key, &assets, &mut pdf_renderer));
+                        canvas.prepare_images(&mut |key| {
+                            texture_for(key, &assets, &mut pdf_renderer)
+                        });
                         // Page picker: PDF pages rendered small, after the pages on screen (Issue #40)
                         for pdf in pdf_thumbnails_wanted {
                             let pixels = crate::pdf_doc::THUMBNAIL_RENDER_PIXELS;
                             let key = format!("{}@{pixels}", pdf.key());
                             let result = match assets.path_of(&pdf.asset) {
-                                Ok(path) => pdf_renderer.take(&key, path, pdf.page as usize, pixels),
+                                Ok(path) => {
+                                    pdf_renderer.take(&key, path, pdf.page as usize, pixels)
+                                }
                                 Err(err) => Some(Err(err.to_string())),
                             };
                             let texture = match result {
@@ -4464,7 +5558,10 @@ pub fn run_with(
                                     let size = [image.width as usize, image.height as usize];
                                     ui::Thumbnail(egui_ctx.load_texture(
                                         &key,
-                                        egui::ColorImage::from_rgba_premultiplied(size, &image.pixels),
+                                        egui::ColorImage::from_rgba_premultiplied(
+                                            size,
+                                            &image.pixels,
+                                        ),
                                         egui::TextureOptions::LINEAR,
                                     ))
                                 }),
@@ -4490,7 +5587,11 @@ pub fn run_with(
                             }
                         }
                         pdf_renderer.end_frame();
-                        match canvas.render(&clipped_primitives, &screen_descriptor, &full_output.textures_delta) {
+                        match canvas.render(
+                            &clipped_primitives,
+                            &screen_descriptor,
+                            &full_output.textures_delta,
+                        ) {
                             Ok(_) => {}
                             Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
                                 canvas.resize(canvas.size);

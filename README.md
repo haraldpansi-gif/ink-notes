@@ -156,7 +156,7 @@ CI additionally checks `cargo fmt --check` and `cargo clippy --all-targets -- -D
 
 Other systems:
 - **Windows** is cross-compiled on Linux: `scripts/package-windows.sh` (needs `gcc-mingw-w64-x86-64`); the tests run with `wine` as runner (`CARGO_TARGET_X86_64_PC_WINDOWS_GNU_RUNNER=wine cargo test --target x86_64-pc-windows-gnu`).
-- **Android** (in progress, Issue #42): `cargo check --target aarch64-linux-android` and `cargo rustc --lib --crate-type cdylib --target aarch64-linux-android` with the NDK compiler in `CC_aarch64_linux_android`. The app does not start there yet: the window surface still has to follow the activity lifecycle.
+- **Android** (experimental, Issue #42): `scripts/package-android.sh` builds `target/ink-notes_<version>_arm64.apk` without Gradle. It needs the Android SDK (build-tools, platform 34; `ANDROID_HOME`, default `~/android-sdk`) and the NDK; the signing key comes from `ANDROID_KEYSTORE`, `ANDROID_KEYSTORE_PASS` and `ANDROID_KEY_ALIAS`, otherwise the debug key is used. Install with `adb install -r target/ink-notes_<version>_arm64.apk`, log output with `adb logcat -s ink-notes`. Notebooks stay inside the app for now; pen detection, on-screen keyboard and file dialogs are still missing.
 
 New code comments and commit messages are written in English; older code and history still contain German.
 
