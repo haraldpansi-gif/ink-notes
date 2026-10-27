@@ -151,6 +151,7 @@ mod tests {
         ("assets.rs", include_str!("assets.rs")),
         ("autosave.rs", include_str!("autosave.rs")),
         ("background.rs", include_str!("background.rs")),
+        ("disk_watch.rs", include_str!("disk_watch.rs")),
         ("document.rs", include_str!("document.rs")),
         ("export.rs", include_str!("export.rs")),
         ("file_picker.rs", include_str!("file_picker.rs")),

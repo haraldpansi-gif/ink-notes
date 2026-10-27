@@ -22,6 +22,7 @@ use crate::assets::{AssetStore, ImportedImage};
 use crate::autosave::{AutosaveController, AutosaveStatus};
 use crate::background::PatternColor;
 use crate::canvas::CanvasState;
+use crate::disk_watch::DiskWatch;
 use crate::document::{Notebook, PageBackground};
 use crate::export::{self, export_notebook_to_pdf, ExportStrategy};
 use crate::geometry::{self, RecognizedShape};
@@ -211,6 +212,16 @@ fn save_ui_settings(settings: &UiSettings, path: Option<&std::path::Path>, ui_st
             );
             ui_state.set_export_message(t!("Einstellung nicht gespeichert: {err}", err = err));
         }
+    }
+}
+
+/// Warns when the notebook is still marked as open on another device (Issue #49).
+fn warn_if_open_elsewhere(lock: Option<&storage::NotebookLock>, ui_state: &mut UiState) {
+    if let Some(marker) = lock.and_then(|l| l.open_elsewhere.as_ref()) {
+        ui_state.set_export_message(t!(
+            "⚠ Auch auf '{device}' geöffnet – Änderungen dort können deine überschreiben",
+            device = marker.device
+        ));
     }
 }
 
@@ -1308,7 +1319,10 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut ime_composing = false;
 
     // 1. Notizbuch aus Storage laden oder initialisieren (Session-Wiederherstellung)
-    let storage_base_dir = storage::default_storage_dir();
+    let mut storage_base_dir = ui_settings
+        .storage_dir
+        .clone()
+        .unwrap_or_else(storage::default_storage_dir);
     let _ = storage::cleanup_trash(
         &storage_base_dir,
         std::time::Duration::from_secs(30 * 24 * 3600),
@@ -1408,6 +1422,8 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     ui_state.document_title = manifest.title.clone();
     ui_state.available_notebooks = available_notebooks;
     ui_state.library = Library::load(&storage_base_dir);
+    ui_state.storage_dir = storage_base_dir.clone();
+    ui_state.storage_dir_custom = ui_settings.storage_dir.is_some();
     if let Some(warning) = startup_warning {
         refresh_notebooks(&storage_base_dir, &mut ui_state);
         ui_state.set_export_message(warning);
@@ -1426,6 +1442,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut _notebook_lock = match storage::NotebookLock::acquire(&storage_dir) {
         Ok(lock) => {
             autosave.set_read_only(false);
+            warn_if_open_elsewhere(Some(&lock), &mut ui_state);
             Some(lock)
         }
         Err(storage::StorageError::AlreadyLocked(msg)) => {
@@ -1440,6 +1457,9 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             None
         }
     };
+
+    // Notices changes made on other devices through a sync client (Issue #49)
+    let mut disk_watch = DiskWatch::new(storage_dir.clone(), Instant::now());
 
     // Initiale Seite und Werkzeugeinstellungen mit Canvas synchronisieren
     canvas.set_paper_theme(ui_state.paper_theme, ui_state.adapt_ink_colors);
@@ -1614,6 +1634,50 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                 let new_status = autosave.update();
                 if new_status != prev_status {
                     update_window_title(&window, &notebook, &manifest, ui_state.active_tool, new_status);
+                }
+
+                // Take over changes from other devices (Issue #49), but only while everything
+                // local is saved and nothing is being drawn or typed
+                if disk_watch.dir != storage_dir {
+                    disk_watch = DiskWatch::new(storage_dir.clone(), Instant::now());
+                }
+                let now = Instant::now();
+                if disk_watch.is_due(now) {
+                    let idle = new_status == AutosaveStatus::Saved
+                        && !is_drawing
+                        && !is_stylus_drawing
+                        && ui_state.text_edit.is_none();
+                    if !idle {
+                        disk_watch.postpone(now);
+                    } else {
+                        let outcome = disk_watch.check(&mut notebook, &mut manifest, now);
+                        if !outcome.is_empty() {
+                            if outcome.reloaded_pages > 0 || outcome.structure_changed || !outcome.conflict_pages.is_empty() {
+                                selection_state.clear();
+                                canvas.sync_page(notebook.current_page_mut());
+                                ui_state.document_title = manifest.title.clone();
+                                ui_state.set_export_message(t!("Änderungen von einem anderen Gerät übernommen").to_string());
+                            }
+                            if !outcome.conflict_pages.is_empty() {
+                                for page in notebook.pages.iter().filter(|p| outcome.conflict_pages.contains(&p.id)) {
+                                    autosave.mark_page_dirty(page, &manifest);
+                                }
+                                autosave.mark_manifest_dirty(&manifest);
+                                ui_state.set_export_message(t!(
+                                    "Konfliktkopien als eigene Seiten übernommen: {count}",
+                                    count = outcome.conflict_pages.len()
+                                ));
+                            }
+                            if let Some(marker) = &outcome.opened_elsewhere {
+                                ui_state.set_export_message(t!(
+                                    "⚠ Gerade auf '{device}' geöffnet – Änderungen dort können deine überschreiben",
+                                    device = marker.device
+                                ));
+                            }
+                            update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
+                            window.request_redraw();
+                        }
+                    }
                 }
 
                 while let Ok(result) = export_rx.try_recv() {
@@ -2149,7 +2213,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                     || fling.is_active()
                 {
                     target.set_control_flow(ControlFlow::wait_duration(Duration::from_millis(8)));
-                } else if let Some(at) = [egui_repaint_at, long_press.deadline()]
+                } else if let Some(at) = [egui_repaint_at, long_press.deadline(), Some(disk_watch.deadline())]
                     .into_iter()
                     .flatten()
                     .min()
@@ -2231,6 +2295,12 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                         } else {
                             ui_state.set_export_message(t!("Nur Bilder (PNG, JPEG, GIF, WebP, BMP) und PDFs können eingefügt werden").to_string());
                         }
+                        window.request_redraw();
+                    }
+
+                    WindowEvent::Focused(true) => {
+                        // Coming back from another app: look for changes right away
+                        disk_watch.check_soon(Instant::now());
                         window.request_redraw();
                     }
 
@@ -3828,6 +3898,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                                                 if _notebook_lock.is_some() {
                                                     ui_state.set_export_message(t!("Dokument '{title}' geöffnet", title = manifest.title));
                                                 }
+                                                warn_if_open_elsewhere(_notebook_lock.as_ref(), &mut ui_state);
                                                 window.request_redraw();
                                             }
                                             Err(err) => {
@@ -3991,6 +4062,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                                                             canvas.sync_page(notebook.current_page_mut());
                                                             update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
                                                             ui_state.set_export_message(t!("Gewechselt zu '{title}'", title = manifest.title));
+                                                            warn_if_open_elsewhere(_notebook_lock.as_ref(), &mut ui_state);
                                                         }
                                                         Err(err) => {
                                                             eprintln!("[Dokument-Fehler] Konnte Dokument '{}' nicht laden: {err}", first.id);
@@ -4125,6 +4197,77 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                                 UiAction::SetSidebarSide(side) => {
                                     ui_settings.sidebar_side = side;
                                     save_ui_settings(&ui_settings, ui_settings_path.as_deref(), &mut ui_state);
+                                    window.request_redraw();
+                                }
+                                UiAction::SetStorageDir(chosen) => {
+                                    let new_base = match &chosen {
+                                        Some(dir) => storage::storage_dir_in(dir),
+                                        None => storage::default_storage_dir(),
+                                    };
+                                    if new_base == storage_base_dir {
+                                        ui_state.set_export_message(t!("Die Notizbücher liegen bereits dort").to_string());
+                                    } else {
+                                        let _ = autosave.flush();
+                                        match storage::copy_storage(&storage_base_dir, &new_base) {
+                                            Ok(copied) => {
+                                                // Release lock and open marker in the old location
+                                                _notebook_lock = None;
+                                                storage_base_dir = new_base;
+                                                ui_settings.storage_dir = chosen.map(|_| storage_base_dir.clone());
+                                                save_ui_settings(&ui_settings, ui_settings_path.as_deref(), &mut ui_state);
+                                                ui_state.storage_dir = storage_base_dir.clone();
+                                                ui_state.storage_dir_custom = ui_settings.storage_dir.is_some();
+                                                refresh_notebooks(&storage_base_dir, &mut ui_state);
+                                                // Same notebook if it exists there, otherwise the first one
+                                                let open_id = ui_state
+                                                    .available_notebooks
+                                                    .iter()
+                                                    .filter(|s| s.status == storage::NotebookStatus::Normal)
+                                                    .find(|s| s.id == manifest.id)
+                                                    .or_else(|| ui_state.available_notebooks.iter().find(|s| s.status == storage::NotebookStatus::Normal))
+                                                    .map(|s| s.id.clone());
+                                                let loaded = match open_id {
+                                                    Some(id) => {
+                                                        let dir = storage_base_dir.join(&id);
+                                                        storage::load_notebook(&dir).map(|(nb, m)| (nb, m, dir))
+                                                    }
+                                                    None => storage::create_new_notebook(&storage_base_dir, t!("Standard-Notizbuch")),
+                                                };
+                                                match loaded {
+                                                    Ok((new_nb, new_manifest, new_dir)) => {
+                                                        _notebook_lock = storage::NotebookLock::acquire(&new_dir).ok();
+                                                        autosave.set_read_only(_notebook_lock.is_none());
+                                                        autosave.switch_notebook_dir(new_dir.clone());
+                                                        notebook = new_nb;
+                                                        manifest = new_manifest;
+                                                        storage_dir = new_dir;
+                                                        selection_state.clear();
+                                                        ui_state.current_notebook_id = manifest.id.clone();
+                                                        ui_state.document_title = manifest.title.clone();
+                                                        refresh_notebooks(&storage_base_dir, &mut ui_state);
+                                                        canvas.sync_page(notebook.current_page_mut());
+                                                        update_window_title(&window, &notebook, &manifest, ui_state.active_tool, autosave.status());
+                                                        ui_state.set_export_message(if copied > 0 {
+                                                            t!("Speicherort geändert, {count} Notizbücher kopiert", count = copied)
+                                                        } else {
+                                                            t!("Speicherort geändert: {path}", path = storage_base_dir.display())
+                                                        });
+                                                        warn_if_open_elsewhere(_notebook_lock.as_ref(), &mut ui_state);
+                                                    }
+                                                    Err(err) => {
+                                                        // The old notebook stays open but is saved nowhere
+                                                        autosave.set_read_only(true);
+                                                        eprintln!("[Storage] Notizbuch am neuen Speicherort nicht geöffnet: {err}");
+                                                        ui_state.set_export_message(t!("Fehler beim Öffnen: {err}", err = err));
+                                                    }
+                                                }
+                                            }
+                                            Err(err) => {
+                                                eprintln!("[Storage] Speicherort '{}' nicht nutzbar: {err}", new_base.display());
+                                                ui_state.set_export_message(t!("Speicherort nicht nutzbar: {err}", err = err));
+                                            }
+                                        }
+                                    }
                                     window.request_redraw();
                                 }
                                 UiAction::SetLanguage(language) => {

@@ -339,6 +339,8 @@ pub enum UiAction {
     InsertImageFile(std::path::PathBuf),
     /// PDF als neues Notizbuch importieren
     ImportFile(std::path::PathBuf),
+    /// Store the notebooks in this folder, `None` for the default location (Issue #49)
+    SetStorageDir(Option<std::path::PathBuf>),
     /// Aktuelle Seite als Bild oder SVG exportieren
     ExportPage(PageExportKind),
     /// Titel einer Seite setzen (leer = entfernen)
@@ -503,6 +505,9 @@ pub struct UiState {
     pub queued_actions: Vec<UiAction>,
     /// Zuletzt in der Dateiauswahl benutzter Ordner (während der Sitzung)
     pub last_picker_dir: Option<std::path::PathBuf>,
+    /// Folder holding the notebooks and whether the user picked it (Issue #49)
+    pub storage_dir: std::path::PathBuf,
+    pub storage_dir_custom: bool,
 }
 
 impl Default for UiState {
@@ -588,6 +593,8 @@ impl Default for UiState {
             page_title_for: None,
             page_picker_list: false,
             last_picker_dir: None,
+            storage_dir: std::path::PathBuf::new(),
+            storage_dir_custom: false,
         }
     }
 }
@@ -672,6 +679,12 @@ impl UiState {
     /// Opens the file picker "Import" (PDF, Xournal++, Rnote, Saber) in the last used folder.
     pub fn open_import_picker(&mut self) {
         self.open_file_picker(PickerKind::Import);
+    }
+
+    /// Opens the folder picker for the storage location in the home folder.
+    pub fn open_storage_picker(&mut self) {
+        self.close_overlays();
+        self.file_picker = Some(FilePicker::open(PickerKind::Folder, None));
     }
 
     fn open_file_picker(&mut self, kind: PickerKind) {
@@ -2839,6 +2852,17 @@ fn file_picker_dialog(ctx: &egui::Context, state: &mut UiState, actions: &mut Ve
              Texte und Bilder werden übernommen, bei Xournal++ und Saber auch PDF-Hintergründe."
             ),
         ),
+        PickerKind::Folder => (
+            t!("Speicherort wählen"),
+            t!("📁 Speicherort wählen"),
+            "📁",
+            t!("Keine Unterordner"),
+            t!(
+                "Die Notizbücher liegen dann im Unterordner „ink-notes“ des gewählten Ordners, \
+             z. B. im Nextcloud- oder Google-Drive-Ordner. Ist er noch leer, werden die \
+             vorhandenen Notizbücher dorthin kopiert; die alten bleiben erhalten."
+            ),
+        ),
     };
     dialog_window(title, state, false).show(ctx, |ui| {
         ui.set_width(460.0);
@@ -2876,6 +2900,16 @@ fn file_picker_dialog(ctx: &egui::Context, state: &mut UiState, actions: &mut Ve
         });
         if let Some(err) = &picker.error {
             ui.colored_label(egui::Color32::from_rgb(255, 120, 120), err);
+        }
+        if picker_kind == PickerKind::Folder
+            && ui
+                .add_sized(
+                    [ui.available_width(), 30.0],
+                    egui::Button::new(t!("✔  Diesen Ordner wählen")),
+                )
+                .clicked()
+        {
+            chosen = Some(picker.dir.clone());
         }
         ui.add_space(4.0);
 
@@ -2923,10 +2957,13 @@ fn file_picker_dialog(ctx: &egui::Context, state: &mut UiState, actions: &mut Ve
         }
     }
     if let Some(path) = chosen {
-        state.last_picker_dir = state.file_picker.as_ref().map(|p| p.dir.clone());
+        if picker_kind != PickerKind::Folder {
+            state.last_picker_dir = state.file_picker.as_ref().map(|p| p.dir.clone());
+        }
         actions.push(match picker_kind {
             PickerKind::Image => UiAction::InsertImageFile(path),
             PickerKind::Import => UiAction::ImportFile(path),
+            PickerKind::Folder => UiAction::SetStorageDir(Some(path)),
         });
         close = true;
     }
@@ -4394,6 +4431,36 @@ pub fn render_ui(
                                         state.language = language;
                                         actions.push(UiAction::SetLanguage(language));
                                     }
+                                }
+                            });
+
+                            section(ui, t!("SPEICHERORT"));
+                            ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new(state.storage_dir.display().to_string())
+                                        .size(11.5)
+                                        .color(egui::Color32::from_gray(190)),
+                                )
+                                .truncate(true),
+                            )
+                            .on_hover_text(state.storage_dir.display().to_string());
+                            ui.horizontal(|ui| {
+                                if ui
+                                    .add_sized([115.0, 28.0], egui::Button::new(t!("📁  Ändern …")))
+                                    .on_hover_text(t!("Z. B. einen Nextcloud- oder Google-Drive-Ordner wählen, um die Notizbücher mit anderen Geräten abzugleichen"))
+                                    .clicked()
+                                {
+                                    state.open_storage_picker();
+                                }
+                                if ui
+                                    .add_enabled(
+                                        state.storage_dir_custom,
+                                        egui::Button::new(t!("Standard")).min_size(egui::vec2(115.0, 28.0)),
+                                    )
+                                    .on_hover_text(t!("Zurück zum Standard-Speicherort"))
+                                    .clicked()
+                                {
+                                    actions.push(UiAction::SetStorageDir(None));
                                 }
                             });
 

@@ -24,6 +24,8 @@ pub enum PickerKind {
     Image,
     /// PDF, Xournal++, Rnote or Saber file to import as a new notebook
     Import,
+    /// Folder for the notebooks (Issue #49): lists folders only
+    Folder,
 }
 
 impl PickerKind {
@@ -32,6 +34,7 @@ impl PickerKind {
         match self {
             PickerKind::Image => is_supported_image_path(path),
             PickerKind::Import => crate::import::is_importable_path(path),
+            PickerKind::Folder => false,
         }
     }
 }
@@ -64,6 +67,7 @@ impl FilePicker {
                 let preferred = match kind {
                     PickerKind::Image => tn!("🖼 Bilder"),
                     PickerKind::Import => tn!("⬇ Downloads"),
+                    PickerKind::Folder => tn!("🏠 Persönlicher Ordner"),
                 };
                 let all = shortcuts();
                 all.iter()
@@ -225,6 +229,7 @@ mod tests {
                 "Uni.sbn2"
             ]
         );
+        assert_eq!(names(PickerKind::Folder), ["aOrdner", "zOrdner"]);
     }
 
     #[test]

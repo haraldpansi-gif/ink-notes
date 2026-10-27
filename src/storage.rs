@@ -939,6 +939,59 @@ pub fn ensure_page_loaded(
     }
 }
 
+/// Notebook folder inside a folder the user picked as storage location (Issue #49), e.g. the
+/// Nextcloud folder: `<chosen>/ink-notes`, unless the folder already is called `ink-notes`.
+pub fn storage_dir_in(chosen: &Path) -> PathBuf {
+    if chosen.file_name().is_some_and(|n| n == "ink-notes") {
+        chosen.to_path_buf()
+    } else {
+        chosen.join("ink-notes")
+    }
+}
+
+/// Prepares `to` as new storage location. If it holds no notebooks yet, the notebooks and
+/// `library.json` of `from` are copied there (lock files and open markers excluded); the
+/// originals stay where they are. Returns the number of copied notebooks.
+pub fn copy_storage(from: &Path, to: &Path) -> io::Result<usize> {
+    create_secure_dir_all(to)?;
+    if !list_notebooks(to).is_empty() {
+        return Ok(0);
+    }
+    let mut copied = 0;
+    for summary in list_notebooks(from) {
+        let target = to.join(&summary.id);
+        if target.exists() {
+            continue;
+        }
+        copy_dir(&from.join(&summary.id), &target)?;
+        copied += 1;
+    }
+    let library = from.join("library.json");
+    if library.is_file() && !to.join("library.json").exists() {
+        fs::copy(&library, to.join("library.json"))?;
+    }
+    Ok(copied)
+}
+
+/// Copies a notebook folder recursively, without lock file and open marker.
+fn copy_dir(from: &Path, to: &Path) -> io::Result<()> {
+    create_secure_dir_all(to)?;
+    for entry in fs::read_dir(from)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        if name == ".lock" || name == OPEN_MARKER_FILE {
+            continue;
+        }
+        let kind = entry.file_type()?;
+        if kind.is_dir() {
+            copy_dir(&entry.path(), &to.join(&name))?;
+        } else if kind.is_file() {
+            fs::copy(entry.path(), to.join(&name))?;
+        }
+    }
+    Ok(())
+}
+
 /// Gibt das Standard-Verzeichnis für Notizbücher zurück (gemäß XDG-Spezifikation).
 pub fn default_storage_dir() -> PathBuf {
     if let Ok(xdg) = std::env::var("XDG_DATA_HOME") {
@@ -984,6 +1037,49 @@ pub struct NotebookSummary {
 pub struct NotebookLock {
     _file: File,
     pub path: PathBuf,
+    /// Another device that has the notebook open according to its marker (Issue #49)
+    pub open_elsewhere: Option<OpenMarker>,
+    marker: Option<(PathBuf, OpenMarker)>,
+}
+
+/// Which device has a notebook open, and since when (Unix seconds). The `.lock` file only
+/// locks on this computer; this marker (`.opened_by.json`) travels with sync clients such as
+/// Nextcloud, so another device can warn before both edit at the same time (Issue #49).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OpenMarker {
+    pub device: String,
+    pub since: u64,
+}
+
+/// File name of the [`OpenMarker`] in the notebook folder.
+pub const OPEN_MARKER_FILE: &str = ".opened_by.json";
+
+/// Name of this device (host name).
+pub fn device_name() -> String {
+    let from_file = |path: &str| fs::read_to_string(path).ok();
+    std::env::var("INK_NOTES_DEVICE")
+        .ok()
+        .or_else(|| from_file("/proc/sys/kernel/hostname"))
+        .or_else(|| from_file("/etc/hostname"))
+        .or_else(|| std::env::var("COMPUTERNAME").ok())
+        .or_else(|| std::env::var("HOSTNAME").ok())
+        .map(|name| name.trim().to_string())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "?".to_string())
+}
+
+impl Drop for NotebookLock {
+    fn drop(&mut self) {
+        // Remove our marker, unless another device has replaced it meanwhile
+        if let Some((path, ours)) = &self.marker {
+            let current = fs::read(path)
+                .ok()
+                .and_then(|b| serde_json::from_slice::<OpenMarker>(&b).ok());
+            if current.as_ref() == Some(ours) {
+                let _ = fs::remove_file(path);
+            }
+        }
+    }
 }
 
 impl NotebookLock {
@@ -1007,10 +1103,31 @@ impl NotebookLock {
 
         use fs2::FileExt;
         match file.try_lock_exclusive() {
-            Ok(()) => Ok(Self {
-                _file: file,
-                path: lock_path,
-            }),
+            Ok(()) => {
+                let device = device_name();
+                let marker_path = notebook_dir.join(OPEN_MARKER_FILE);
+                let open_elsewhere = fs::read(&marker_path)
+                    .ok()
+                    .and_then(|b| serde_json::from_slice::<OpenMarker>(&b).ok())
+                    .filter(|m| m.device != device);
+                let ours = OpenMarker {
+                    device,
+                    since: std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs(),
+                };
+                let marker = serde_json::to_vec(&ours)
+                    .ok()
+                    .filter(|json| atomic_write_file(&marker_path, json).is_ok())
+                    .map(|_| (marker_path, ours));
+                Ok(Self {
+                    _file: file,
+                    path: lock_path,
+                    open_elsewhere,
+                    marker,
+                })
+            }
             Err(e) => {
                 let kind = e.kind();
                 if kind == io::ErrorKind::WouldBlock || e.raw_os_error() == Some(11) {
@@ -2157,6 +2274,37 @@ mod tests {
             "Beschädigtes Notizbuch muss aufgelistet werden"
         );
         assert_eq!(damaged_summary.unwrap().status, NotebookStatus::Damaged);
+    }
+
+    #[test]
+    fn test_copy_storage_to_new_location() {
+        let old = tempfile::tempdir().unwrap();
+        let cloud = tempfile::tempdir().unwrap();
+        let (notebook, mut manifest, dir) = create_new_notebook(old.path(), "Mathe").unwrap();
+        save_notebook(&dir, &notebook, &mut manifest).unwrap();
+        let _lock = NotebookLock::acquire(&dir).unwrap();
+        fs::create_dir_all(dir.join("assets")).unwrap();
+        fs::write(dir.join("assets").join("bild.png"), b"png").unwrap();
+        fs::write(old.path().join("library.json"), b"{}").unwrap();
+
+        assert_eq!(storage_dir_in(cloud.path()), cloud.path().join("ink-notes"));
+        let target = storage_dir_in(cloud.path());
+        assert_eq!(storage_dir_in(&target), target);
+
+        assert_eq!(copy_storage(old.path(), &target).unwrap(), 1);
+        let copied = target.join(&manifest.id);
+        assert!(load_notebook(&copied).is_ok());
+        assert!(copied.join("assets").join("bild.png").exists());
+        assert!(target.join("library.json").exists());
+        assert!(!copied.join(".lock").exists());
+        assert!(!copied.join(OPEN_MARKER_FILE).exists());
+        // The originals stay
+        assert!(load_notebook(&dir).is_ok());
+
+        // Notebooks already there (e.g. from another device): nothing is copied
+        create_new_notebook(old.path(), "Physik").unwrap();
+        assert_eq!(copy_storage(old.path(), &target).unwrap(), 0);
+        assert_eq!(list_notebooks(&target).len(), 1);
     }
 
     #[test]

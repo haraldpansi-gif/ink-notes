@@ -21,12 +21,15 @@ Dieses Dokument beschreibt, wo und wie ink-notes Notizbücher speichert, und die
 │   │   ├── assets/                    eingefügte Bilder und importierte PDFs
 │   │   │   ├── <sha256>.png
 │   │   │   └── <sha256>.pdf
+│   │   ├── .opened_by.json            Gerät, auf dem das Notizbuch geöffnet ist (siehe unten)
 │   │   └── .lock                      Sperrdatei, solange das Notizbuch geöffnet ist
 │   └── .trash/                        gelöschte Notizbücher (<id>_<zeitstempel>)
 └── recovery/                          Notfall-Sicherungen ungespeicherter Seiten
 
 ~/.config/ink-notes/ui.json            ($XDG_CONFIG_HOME) Einstellungen der Oberfläche
 ```
+
+Der Ordner `notebooks/` lässt sich in den Einstellungen verlegen (`storage_dir` in `ui.json`), z. B. nach `~/Nextcloud/ink-notes`; `recovery/` bleibt, wo es ist.
 
 - **Notizbuch-IDs** werden aus dem Titel und dem Zeitpunkt gebildet (z. B. `mathematik_1775460000`); das erste Notizbuch heißt `default`.
 - **Assets** sind nach dem SHA-256-Hash ihres Inhalts benannt; dasselbe Bild wird nur einmal gespeichert. Bilder werden als PNG oder (unverändert) JPEG abgelegt, PDFs unverändert.
@@ -166,6 +169,12 @@ Ein Absturz während des Speicherns hinterlässt deshalb entweder die alte oder 
 
 ### Gelöschte Seiten
 Eine gelöschte Seite verschwindet aus `manifest.json`; ihre Datei `page_<id>.json` bleibt im Ordner liegen. Seitenkennungen werden nie wiederverwendet (`next_page_id`), die Datei kann also mit keiner neuen Seite kollidieren. Wird die Seite in derselben Sitzung wiederhergestellt, schreibt die App sie neu.
+
+### Abgleich zwischen Geräten
+Liegen die Notizbücher in einem Ordner, den Nextcloud, Google Drive, Syncthing o. Ä. abgleichen:
+- `.opened_by.json` (`{"device": "<Rechnername>", "since": <Unix-Zeit>}`) wird beim Öffnen eines Notizbuchs geschrieben und beim Schließen entfernt. Eine Markierung eines anderen Geräts führt zu einer Warnung; die Sperrdatei `.lock` schützt nur vor einer zweiten Instanz auf demselben Rechner.
+- Solange alle lokalen Änderungen gespeichert sind, prüft die App den Ordner alle 3 Sekunden (und wenn das Fenster den Fokus bekommt). Geänderte Seitendateien werden neu geladen, ein geändertes `manifest.json` bringt neue, entfernte oder umsortierte Seiten und Titel mit.
+- Konfliktkopien der Sync-Clients (`page_<id> (….json`, `page_<id>_….json`, `page_<id>.sync-conflict-….json`) werden als neue Seiten hinter dem Original eingefügt und in `<name>.imported` umbenannt.
 
 ### Neuere Versionen
 Dateien mit einer höheren `format_version` als der unterstützten werden nicht geöffnet – so kann eine ältere App-Version keine Inhalte verlieren, die sie nicht kennt.

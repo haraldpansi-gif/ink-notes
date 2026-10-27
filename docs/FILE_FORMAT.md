@@ -21,12 +21,15 @@ This document describes where and how ink-notes stores notebooks, and the versio
 │   │   ├── assets/                    inserted images and imported PDFs
 │   │   │   ├── <sha256>.png
 │   │   │   └── <sha256>.pdf
+│   │   ├── .opened_by.json            device that has the notebook open (see below)
 │   │   └── .lock                      lock file while the notebook is open
 │   └── .trash/                        deleted notebooks (<id>_<timestamp>)
 └── recovery/                          emergency backups of unsaved pages
 
 ~/.config/ink-notes/ui.json            ($XDG_CONFIG_HOME) interface settings
 ```
+
+The folder `notebooks/` can be moved elsewhere in the settings (`storage_dir` in `ui.json`), e.g. to `~/Nextcloud/ink-notes`; `recovery/` stays where it is.
 
 - **Notebook IDs** are built from the title and the time (e.g. `mathematik_1775460000`); the first notebook is called `default`.
 - **Assets** are named after the SHA-256 hash of their content; the same image is stored only once. Images are stored as PNG or (unchanged) JPEG, PDFs unchanged.
@@ -166,6 +169,12 @@ A crash while saving therefore leaves either the old or the new file, never a ha
 
 ### Deleted pages
 A deleted page disappears from `manifest.json`; its file `page_<id>.json` stays in the folder. Page IDs are never reused (`next_page_id`), so the file cannot collide with a new page. If the page is restored in the same session, the app writes it again.
+
+### Syncing between devices
+If the notebooks are kept in a folder synced by Nextcloud, Google Drive, Syncthing or similar:
+- `.opened_by.json` (`{"device": "<host name>", "since": <unix time>}`) is written when a notebook is opened and removed when it is closed. A marker from another device leads to a warning; the lock file `.lock` only protects against a second instance on the same computer.
+- While all local changes are saved, the app checks the folder every 3 seconds (and when the window gets the focus). Changed page files are reloaded, a changed `manifest.json` brings in new, removed or reordered pages and titles.
+- Conflict copies of sync clients (`page_<id> (….json`, `page_<id>_….json`, `page_<id>.sync-conflict-….json`) are added as new pages after the original and renamed to `<name>.imported`.
 
 ### Newer versions
 Files with a higher `format_version` than supported are not opened – this way an older app version cannot lose content it does not know.

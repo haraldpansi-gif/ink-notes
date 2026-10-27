@@ -229,6 +229,9 @@ pub struct UiSettings {
     pub language: Option<Language>,
     /// Eraser radius in mm (Issue #38)
     pub eraser_radius_mm: f32,
+    /// Folder of the notebooks, e.g. inside a Nextcloud folder; default location if unset
+    /// (Issue #49)
+    pub storage_dir: Option<PathBuf>,
 }
 
 impl Default for UiSettings {
@@ -249,6 +252,7 @@ impl Default for UiSettings {
             stylus_buttons: Vec::new(),
             language: None,
             eraser_radius_mm: 3.0,
+            storage_dir: None,
         }
     }
 }
@@ -349,6 +353,7 @@ mod tests {
             ],
             language: Some(Language::English),
             eraser_radius_mm: 6.0,
+            storage_dir: Some(PathBuf::from("/home/pia/Nextcloud/ink-notes")),
         };
         settings.save_to(&path).unwrap();
         assert_eq!(UiSettings::load_from(&path), settings);

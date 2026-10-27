@@ -5,6 +5,7 @@ pub mod assets;
 pub mod autosave;
 pub mod background;
 pub mod canvas;
+pub mod disk_watch;
 pub mod document;
 pub mod export;
 pub mod file_picker;

@@ -68,6 +68,7 @@ The interface is available in English and German; ink-notes follows the system l
 - Every file is first written completely to a temporary file and then replaced – a crash while saving never leaves a half-written file.
 - **When closing** (window or `Ctrl + Q`) and when switching notebooks, everything pending is written before continuing. If that fails, the app stays open and offers to retry or to make an emergency backup.
 - `Ctrl + S` saves immediately. The dot on the ☰ button shows the state: green = saved, orange = changes pending, yellow = saving, red = error.
+- **Storage location** (☰ menu, "Storage location"): put the notebooks into a folder that **Nextcloud, Google Drive, Syncthing or Dropbox** keep in sync, and they are available on all your devices. The notebooks are kept in the subfolder `ink-notes`; if it is still empty, the existing notebooks are copied there (the old ones stay). Changes arriving from another device show up within a few seconds without reopening – but only while everything local is saved, so nothing gets overwritten. If the sync client makes a conflict copy of a page, it is added as a page of its own („Conflict copy: …“) instead of getting lost. Opening a notebook that is open on another device shows a warning.
 
 ### Export
 - **PDF** (`Ctrl + E`) to `~/Documents/<title>.pdf`: strokes and shapes as vectors, text boxes as real, searchable text, imported PDF pages as vector background, page titles as bookmarks.
@@ -180,7 +181,8 @@ src/
 ├── saber.rs        # Import of Saber notebooks
 ├── document.rs     # Data model: notebook, pages, strokes, page sizes
 ├── history.rs      # Undo/redo
-├── storage.rs      # Loading/saving (atomic), notebooks, trash
+├── storage.rs      # Loading/saving (atomic), notebooks, trash, storage location
+├── disk_watch.rs   # Taking over changes from other devices (sync clients)
 ├── library.rs      # Notebook folders (library.json)
 ├── autosave.rs     # Saving in the background
 ├── export.rs       # PDF export (printpdf)

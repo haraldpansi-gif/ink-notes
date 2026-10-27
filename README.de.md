@@ -68,6 +68,7 @@ Die Oberfläche gibt es auf Deutsch und Englisch; ink-notes folgt der Systemspra
 - Jede Datei wird erst vollständig in eine temporäre Datei geschrieben und dann ersetzt – ein Absturz beim Speichern hinterlässt keine halbe Datei.
 - **Beim Schließen** (Fenster oder `Strg + Q`) und beim Wechsel des Notizbuchs wird alles Ausstehende geschrieben, bevor es weitergeht. Schlägt das fehl, bleibt die App offen und bietet Wiederholen oder eine Notfall-Sicherung an.
 - `Strg + S` speichert sofort. Der Punkt am ☰-Knopf zeigt den Stand: grün = gespeichert, orange = Änderungen warten, gelb = speichert gerade, rot = Fehler.
+- **Speicherort** (☰-Menü, „Speicherort“): Liegen die Notizbücher in einem Ordner, den **Nextcloud, Google Drive, Syncthing oder Dropbox** abgleichen, sind sie auf allen Geräten verfügbar. Die Notizbücher liegen im Unterordner `ink-notes`; ist er noch leer, werden die vorhandenen Notizbücher dorthin kopiert (die alten bleiben erhalten). Änderungen von einem anderen Gerät erscheinen nach wenigen Sekunden ohne neu zu öffnen – aber nur, solange lokal alles gespeichert ist, damit nichts überschrieben wird. Legt der Sync-Client eine Konfliktkopie einer Seite an, wird sie als eigene Seite („Konfliktkopie: …“) übernommen statt verloren zu gehen. Ist ein Notizbuch gerade auf einem anderen Gerät geöffnet, warnt die App beim Öffnen.
 
 ### Export
 - **PDF** (`Strg + E`) nach `~/Documents/<Titel>.pdf`: Striche und Formen als Vektoren, Textfelder als echter, durchsuchbarer Text, importierte PDF-Seiten als Vektor-Unterlage, Seitentitel als Lesezeichen.
@@ -178,7 +179,8 @@ src/
 ├── saber.rs        # Import von Saber-Notizbüchern
 ├── document.rs     # Datenmodell: Notizbuch, Seiten, Striche, Seitengrößen
 ├── history.rs      # Rückgängig/Wiederholen
-├── storage.rs      # Laden/Speichern (atomar), Notizbücher, Papierkorb
+├── storage.rs      # Laden/Speichern (atomar), Notizbücher, Papierkorb, Speicherort
+├── disk_watch.rs   # Änderungen anderer Geräte übernehmen (Sync-Clients)
 ├── library.rs      # Ordner der Notizbücher (library.json)
 ├── autosave.rs     # Speichern im Hintergrund
 ├── export.rs       # PDF-Export (printpdf)
