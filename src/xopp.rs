@@ -7,23 +7,17 @@
 //! (`<teximage>`) have no counterpart and are skipped.
 
 use std::collections::HashMap;
-use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use base64::Engine;
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::XmlVersion;
 
-use crate::document::{Notebook, Page, PageBackground, PdfBackground, StrokeTool};
-use crate::storage::{self, NotebookManifest, SampleData, StrokeData};
+use crate::document::{Notebook, PageBackground, PdfBackground};
+use crate::import::{self, ImportReport, Imported};
+use crate::storage::{NotebookManifest, StrokeData};
 use crate::t;
-use crate::text::{TextBox, TextFont};
-
-/// Largest accepted file after decompression (guards against gzip bombs).
-const MAX_XML_BYTES: u64 = 512 * 1024 * 1024;
-
-/// Alpha of imported highlighter strokes that are stored opaque (as the app's highlighters).
-const HIGHLIGHTER_ALPHA: f32 = 0.35;
+use crate::text::TextFont;
 
 /// Is the file by its name a Xournal++ or Xournal notebook?
 pub fn is_xopp_path(path: &Path) -> bool {
@@ -86,26 +80,9 @@ pub enum XoppItem {
     Unsupported,
 }
 
-/// What could not be taken over.
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct ImportReport {
-    pub skipped: usize,
-    /// The PDF background was referenced but not found or unreadable
-    pub missing_pdf: Option<String>,
-}
-
 /// Reads the (usually gzip-compressed) XML of a Xournal file.
 pub fn decompress(bytes: &[u8]) -> Result<String, String> {
-    let mut xml = Vec::new();
-    if bytes.starts_with(&[0x1f, 0x8b]) {
-        flate2::read::MultiGzDecoder::new(bytes)
-            .take(MAX_XML_BYTES)
-            .read_to_end(&mut xml)
-            .map_err(|e| t!("Datei nicht lesbar: {err}", err = e))?;
-    } else {
-        xml = bytes.to_vec();
-    }
-    String::from_utf8(xml).map_err(|_| t!("Keine Xournal-Datei").to_string())
+    String::from_utf8(import::gunzip(bytes)?).map_err(|_| t!("Keine Xournal-Datei").to_string())
 }
 
 fn attributes(e: &BytesStart) -> HashMap<String, String> {
@@ -326,24 +303,18 @@ fn finish_item(element: Open, content: &str) -> Option<XoppItem> {
     }
 }
 
-/// Sample pressures and our stroke width for Xournal widths: we draw a diameter of
-/// `width · (0.5 + p)`, so the widest point gets p = 1 and thinner ones less.
+/// Our stroke width and sample pressures for Xournal widths (nominal width, then optionally
+/// one width per point, or per segment in the original Xournal).
 fn stroke_widths(widths: &[f32], count: usize, scale: f32) -> (f32, Vec<f32>) {
     let nominal = widths.first().copied().unwrap_or(1.0).max(0.01) * scale;
-    let per_point: Vec<f32> = widths.get(1..).unwrap_or_default().to_vec();
-    // Xournal++ stores one width per point, the original Xournal one per segment
+    let per_point = widths.get(1..).unwrap_or_default();
     if per_point.is_empty() || per_point.len() + 1 < count {
         return (nominal, vec![0.5; count]);
     }
-    let widest = per_point.iter().copied().fold(0.0, f32::max).max(0.01) * scale;
-    let width = widest / 1.5;
-    let pressures = (0..count)
-        .map(|i| {
-            let w = per_point[i.min(per_point.len() - 1)] * scale;
-            (w / width - 0.5).clamp(0.0, 1.0)
-        })
+    let scaled: Vec<f32> = (0..count)
+        .map(|i| per_point[i.min(per_point.len() - 1)] * scale)
         .collect();
-    (width, pressures)
+    import::fit_widths(&scaled)
 }
 
 /// Finds a referenced file: as given, next to the Xournal file, or as Xournal++ attachment
@@ -370,23 +341,7 @@ pub fn create_notebook_from_xopp(
     if doc.pages.is_empty() {
         return Err(t!("Die Datei enthält keine Seiten").to_string());
     }
-    let (_, _, dir) = storage::create_new_notebook(base_dir, title).map_err(|e| e.to_string())?;
-    let result = (|| {
-        let (pages, next_stroke_id, report) = convert(&doc, xopp_path, &dir)?;
-        let page_count = pages.len() as u64;
-        let notebook = Notebook::from_pages(pages, 0, next_stroke_id, page_count + 1);
-        let mut manifest = storage::load_manifest(&dir).map_err(|e| e.to_string())?;
-        storage::save_notebook(&dir, &notebook, &mut manifest).map_err(|e| e.to_string())?;
-        Ok((notebook, manifest, report))
-    })();
-    match result {
-        Ok((notebook, manifest, report)) => Ok((notebook, manifest, dir, report)),
-        Err(err) => {
-            // Don't leave a half-finished notebook behind
-            let _ = std::fs::remove_dir_all(&dir);
-            Err(err)
-        }
-    }
+    import::create_notebook(base_dir, title, |dir| convert(&doc, xopp_path, dir))
 }
 
 /// PDF used as background: asset name and page sizes in points.
@@ -395,11 +350,7 @@ struct PdfSource {
     sizes: Vec<(f32, f32)>,
 }
 
-fn convert(
-    doc: &XoppDocument,
-    xopp_path: &Path,
-    notebook_dir: &Path,
-) -> Result<(Vec<Page>, u64, ImportReport), String> {
+fn convert(doc: &XoppDocument, xopp_path: &Path, notebook_dir: &Path) -> Result<Imported, String> {
     let assets = crate::assets::AssetStore::new(notebook_dir);
     let mut report = ImportReport::default();
     let mut pdfs: HashMap<String, Option<PdfSource>> = HashMap::new();
@@ -458,7 +409,9 @@ fn convert(
                     .and_then(|p| std::fs::read(p).ok())
                     .and_then(|b| assets.import_bytes(&b).ok());
                 match image {
-                    Some(image) => strokes.push(image_data(new_id(), image.asset, placement)),
+                    Some(image) => {
+                        strokes.push(import::image_stroke(new_id(), image.asset, placement))
+                    }
                     None => report.skipped += 1,
                 }
             }
@@ -473,42 +426,15 @@ fn convert(
                     points,
                 } => {
                     let (width, pressures) = stroke_widths(widths, points.len(), scale);
-                    let mut color = *color;
-                    let tool = if *highlighter {
-                        if color[3] >= 0.99 {
-                            color[3] = HIGHLIGHTER_ALPHA;
-                        }
-                        StrokeTool::Highlighter
-                    } else {
-                        // Pens are always opaque (translucent pens are read as highlighters)
-                        color[3] = 1.0;
-                        StrokeTool::Pen
-                    };
-                    let samples = points
-                        .iter()
-                        .zip(pressures)
-                        .enumerate()
-                        .map(|(i, (&p, pressure))| {
-                            let p = map(p);
-                            SampleData {
-                                x: p.x,
-                                y: p.y,
-                                p: pressure,
-                                t: i as f64 * 0.005,
-                            }
-                        })
-                        .collect();
-                    strokes.push(StrokeData {
-                        id: new_id(),
-                        color,
-                        samples,
-                        shape: None,
-                        tool,
+                    let points: Vec<glam::Vec2> = points.iter().map(|&p| map(p)).collect();
+                    strokes.push(import::ink_stroke(
+                        new_id(),
+                        *color,
+                        *highlighter,
+                        &points,
                         width,
-                        finalized: true,
-                        image: None,
-                        text: None,
-                    });
+                        &pressures,
+                    ));
                 }
                 XoppItem::Text {
                     mono,
@@ -522,34 +448,17 @@ fn convert(
                     } else {
                         TextFont::Sans
                     };
-                    let size = size * scale;
                     // Xournal doesn't wrap: as wide as the longest line
-                    let unwrapped = TextBox::new(content.clone(), size, font, f32::MAX / 4.0);
-                    let widest = unwrapped
-                        .layout()
-                        .lines
-                        .iter()
-                        .map(|line| line.width)
-                        .fold(0.0, f32::max);
-                    let text = TextBox::new(content.clone(), size, font, widest + size);
-                    let corners = crate::text::frame_corners(
+                    strokes.push(import::text_stroke(
+                        new_id(),
+                        content,
+                        size * scale,
+                        font,
                         map(*pos),
                         [glam::Vec2::X, glam::Vec2::Y],
-                        text.box_size(),
-                    );
-                    let mut color = *color;
-                    color[3] = 1.0;
-                    strokes.push(StrokeData {
-                        id: new_id(),
-                        color,
-                        samples: corner_samples(corners),
-                        shape: None,
-                        tool: StrokeTool::Pen,
-                        width: 0.0,
-                        finalized: true,
-                        image: None,
-                        text: Some(text),
-                    });
+                        None,
+                        *color,
+                    ));
                 }
                 XoppItem::Image { rect, data } => {
                     let compact: String =
@@ -568,7 +477,7 @@ fn convert(
                                 glam::Vec2::new(l, b),
                             ]
                             .map(map);
-                            strokes.push(image_data(new_id(), image.asset, corners));
+                            strokes.push(import::image_stroke(new_id(), image.asset, corners));
                         }
                         None => report.skipped += 1,
                     }
@@ -577,18 +486,20 @@ fn convert(
             }
         }
 
-        let page_data = storage::PageData {
-            format_version: storage::CURRENT_FORMAT_VERSION,
-            id: index as u64 + 1,
+        pages.push(import::page(
+            index as u64 + 1,
+            size,
             background,
             pdf_background,
-            title: None,
-            size: (size != crate::document::A4_SIZE).then(|| size.to_array()),
             strokes,
-        };
-        pages.push(page_data.to_page());
+        ));
     }
-    Ok((pages, next_id, report))
+    Ok(Imported {
+        pages,
+        next_stroke_id: next_id,
+        layout: None,
+        report,
+    })
 }
 
 fn load_pdf(file: &str, xopp_path: &Path, assets: &crate::assets::AssetStore) -> Option<PdfSource> {
@@ -598,35 +509,11 @@ fn load_pdf(file: &str, xopp_path: &Path, assets: &crate::assets::AssetStore) ->
     Some(PdfSource { asset, sizes })
 }
 
-fn corner_samples(corners: [glam::Vec2; 4]) -> Vec<SampleData> {
-    corners
-        .iter()
-        .map(|c| SampleData {
-            x: c.x,
-            y: c.y,
-            p: 1.0,
-            t: 0.0,
-        })
-        .collect()
-}
-
-fn image_data(id: u64, asset: String, corners: [glam::Vec2; 4]) -> StrokeData {
-    StrokeData {
-        id,
-        color: [1.0, 1.0, 1.0, 1.0],
-        samples: corner_samples(corners),
-        shape: None,
-        tool: StrokeTool::Pen,
-        width: 0.0,
-        finalized: true,
-        image: Some(asset),
-        text: None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::document::StrokeTool;
+    use crate::storage;
     use std::io::Write;
 
     fn gzip(xml: &str) -> Vec<u8> {
@@ -790,7 +677,7 @@ zweite Zeile</text>
         assert!(!pen.vertices.is_empty());
         let marker = &first.strokes[1];
         assert_eq!(marker.tool, StrokeTool::Highlighter);
-        assert_eq!(marker.color[3], HIGHLIGHTER_ALPHA);
+        assert_eq!(marker.color[3], import::HIGHLIGHTER_ALPHA);
         assert!(first.strokes[2].is_text());
 
         for (i, page) in reloaded.pages[1..].iter().enumerate() {

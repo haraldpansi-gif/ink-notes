@@ -52,6 +52,8 @@ hayro-svg = "0.8"
 flate2 = "1.1"
 quick-xml = "0.41"
 base64 = "0.22"
+# Rnote-Import: SVG-Bilder (z. B. PDF-Seiten) rastern
+resvg = { version = "0.49", default-features = false, features = ["raster-images"] }
 
 # Text-Werkzeug: Schriftmetriken und Rasterung (Schriften aus egui)
 ab_glyph = "0.2"

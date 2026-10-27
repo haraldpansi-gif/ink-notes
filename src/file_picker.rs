@@ -1,4 +1,4 @@
-//! Eingebaute, stift- und fingertaugliche Dateiauswahl für Bilder, PDFs und Xournal++-Dateien.
+//! Eingebaute, stift- und fingertaugliche Dateiauswahl für Bilder und importierbare Dateien (PDF, Xournal++, Rnote).
 //!
 //! Bewusst ohne Systemdialog: der bräuchte GTK oder das Desktop-Portal, die unter WSL und auf
 //! schlanken Systemen oft fehlen. Die Auswahl zeigt Ordner und die passenden Dateien des
@@ -22,7 +22,7 @@ pub struct PickerEntry {
 pub enum PickerKind {
     /// Bilder zum Einfügen auf der aktuellen Seite
     Image,
-    /// PDF or Xournal++ file to import as a new notebook
+    /// PDF, Xournal++ or Rnote file to import as a new notebook
     Import,
 }
 
@@ -31,7 +31,7 @@ impl PickerKind {
     pub fn accepts(self, path: &Path) -> bool {
         match self {
             PickerKind::Image => is_supported_image_path(path),
-            PickerKind::Import => is_pdf_path(path) || crate::xopp::is_xopp_path(path),
+            PickerKind::Import => crate::import::is_importable_path(path),
         }
     }
 }
@@ -193,6 +193,7 @@ mod tests {
             "c.webp",
             "Skript.PDF",
             "mathe.xopp",
+            "skizze.rnote",
         ] {
             std::fs::write(dir.path().join(name), b"x").unwrap();
         }
@@ -213,7 +214,13 @@ mod tests {
         );
         assert_eq!(
             names(PickerKind::Import),
-            ["aOrdner", "zOrdner", "mathe.xopp", "Skript.PDF"]
+            [
+                "aOrdner",
+                "zOrdner",
+                "mathe.xopp",
+                "skizze.rnote",
+                "Skript.PDF"
+            ]
         );
     }
 

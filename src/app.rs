@@ -2216,9 +2216,9 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
 
-                    // Bilddatei ins Fenster gezogen: an der Ablagestelle einfügen; PDF/Xournal++: importieren
+                    // Bilddatei ins Fenster gezogen: an der Ablagestelle einfügen; PDF/Xournal++/Rnote: importieren
                     WindowEvent::DroppedFile(path) => {
-                        if crate::file_picker::is_pdf_path(&path) || crate::xopp::is_xopp_path(&path) {
+                        if crate::import::is_importable_path(&path) {
                             ui_state.queued_actions.push(UiAction::ImportFile(path));
                         } else if crate::assets::is_supported_image_path(&path) {
                             let (sx, sy) = cursor_screen_pos;
@@ -3844,15 +3844,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                                         .file_stem()
                                         .map(|s| s.to_string_lossy().into_owned())
                                         .unwrap_or_else(|| "Import".to_string());
-                                    let result = if crate::xopp::is_xopp_path(&path) {
-                                        crate::xopp::create_notebook_from_xopp(&storage_base_dir, &title, &path)
-                                    } else {
-                                        std::fs::read(&path)
-                                            .map_err(|e| e.to_string())
-                                            .and_then(|bytes| storage::create_notebook_from_pdf(&storage_base_dir, &title, bytes))
-                                            .map(|(nb, m, dir)| (nb, m, dir, crate::xopp::ImportReport::default()))
-                                    };
-                                    match result {
+                                    match crate::import::import_file(&storage_base_dir, &title, &path) {
                                         Ok((new_nb, new_manifest, new_dir, report)) => {
                                             let id = new_manifest.id.clone();
                                             change_library(&storage_base_dir, &mut ui_state, |library| {
