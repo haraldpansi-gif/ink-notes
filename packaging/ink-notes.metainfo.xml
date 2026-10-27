@@ -84,6 +84,11 @@
   </branding>
   <content_rating type="oars-1.1" />
   <releases>
+    <release version="0.39.2" date="2026-10-27">
+      <description>
+        <p>PDF export now uses its own small PDF writer on lopdf 0.46 instead of printpdf; the exported files look the same.</p>
+      </description>
+    </release>
     <release version="0.39.1" date="2026-10-27">
       <description>
         <p>Windows: the mouse works again; Windows Ink no longer reports it as a pen.</p>
