@@ -1,13 +1,13 @@
 //! Legt beim PDF-Export die Originalseiten importierter PDFs als Vektorgrafik unter die
 //! Notizen (Text bleibt scharf und auswählbar).
 //!
-//! Vorgehen: Das von printpdf erzeugte PDF wird mit `lopdf` geöffnet. Jede benötigte Seite
+//! Vorgehen: Das vom Export erzeugte PDF wird mit `lopdf` geöffnet. Jede benötigte Seite
 //! des Quell-PDFs wird als Form-XObject (Inhalt + Ressourcen der Seite) übernommen und am
 //! Anfang der Zielseite gezeichnet, also unter Hintergrund, Bildern und Tinte.
 
 use std::collections::{BTreeMap, HashMap};
 
-use printpdf::lopdf::{Dictionary, Document, Object, ObjectId, Stream};
+use lopdf::{Dictionary, Document, Object, ObjectId, Stream};
 
 use crate::t;
 
@@ -361,7 +361,7 @@ mod tests {
             2,
             "Quellseiten dürfen nicht als eigene Seiten auftauchen"
         );
-        let first = doc.get_page_content(pages[0]).unwrap();
+        let first = doc.get_page_content(pages[0]);
         let text = String::from_utf8_lossy(&first);
         assert!(
             text.starts_with("q "),

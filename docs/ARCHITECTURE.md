@@ -189,13 +189,13 @@ Each page has its own history (`history.rs`): adding, removing, replacing and mo
 
 ## 8. Export
 
-`export.rs` creates the PDF with `printpdf`. Each page gets its own size and these layers:
+`export.rs` creates the PDF with `pdf_writer.rs`, a small writer on top of `lopdf` (layers as optional content groups, embedded fonts with a ToUnicode map, images, bookmarks). Each page gets its own size and these layers:
 
 1. **Background:** squares, lines or dots in the chosen pattern color (always on white paper).
 2. **PDF** (fallback only): imported PDF page as an image, if it cannot be taken over as vectors.
 3. **Images:** inserted images (at most 300 dpi).
 4. **Text:** text boxes as real text with embedded font (searchable, copyable). Each box lives in its own coordinate system that a transformation matrix maps onto its corners.
-5. **Ink:** strokes as filled polygons, shapes as paths. Semi-transparent strokes (highlighter) get a graphics state with opacity (`ca`/`CA`); printpdf cannot create such states, so `add_alpha_states` adds them to the page resources with `lopdf` after saving. Each stroke is a single path and therefore does not cover itself twice. The outline of a stroke is simplified before export (`geometry::simplify_closed_outline`, at most 0.01 mm away from the drawn one): the mesh has about 16 points per pen sample, and with all of them a full page took seconds to export. `INK_NOTES_EXACT_OUTLINES=1` exports every point as before.
+5. **Ink:** strokes as filled polygons, shapes as paths. Semi-transparent strokes (highlighter) get a graphics state with opacity (`ca`/`CA`); `add_alpha_states` adds them to the page resources with `lopdf` after saving. Each stroke is a single path and therefore does not cover itself twice. The outline of a stroke is simplified before export (`geometry::simplify_closed_outline`, at most 0.01 mm away from the drawn one): the mesh has about 16 points per pen sample, and with all of them a full page took seconds to export. `INK_NOTES_EXACT_OUTLINES=1` exports every point as before.
 
 Imported PDF pages are then placed under the page as a form XObject (`pdf_merge.rs`), so they stay vector graphics. Page titles become bookmarks.
 

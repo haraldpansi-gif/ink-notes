@@ -21,6 +21,7 @@ pub mod page_export;
 pub mod paths;
 pub mod pdf_doc;
 pub mod pdf_merge;
+pub mod pdf_writer;
 pub mod platform;
 pub mod rnote;
 pub mod ruler;

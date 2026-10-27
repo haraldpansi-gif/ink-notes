@@ -181,6 +181,7 @@ src/
 ├── assets.rs       # Images and PDFs in the notebook folder
 ├── pdf_doc.rs      # Reading and rendering PDFs (hayro)
 ├── pdf_merge.rs    # Underlaying imported PDF pages on export
+├── pdf_writer.rs   # Small PDF writer for the export (lopdf)
 ├── import.rs       # Import as a new notebook (shared parts)
 ├── xopp.rs         # Import of Xournal++/Xournal notebooks
 ├── rnote.rs        # Import of Rnote notebooks
@@ -191,7 +192,7 @@ src/
 ├── disk_watch.rs   # Taking over changes from other devices (sync clients)
 ├── library.rs      # Notebook folders (library.json)
 ├── autosave.rs     # Saving in the background
-├── export.rs       # PDF export (printpdf)
+├── export.rs       # PDF export
 ├── page_export.rs  # Page as PNG/SVG, selection as image
 ├── file_picker.rs  # Built-in file picker
 ├── settings.rs     # Settings (~/.config/ink-notes/ui.json)

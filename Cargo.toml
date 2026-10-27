@@ -24,8 +24,8 @@ glam = { version = "0.27", features = ["serde"] }
 # Asynchroner Starter für wgpu-Device-Setup
 pollster = "0.3"
 
-# PDF-Vektorexport
-printpdf = "0.7"
+# PDF: writing the export (own writer in src/pdf_writer.rs) and merging imported PDFs
+lopdf = { version = "0.46", default-features = false }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 

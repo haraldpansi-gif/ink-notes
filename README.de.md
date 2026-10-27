@@ -179,6 +179,7 @@ src/
 ├── assets.rs       # Bilder und PDFs im Notizbuchordner
 ├── pdf_doc.rs      # PDF lesen und rendern (hayro)
 ├── pdf_merge.rs    # Importierte PDF-Seiten beim Export unterlegen
+├── pdf_writer.rs   # Kleiner PDF-Schreiber für den Export (lopdf)
 ├── import.rs       # Import als neues Notizbuch (Gemeinsames)
 ├── xopp.rs         # Import von Xournal++-/Xournal-Notizbüchern
 ├── rnote.rs        # Import von Rnote-Notizbüchern
@@ -189,7 +190,7 @@ src/
 ├── disk_watch.rs   # Änderungen anderer Geräte übernehmen (Sync-Clients)
 ├── library.rs      # Ordner der Notizbücher (library.json)
 ├── autosave.rs     # Speichern im Hintergrund
-├── export.rs       # PDF-Export (printpdf)
+├── export.rs       # PDF-Export
 ├── page_export.rs  # Seite als PNG/SVG, Auswahl als Bild
 ├── file_picker.rs  # Eingebaute Dateiauswahl
 ├── settings.rs     # Einstellungen (~/.config/ink-notes/ui.json)

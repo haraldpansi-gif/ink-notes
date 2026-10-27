@@ -1,4 +1,4 @@
-//! Verlustfreier Vektor-PDF-Export des gesamten Notizbuchs via printpdf.
+//! Verlustfreier Vektor-PDF-Export des gesamten Notizbuchs (PDF-Ausgabe: [`crate::pdf_writer`]).
 //!
 //! Features:
 //! - Hochformat DIN A4 (210 mm x 297 mm)
@@ -8,7 +8,7 @@
 //! - Vektor-Hintergründe (Kariert 5mm, Liniert, Punktraster, Blanko)
 //! - Zwei Export-Strategien:
 //!   - `FilledPolygon`: Glatte gefüllte Polygone aus den Triangle-Strip-Hüllen (variable Pinselstärke)
-//!   - `BezierCurve`: Glatte kubische Bézier-Kurven via `printpdf::Line`
+//!   - `BezierCurve`: Glatte kubische Bézier-Kurven via `pdf_writer::Line`
 
 use std::collections::HashMap;
 use std::error::Error;
@@ -16,13 +16,14 @@ use std::fs::File;
 use std::io::BufWriter;
 use std::path::{Path, PathBuf};
 
-use printpdf::path::{PaintMode, WindingOrder};
-use printpdf::{Color, Line, Mm, PdfDocument, PdfDocumentReference, Point, Polygon, Rgb};
-
 use crate::assets::AssetStore;
 use crate::background::{PatternColor, DOT_SIZE, GRID_5MM_SPACING, LINED_SPACING};
 use crate::document::{
     Notebook, Page, PageBackground, Stroke, A4_HEIGHT_MM, A4_WIDTH_MM, PAGE_HEIGHT, PAGE_WIDTH,
+};
+use crate::pdf_writer::{
+    Color, Line, Mm, PaintMode, PdfDocument, PdfDocumentReference, Point, Polygon, Rgb,
+    WindingOrder,
 };
 use crate::t;
 use ab_glyph::Font as _;
@@ -147,19 +148,19 @@ fn pdf_page_mm(page: &Page) -> (Mm, Mm) {
 
 /// Beginnt eine Ebene: Koordinaten beziehen sich auf eine A4-hohe Seite (siehe
 /// [`page_to_pdf_mm`]) und werden auf die tatsächliche Höhe von `page` verschoben.
-fn begin_page_layer(layer: &printpdf::PdfLayerReference, page: &Page) {
+fn begin_page_layer(layer: &crate::pdf_writer::PdfLayerReference, page: &Page) {
     layer.save_graphics_state();
     let dy = (page.size.y - PAGE_HEIGHT) * PT_PER_UNIT;
     if dy != 0.0 {
-        layer.set_ctm(printpdf::CurTransMat::Translate(
-            printpdf::Pt(0.0),
-            printpdf::Pt(dy),
+        layer.set_ctm(crate::pdf_writer::CurTransMat::Translate(
+            crate::pdf_writer::Pt(0.0),
+            crate::pdf_writer::Pt(dy),
         ));
     }
 }
 
 /// Beendet eine mit [`begin_page_layer`] begonnene Ebene.
-fn end_page_layer(layer: &printpdf::PdfLayerReference) {
+fn end_page_layer(layer: &crate::pdf_writer::PdfLayerReference) {
     layer.restore_graphics_state();
 }
 
@@ -211,7 +212,7 @@ pub fn export_notebook_to_bytes(
         return export_notebook_to_bytes(&cropped, strategy, assets, pattern);
     }
     let doc = generate_pdf_document(notebook, strategy, assets, pattern)?;
-    let bytes = add_alpha_states(fix_text_encoding(doc.save_to_bytes()?, notebook)?, notebook)?;
+    let bytes = add_alpha_states(doc.save_to_bytes()?, notebook)?;
 
     // Importierte PDF-Seiten als Vektorgrafik unterlegen
     let underlays = pdf_underlays(notebook);
@@ -237,7 +238,7 @@ pub fn export_notebook_to_bytes(
         raster.insert(underlay.target_page);
     }
     let doc = generate_pdf_document_with(notebook, strategy, assets, pattern, &raster)?;
-    let bytes = add_alpha_states(fix_text_encoding(doc.save_to_bytes()?, notebook)?, notebook)?;
+    let bytes = add_alpha_states(doc.save_to_bytes()?, notebook)?;
     let remaining: Vec<_> = underlays
         .into_iter()
         .filter(|u| !raster.contains(&u.target_page))
@@ -249,35 +250,6 @@ pub fn export_notebook_to_bytes(
     Ok(merged)
 }
 
-/// printpdf schreibt Lesezeichen-Titel als rohes UTF-8, PDF-Betrachter lesen Textstrings aber
-/// als PDFDocEncoding oder UTF-16BE: Umlaute und Gedankenstriche würden verstümmelt. Titel
-/// mit Nicht-ASCII-Zeichen werden deshalb nach UTF-16BE (mit BOM) umgeschrieben.
-fn fix_text_encoding(bytes: Vec<u8>, notebook: &Notebook) -> Result<Vec<u8>, Box<dyn Error>> {
-    let needs_fix = notebook
-        .pages
-        .iter()
-        .filter_map(|p| p.title.as_deref())
-        .any(|t| !t.is_ascii());
-    if !needs_fix {
-        return Ok(bytes);
-    }
-    let mut doc = printpdf::lopdf::Document::load_mem(&bytes)?;
-    for object in doc.objects.values_mut() {
-        let Ok(dict) = object.as_dict_mut() else {
-            continue;
-        };
-        if let Ok(printpdf::lopdf::Object::String(raw, format)) = dict.get_mut(b"Title") {
-            if let Some(utf16) = utf16be_text(raw) {
-                *raw = utf16;
-                *format = printpdf::lopdf::StringFormat::Hexadecimal;
-            }
-        }
-    }
-    let mut out = Vec::new();
-    doc.save_to(&mut out)?;
-    Ok(out)
-}
-
 /// Name des Grafikzustands für halbtransparente Tinte mit Deckkraft `alpha` (auf Prozent
 /// gerundet); `None` für deckende Farben.
 fn alpha_state_name(alpha: f32) -> Option<String> {
@@ -285,12 +257,12 @@ fn alpha_state_name(alpha: f32) -> Option<String> {
     (percent < 100).then(|| format!("InkAlpha{percent}"))
 }
 
-/// printpdf kann keine Grafikzustände mit Deckkraft anlegen: Die Tintenebene verweist mit
+/// Grafikzustände mit Deckkraft: Die Tintenebene verweist mit
 /// `gs` auf die Namen aus [`alpha_state_name`], die Zustände selbst (`ca`/`CA`) werden hier
 /// in die Ressourcen jeder Seite eingetragen. Ohne halbtransparente Striche bleibt das PDF
 /// unverändert.
 fn add_alpha_states(bytes: Vec<u8>, notebook: &Notebook) -> Result<Vec<u8>, Box<dyn Error>> {
-    use printpdf::lopdf::{Dictionary, Object};
+    use lopdf::{Dictionary, Object};
 
     let mut states: Vec<(String, f32)> = notebook
         .pages
@@ -305,7 +277,7 @@ fn add_alpha_states(bytes: Vec<u8>, notebook: &Notebook) -> Result<Vec<u8>, Box<
     states.sort_by(|a, b| a.0.cmp(&b.0));
     states.dedup_by(|a, b| a.0 == b.0);
 
-    let mut doc = printpdf::lopdf::Document::load_mem(&bytes)?;
+    let mut doc = lopdf::Document::load_mem(&bytes)?;
     let page_ids: Vec<_> = doc.get_pages().into_values().collect();
     for page_id in page_ids {
         let resources = dict_object_id(&mut doc, page_id, b"Resources")?;
@@ -328,11 +300,11 @@ fn add_alpha_states(bytes: Vec<u8>, notebook: &Notebook) -> Result<Vec<u8>, Box<
 /// Kennung des Wörterbuchs unter `key` im Objekt `owner`; ein eingebettetes oder fehlendes
 /// Wörterbuch wird dafür zu einem eigenen Objekt.
 fn dict_object_id(
-    doc: &mut printpdf::lopdf::Document,
-    owner: printpdf::lopdf::ObjectId,
+    doc: &mut lopdf::Document,
+    owner: lopdf::ObjectId,
     key: &[u8],
-) -> Result<printpdf::lopdf::ObjectId, Box<dyn Error>> {
-    use printpdf::lopdf::{Dictionary, Object};
+) -> Result<lopdf::ObjectId, Box<dyn Error>> {
+    use lopdf::{Dictionary, Object};
 
     let entry = doc.get_object(owner)?.as_dict()?.get(key).ok().cloned();
     if let Some(Object::Reference(id)) = entry {
@@ -347,20 +319,6 @@ fn dict_object_id(
         .as_dict_mut()?
         .set(key.to_vec(), Object::Reference(id));
     Ok(id)
-}
-
-/// UTF-8-Text als PDF-Textstring in UTF-16BE mit BOM; `None` bei reinem ASCII oder
-/// ungültigem UTF-8.
-fn utf16be_text(raw: &[u8]) -> Option<Vec<u8>> {
-    let text = std::str::from_utf8(raw).ok()?;
-    if text.is_ascii() {
-        return None;
-    }
-    let mut out = vec![0xFE, 0xFF];
-    for unit in text.encode_utf16() {
-        out.extend_from_slice(&unit.to_be_bytes());
-    }
-    Some(out)
 }
 
 /// Unterlagen für alle Seiten mit importierter PDF-Seite.
@@ -387,7 +345,7 @@ fn pdf_underlays(notebook: &Notebook) -> Vec<crate::pdf_merge::Underlay> {
         .collect()
 }
 
-/// Generiert das `printpdf::PdfDocumentReference` für alle Seiten des Notizbuchs.
+/// Generiert das `crate::pdf_writer::PdfDocumentReference` für alle Seiten des Notizbuchs.
 /// Importierte PDF-Seiten sind darin noch nicht enthalten; die legt
 /// [`export_notebook_to_bytes`] anschließend als Vektorgrafik darunter.
 pub fn generate_pdf_document(
@@ -447,7 +405,7 @@ fn generate_pdf_document_with(
         }
         let page_ref = doc.get_page(page_idx);
         render_background_layer(&page_ref.get_layer(layer_bg), page, pattern);
-        let layer = |name: &str, render: &dyn Fn(&printpdf::PdfLayerReference)| {
+        let layer = |name: &str, render: &dyn Fn(&crate::pdf_writer::PdfLayerReference)| {
             let layer = page_ref.add_layer(name);
             begin_page_layer(&layer, page);
             render(&layer);
@@ -470,7 +428,7 @@ fn generate_pdf_document_with(
 
 /// Rendert das Vektorraster auf Layer 1 ("Background").
 fn render_background_layer(
-    layer: &printpdf::PdfLayerReference,
+    layer: &crate::pdf_writer::PdfLayerReference,
     page: &Page,
     pattern: PatternColor,
 ) {
@@ -481,7 +439,7 @@ fn render_background_layer(
         .color(crate::background::PaperTheme::White)
         .map(crate::background::linear_to_srgb);
     let grid_color = Color::Rgb(Rgb::new(r, g, b, None));
-    layer.set_outline_color(grid_color.clone());
+    layer.set_outline_color(grid_color);
     layer.set_outline_thickness(0.4); // Feine 0.15 mm Haarlinie (ca. 0.4 pt)
     layer.set_fill_color(grid_color);
 
@@ -567,7 +525,11 @@ fn render_background_layer(
 }
 
 /// Rendert alle Striche einer Seite auf Layer 2 ("Ink").
-fn render_ink_layer(layer: &printpdf::PdfLayerReference, page: &Page, strategy: ExportStrategy) {
+fn render_ink_layer(
+    layer: &crate::pdf_writer::PdfLayerReference,
+    page: &Page,
+    strategy: ExportStrategy,
+) {
     for stroke in &page.strokes {
         if stroke.is_object() {
             continue;
@@ -578,9 +540,9 @@ fn render_ink_layer(layer: &printpdf::PdfLayerReference, page: &Page, strategy: 
         let alpha_state = alpha_state_name(stroke.color[3]);
         if let Some(name) = &alpha_state {
             layer.save_graphics_state();
-            layer.add_operation(printpdf::lopdf::content::Operation::new(
+            layer.add_operation(lopdf::content::Operation::new(
                 "gs",
-                vec![printpdf::lopdf::Object::Name(name.as_bytes().to_vec())],
+                vec![lopdf::Object::Name(name.as_bytes().to_vec())],
             ));
         }
         if let Some(ref shape) = stroke.shape {
@@ -648,8 +610,8 @@ fn pdf_image_xobject(
     assets: &AssetStore,
     asset: &str,
     corners: &[glam::Vec2; 4],
-) -> Result<printpdf::ImageXObject, Box<dyn Error>> {
-    use printpdf::{ColorBits, ColorSpace, ImageFilter, ImageXObject, Px};
+) -> Result<crate::pdf_writer::ImageXObject, Box<dyn Error>> {
+    use crate::pdf_writer::{ColorSpace, ImageFilter, ImageXObject, Px};
 
     let bytes = assets.read_bytes(asset)?;
     let decoded = image::load_from_memory(&bytes)?;
@@ -665,12 +627,9 @@ fn pdf_image_xobject(
                 width: Px(decoded.width() as usize),
                 height: Px(decoded.height() as usize),
                 color_space,
-                bits_per_component: ColorBits::Bit8,
                 interpolate: true,
                 image_data: bytes,
                 image_filter: Some(ImageFilter::DCT),
-                smask: None,
-                clipping_bbox: None,
             });
         }
     }
@@ -700,7 +659,7 @@ fn pdf_image_xobject(
 /// Rendert die eingefügten Bilder einer Seite. Fehlt eine Bilddatei, erscheint an ihrer
 /// Stelle eine graue Fläche, damit der Export nicht abbricht.
 fn render_image_layer(
-    layer: &printpdf::PdfLayerReference,
+    layer: &crate::pdf_writer::PdfLayerReference,
     page: &Page,
     assets: Option<&AssetStore>,
 ) {
@@ -725,7 +684,7 @@ fn render_image_layer(
 fn embed_text_fonts(
     doc: &PdfDocumentReference,
     notebook: &Notebook,
-) -> Result<HashMap<TextFont, printpdf::IndirectFontRef>, Box<dyn Error>> {
+) -> Result<HashMap<TextFont, crate::pdf_writer::IndirectFontRef>, Box<dyn Error>> {
     let mut fonts = HashMap::new();
     let used = notebook
         .pages
@@ -744,9 +703,9 @@ fn embed_text_fonts(
 /// Koordinatensystem (eine Einheit = eine Seiteneinheit, y nach oben) gesetzt, das eine
 /// Transformationsmatrix auf seine Ecken abbildet – so stimmen Drehung und Skalierung.
 fn render_text_layer(
-    layer: &printpdf::PdfLayerReference,
+    layer: &crate::pdf_writer::PdfLayerReference,
     page: &Page,
-    fonts: &HashMap<TextFont, printpdf::IndirectFontRef>,
+    fonts: &HashMap<TextFont, crate::pdf_writer::IndirectFontRef>,
 ) {
     for stroke in &page.strokes {
         let (Some(text), Some(corners)) = (&stroke.text, stroke.object_corners()) else {
@@ -763,7 +722,7 @@ fn render_text_layer(
         let o = page_to_pdf_pt(origin);
         let matrix = [right.x * k, -right.y * k, -down.x * k, down.y * k, o.x, o.y];
         layer.save_graphics_state();
-        layer.set_ctm(printpdf::CurTransMat::Raw(matrix));
+        layer.set_ctm(crate::pdf_writer::CurTransMat::Raw(matrix));
         layer.set_fill_color(Color::Rgb(Rgb::new(
             stroke.color[0],
             stroke.color[1],
@@ -776,9 +735,9 @@ fn render_text_layer(
             if line.text.trim().is_empty() {
                 continue;
             }
-            layer.set_text_matrix(printpdf::TextMatrix::Translate(
-                printpdf::Pt(0.0),
-                printpdf::Pt(-layout.baseline(i)),
+            layer.set_text_matrix(crate::pdf_writer::TextMatrix::Translate(
+                crate::pdf_writer::Pt(0.0),
+                crate::pdf_writer::Pt(-layout.baseline(i)),
             ));
             // Glyphen samt Unterschneidung wie auf dem Bildschirm (Abstände in 1/1000 Em)
             let face = text.font.face();
@@ -796,45 +755,31 @@ fn render_text_layer(
 }
 
 /// Graue 1×1-Fläche für fehlende Bilder.
-fn placeholder_xobject() -> printpdf::ImageXObject {
+fn placeholder_xobject() -> crate::pdf_writer::ImageXObject {
     rgb_xobject(1, 1, vec![200, 200, 200])
 }
 
-fn rgb_xobject(width: u32, height: u32, rgb: Vec<u8>) -> printpdf::ImageXObject {
-    printpdf::ImageXObject {
-        width: printpdf::Px(width as usize),
-        height: printpdf::Px(height as usize),
-        color_space: printpdf::ColorSpace::Rgb,
-        bits_per_component: printpdf::ColorBits::Bit8,
+fn rgb_xobject(width: u32, height: u32, rgb: Vec<u8>) -> crate::pdf_writer::ImageXObject {
+    crate::pdf_writer::ImageXObject {
+        width: crate::pdf_writer::Px(width as usize),
+        height: crate::pdf_writer::Px(height as usize),
+        color_space: crate::pdf_writer::ColorSpace::Rgb,
         interpolate: true,
         image_data: rgb,
         image_filter: None,
-        smask: None,
-        clipping_bbox: None,
     }
 }
 
 /// Zeichnet ein Bild so, dass es die Ecken oben links, oben rechts, unten rechts,
 /// unten links ausfüllt.
 fn draw_image_xobject(
-    layer: &printpdf::PdfLayerReference,
-    xobject: printpdf::ImageXObject,
+    layer: &crate::pdf_writer::PdfLayerReference,
+    xobject: crate::pdf_writer::ImageXObject,
     corners: &[glam::Vec2; 4],
 ) {
-    let (width, height) = (xobject.width.0 as f32, xobject.height.0 as f32);
     layer.save_graphics_state();
-    layer.set_ctm(printpdf::CurTransMat::Raw(image_matrix(corners)));
-    // Bei 72 dpi ist ein Pixel ein Punkt; die Skalierung bildet das Bild auf das
-    // Einheitsquadrat ab, die Matrix oben auf die Bildecken
-    printpdf::Image::from(xobject).add_to_layer(
-        layer.clone(),
-        printpdf::ImageTransform {
-            dpi: Some(72.0),
-            scale_x: Some(1.0 / width),
-            scale_y: Some(1.0 / height),
-            ..Default::default()
-        },
-    );
+    layer.set_ctm(crate::pdf_writer::CurTransMat::Raw(image_matrix(corners)));
+    layer.add_image(xobject);
     layer.restore_graphics_state();
 }
 
@@ -844,7 +789,7 @@ const PDF_RASTER_DPI: f32 = 200.0;
 
 /// Bettet die importierte PDF-Seite als gerendertes Bild ein (Ausweichlösung).
 fn render_pdf_raster(
-    layer: &printpdf::PdfLayerReference,
+    layer: &crate::pdf_writer::PdfLayerReference,
     page: &Page,
     assets: Option<&AssetStore>,
 ) {
@@ -882,19 +827,19 @@ fn render_pdf_raster(
 /// Rendert eine mathematisch bereinigte Form (Gerade, Kreis, Rechteck, Koordinatensystem)
 /// als verlustfreien Vektorpfad im PDF.
 fn render_recognized_shape(
-    layer: &printpdf::PdfLayerReference,
+    layer: &crate::pdf_writer::PdfLayerReference,
     shape: &crate::geometry::RecognizedShape,
     color: [f32; 4],
 ) {
     use crate::geometry::RecognizedShape;
 
     let stroke_color = Color::Rgb(Rgb::new(color[0], color[1], color[2], None));
-    layer.set_outline_color(stroke_color.clone());
+    layer.set_outline_color(stroke_color);
     layer.set_outline_thickness(1.5); // ca. 0.5 mm Standard-Liniendicke
                                       // Wie auf dem Bildschirm: spitze Ecken und stumpfe Enden (der Grafikzustand kann noch
                                       // runde Verbindungen von einem vorherigen Freihandstrich enthalten)
-    layer.set_line_cap_style(printpdf::LineCapStyle::Butt);
-    layer.set_line_join_style(printpdf::LineJoinStyle::Miter);
+    layer.set_line_cap_style(crate::pdf_writer::LineCapStyle::Butt);
+    layer.set_line_join_style(crate::pdf_writer::LineJoinStyle::Miter);
 
     match shape {
         RecognizedShape::Line { start, end } => {
@@ -1178,7 +1123,7 @@ fn render_recognized_shape(
 }
 
 /// Strategie A: Gefülltes Polygon aus den Triangle-Strip-Hüllpunkten.
-fn render_stroke_polygon(layer: &printpdf::PdfLayerReference, stroke: &Stroke) {
+fn render_stroke_polygon(layer: &crate::pdf_writer::PdfLayerReference, stroke: &Stroke) {
     if stroke.vertices.is_empty() {
         return;
     }
@@ -1266,8 +1211,8 @@ fn exact_outlines() -> bool {
     *EXACT.get_or_init(|| std::env::var_os("INK_NOTES_EXACT_OUTLINES").is_some_and(|v| v != "0"))
 }
 
-/// Strategie B: Kubische Bézier-Kurven aus den Abtastpunkten via printpdf::Line.
-fn render_stroke_bezier(layer: &printpdf::PdfLayerReference, stroke: &Stroke) {
+/// Strategie B: Kubische Bézier-Kurven aus den Abtastpunkten via crate::pdf_writer::Line.
+fn render_stroke_bezier(layer: &crate::pdf_writer::PdfLayerReference, stroke: &Stroke) {
     if stroke.points.is_empty() {
         return;
     }
@@ -1279,8 +1224,8 @@ fn render_stroke_bezier(layer: &printpdf::PdfLayerReference, stroke: &Stroke) {
         None,
     ));
     layer.set_outline_color(outline_color);
-    layer.set_line_cap_style(printpdf::LineCapStyle::Round);
-    layer.set_line_join_style(printpdf::LineJoinStyle::Round);
+    layer.set_line_cap_style(crate::pdf_writer::LineCapStyle::Round);
+    layer.set_line_join_style(crate::pdf_writer::LineJoinStyle::Round);
 
     // Durchschnittliche Linienstärke aus dem Druck berechnen
     let avg_pressure =
@@ -1753,10 +1698,10 @@ mod tests {
             PatternColor::default(),
         )
         .unwrap();
-        let doc = printpdf::lopdf::Document::load_mem(&bytes).unwrap();
+        let doc = lopdf::Document::load_mem(&bytes).unwrap();
         assert_eq!(doc.get_pages().len(), 2);
         for page_id in doc.get_pages().into_values() {
-            let content = doc.get_page_content(page_id).unwrap();
+            let content = doc.get_page_content(page_id);
             assert!(
                 String::from_utf8_lossy(&content).starts_with("q "),
                 "Originalseite fehlt als Unterlage"
@@ -1864,7 +1809,7 @@ mod tests {
             PatternColor::default(),
         )
         .unwrap();
-        let doc = printpdf::lopdf::Document::load_mem(&bytes).unwrap();
+        let doc = lopdf::Document::load_mem(&bytes).unwrap();
         let catalog = doc.catalog().unwrap();
         assert!(catalog.has(b"Outlines"), "Lesezeichen fehlen");
 
@@ -1875,17 +1820,15 @@ mod tests {
             .filter_map(|o| o.as_dict().ok())
             .filter(|d| d.has(b"Parent"))
             .filter_map(|d| match d.get(b"Title") {
-                Ok(printpdf::lopdf::Object::String(raw, _)) => {
-                    Some(if raw.starts_with(&[0xFE, 0xFF]) {
-                        let units: Vec<u16> = raw[2..]
-                            .chunks(2)
-                            .map(|c| u16::from_be_bytes([c[0], c[1]]))
-                            .collect();
-                        String::from_utf16(&units).unwrap()
-                    } else {
-                        String::from_utf8(raw.clone()).unwrap()
-                    })
-                }
+                Ok(lopdf::Object::String(raw, _)) => Some(if raw.starts_with(&[0xFE, 0xFF]) {
+                    let units: Vec<u16> = raw[2..]
+                        .chunks(2)
+                        .map(|c| u16::from_be_bytes([c[0], c[1]]))
+                        .collect();
+                    String::from_utf16(&units).unwrap()
+                } else {
+                    String::from_utf8(raw.clone()).unwrap()
+                }),
                 _ => None,
             })
             .collect();
