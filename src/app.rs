@@ -1304,7 +1304,11 @@ pub fn run_with(
     // registered); the app then runs with mouse and touch events only
     #[cfg(not(target_os = "android"))]
     let tablet_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        octotablet::builder::Builder::default().build_shared(&window)
+        // Windows Ink would otherwise report the mouse as a pen (Issue #48): every mouse
+        // move counted as pen hover, every click as pen down next to the normal mouse events
+        octotablet::builder::Builder::default()
+            .emulate_tool_from_mouse(false)
+            .build_shared(&window)
     }));
     #[cfg(not(target_os = "android"))]
     let mut tablet_manager = match tablet_result {
