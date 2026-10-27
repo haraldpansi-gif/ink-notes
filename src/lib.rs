@@ -28,3 +28,4 @@ pub mod text;
 pub mod ui;
 pub mod updater;
 pub mod viewport;
+pub mod xopp;

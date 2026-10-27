@@ -1,4 +1,4 @@
-//! Eingebaute, stift- und fingertaugliche Dateiauswahl für Bilder und PDFs.
+//! Eingebaute, stift- und fingertaugliche Dateiauswahl für Bilder, PDFs und Xournal++-Dateien.
 //!
 //! Bewusst ohne Systemdialog: der bräuchte GTK oder das Desktop-Portal, die unter WSL und auf
 //! schlanken Systemen oft fehlen. Die Auswahl zeigt Ordner und die passenden Dateien des
@@ -22,8 +22,8 @@ pub struct PickerEntry {
 pub enum PickerKind {
     /// Bilder zum Einfügen auf der aktuellen Seite
     Image,
-    /// PDF zum Importieren als neues Notizbuch
-    Pdf,
+    /// PDF or Xournal++ file to import as a new notebook
+    Import,
 }
 
 impl PickerKind {
@@ -31,7 +31,7 @@ impl PickerKind {
     pub fn accepts(self, path: &Path) -> bool {
         match self {
             PickerKind::Image => is_supported_image_path(path),
-            PickerKind::Pdf => is_pdf_path(path),
+            PickerKind::Import => is_pdf_path(path) || crate::xopp::is_xopp_path(path),
         }
     }
 }
@@ -63,7 +63,7 @@ impl FilePicker {
             .or_else(|| {
                 let preferred = match kind {
                     PickerKind::Image => tn!("🖼 Bilder"),
-                    PickerKind::Pdf => tn!("⬇ Downloads"),
+                    PickerKind::Import => tn!("⬇ Downloads"),
                 };
                 let all = shortcuts();
                 all.iter()
@@ -192,6 +192,7 @@ mod tests {
             ".versteckt.png",
             "c.webp",
             "Skript.PDF",
+            "mathe.xopp",
         ] {
             std::fs::write(dir.path().join(name), b"x").unwrap();
         }
@@ -210,7 +211,10 @@ mod tests {
             names(PickerKind::Image),
             ["aOrdner", "zOrdner", "A.jpg", "b.png", "c.webp"]
         );
-        assert_eq!(names(PickerKind::Pdf), ["aOrdner", "zOrdner", "Skript.PDF"]);
+        assert_eq!(
+            names(PickerKind::Import),
+            ["aOrdner", "zOrdner", "mathe.xopp", "Skript.PDF"]
+        );
     }
 
     #[test]

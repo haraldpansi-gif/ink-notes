@@ -11,7 +11,7 @@
 
 ---
 
-ink-notes stores handwriting as vectors, can recognize shapes, imports PDFs for annotation, inserts images and text boxes, and exports everything again as PDF, PNG or SVG. Saving happens automatically in the background.
+ink-notes stores handwriting as vectors, can recognize shapes, imports PDFs for annotation and Xournal++ notebooks, inserts images and text boxes, and exports everything again as PDF, PNG or SVG. Saving happens automatically in the background.
 
 It is mainly tested on Zorin OS 18 / Ubuntu 24.04 (Wayland and X11).
 
@@ -47,7 +47,8 @@ The interface is available in English and German; ink-notes follows the system l
 - **Text tool** (`T`): tap the page and type – regular or code font (fixed character width, Tab indents), 8–36 pt, line wrapping at the box edge. Tap existing text to change it, `Esc` finishes. Text boxes can be moved, rotated and scaled like images. Text copied in other programs becomes a text box with `Ctrl + V`.
 - **Images** (PNG, JPEG, GIF, WebP, BMP) via `Ctrl + I`, from the clipboard, or by dragging them into the window.
 - **Paste with a finger:** Pressing the page with a finger for half a second opens a "Paste" menu – a screenshot, copied text or copied objects land exactly at that spot.
-- **Import PDF** (☰ menu): Every PDF page becomes a notebook page with the PDF page as background. Portrait pages become A4; landscape pages (e.g. slides) get a landscape page without an empty strip below. When you zoom in, PDF pages are re-rendered more sharply.
+- **Import** (☰ menu, or drag the file into the window) – **PDF**: Every PDF page becomes a notebook page with the PDF page as background. Portrait pages become A4; landscape pages (e.g. slides) get a landscape page without an empty strip below. When you zoom in, PDF pages are re-rendered more sharply.
+  **Xournal++** (`.xopp`, also `.xoj` from Xournal): strokes with pen pressure, highlighters, texts, images, lined/squared/dotted paper and PDF backgrounds are taken over (the PDF is looked for at its old place and next to the file). LaTeX formulas are skipped.
 
 ### Pages and view
 - **Backgrounds:** blank, squared (5 mm), ruled (7.5 mm), dot grid (5 mm). The **color of squares, lines and dots** is selectable (light, medium, strong, blue, green) and also applies to exports.
@@ -171,6 +172,7 @@ src/
 ├── assets.rs       # Images and PDFs in the notebook folder
 ├── pdf_doc.rs      # Reading and rendering PDFs (hayro)
 ├── pdf_merge.rs    # Underlaying imported PDF pages on export
+├── xopp.rs         # Import of Xournal++/Xournal notebooks
 ├── document.rs     # Data model: notebook, pages, strokes, page sizes
 ├── history.rs      # Undo/redo
 ├── storage.rs      # Loading/saving (atomic), notebooks, trash

@@ -48,6 +48,11 @@ fs2 = "0.4"
 hayro = "0.8"
 hayro-svg = "0.8"
 
+# Import von Xournal++-Notizbüchern (gzip-komprimiertes XML mit base64-Bildern)
+flate2 = "1.1"
+quick-xml = "0.41"
+base64 = "0.22"
+
 # Text-Werkzeug: Schriftmetriken und Rasterung (Schriften aus egui)
 ab_glyph = "0.2"
 

@@ -338,7 +338,7 @@ pub enum UiAction {
     /// Bilddatei auf der aktuellen Seite einfügen
     InsertImageFile(std::path::PathBuf),
     /// PDF als neues Notizbuch importieren
-    ImportPdf(std::path::PathBuf),
+    ImportFile(std::path::PathBuf),
     /// Aktuelle Seite als Bild oder SVG exportieren
     ExportPage(PageExportKind),
     /// Titel einer Seite setzen (leer = entfernen)
@@ -669,9 +669,9 @@ impl UiState {
         self.open_file_picker(PickerKind::Image);
     }
 
-    /// Öffnet die Dateiauswahl „PDF importieren“ im zuletzt benutzten Ordner.
-    pub fn open_pdf_picker(&mut self) {
-        self.open_file_picker(PickerKind::Pdf);
+    /// Opens the file picker "Import" (PDF, Xournal++) in the last used folder.
+    pub fn open_import_picker(&mut self) {
+        self.open_file_picker(PickerKind::Import);
     }
 
     fn open_file_picker(&mut self, kind: PickerKind) {
@@ -2827,14 +2827,15 @@ fn file_picker_dialog(ctx: &egui::Context, state: &mut UiState, actions: &mut Ve
             t!("Keine Ordner oder Bilder (PNG, JPEG, GIF, WebP, BMP)"),
             t!("Tipp: Screenshots mit Strg+V einfügen oder Bilddateien ins Fenster ziehen."),
         ),
-        PickerKind::Pdf => (
-            t!("PDF importieren"),
-            t!("📄 PDF importieren"),
+        PickerKind::Import => (
+            t!("Importieren"),
+            t!("📄 Importieren"),
             "📄",
-            t!("Keine Ordner oder PDF-Dateien"),
+            t!("Keine Ordner, PDF- oder Xournal++-Dateien"),
             t!(
-                "Das PDF wird als neues Notizbuch angelegt, eine Seite je PDF-Seite. \
-             Beim Export liegen deine Notizen über den Originalseiten."
+                "Die Datei wird als neues Notizbuch angelegt. PDF: eine Seite je PDF-Seite, \
+             beim Export liegen deine Notizen über den Originalseiten. \
+             Xournal++ (.xopp, .xoj): Striche, Texte, Bilder und PDF-Hintergründe werden übernommen."
             ),
         ),
     };
@@ -2924,7 +2925,7 @@ fn file_picker_dialog(ctx: &egui::Context, state: &mut UiState, actions: &mut Ve
         state.last_picker_dir = state.file_picker.as_ref().map(|p| p.dir.clone());
         actions.push(match picker_kind {
             PickerKind::Image => UiAction::InsertImageFile(path),
-            PickerKind::Pdf => UiAction::ImportPdf(path),
+            PickerKind::Import => UiAction::ImportFile(path),
         });
         close = true;
     }
@@ -4195,11 +4196,11 @@ pub fn render_ui(
                                 state.open_image_picker();
                             }
                             if ui
-                                .add_sized([ui.available_width(), 30.0], egui::Button::new(t!("📄  PDF importieren …")))
-                                .on_hover_text(t!("Vorlesungsfolien, Übungsblätter oder Formulare als neues Notizbuch öffnen und darauf schreiben"))
+                                .add_sized([ui.available_width(), 30.0], egui::Button::new(t!("📄  Importieren (PDF, Xournal++) …")))
+                                .on_hover_text(t!("Vorlesungsfolien, Übungsblätter, Formulare oder Xournal++-Notizbücher als neues Notizbuch öffnen und darauf schreiben"))
                                 .clicked()
                             {
-                                state.open_pdf_picker();
+                                state.open_import_picker();
                             }
 
                             section(ui, t!("HINTERGRUND DIESER SEITE"));

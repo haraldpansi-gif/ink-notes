@@ -11,7 +11,7 @@
 
 ---
 
-ink-notes speichert Handschrift als Vektoren, erkennt auf Wunsch Formen, kann PDFs zum Beschriften importieren, Bilder und Textfelder einfügen und alles wieder als PDF, PNG oder SVG exportieren. Gespeichert wird automatisch im Hintergrund.
+ink-notes speichert Handschrift als Vektoren, erkennt auf Wunsch Formen, kann PDFs zum Beschriften und Xournal++-Notizbücher importieren, Bilder und Textfelder einfügen und alles wieder als PDF, PNG oder SVG exportieren. Gespeichert wird automatisch im Hintergrund.
 
 Getestet wird vor allem unter Zorin OS 18 / Ubuntu 24.04 (Wayland und X11).
 
@@ -47,7 +47,8 @@ Die Oberfläche gibt es auf Deutsch und Englisch; ink-notes folgt der Systemspra
 - **Text-Werkzeug** (`T`): ins Blatt tippen und schreiben – normale oder Code-Schrift (feste Zeichenbreite, Tab rückt ein), 8–36 pt, Zeilenumbruch am Feldrand. Vorhandenen Text antippen zum Ändern, `Esc` beendet. Textfelder lassen sich wie Bilder verschieben, drehen und skalieren. In anderen Programmen kopierter Text wird mit `Strg + V` zum Textfeld.
 - **Bilder** (PNG, JPEG, GIF, WebP, BMP) über `Strg + I`, aus der Zwischenablage oder per Ziehen ins Fenster einfügen.
 - **Einfügen per Finger:** Lange (½ s) mit dem Finger aufs Blatt drücken öffnet ein Menü „Einfügen“ – Screenshot, kopierter Text oder kopierte Objekte landen genau an dieser Stelle.
-- **PDF importieren** (☰-Menü): Jede PDF-Seite wird eine Notizbuchseite mit der PDF-Seite als Hintergrund. Hochformat-Seiten werden DIN A4, Querformat-Seiten (z. B. Folien) bekommen eine Querformat-Seite ohne leeren Streifen darunter. Beim Hineinzoomen werden PDF-Seiten schärfer nachgerendert.
+- **Importieren** (☰-Menü oder Datei ins Fenster ziehen) – **PDF**: Jede PDF-Seite wird eine Notizbuchseite mit der PDF-Seite als Hintergrund. Hochformat-Seiten werden DIN A4, Querformat-Seiten (z. B. Folien) bekommen eine Querformat-Seite ohne leeren Streifen darunter. Beim Hineinzoomen werden PDF-Seiten schärfer nachgerendert.
+  **Xournal++** (`.xopp`, auch `.xoj` aus Xournal): Striche mit Stiftdruck, Textmarker, Texte, Bilder, liniertes/kariertes/gepunktetes Papier und PDF-Hintergründe werden übernommen (das PDF wird am alten Ort und neben der Datei gesucht). LaTeX-Formeln werden übersprungen.
 
 ### Seiten und Ansicht
 - **Hintergründe:** blanko, kariert (5 mm), liniert (7,5 mm), Punktraster (5 mm). Die **Farbe von Karos, Linien und Punkten** ist wählbar (hell, mittel, kräftig, blau, grün) und gilt auch im Export.
@@ -169,6 +170,7 @@ src/
 ├── assets.rs       # Bilder und PDFs im Notizbuchordner
 ├── pdf_doc.rs      # PDF lesen und rendern (hayro)
 ├── pdf_merge.rs    # Importierte PDF-Seiten beim Export unterlegen
+├── xopp.rs         # Import von Xournal++-/Xournal-Notizbüchern
 ├── document.rs     # Datenmodell: Notizbuch, Seiten, Striche, Seitengrößen
 ├── history.rs      # Rückgängig/Wiederholen
 ├── storage.rs      # Laden/Speichern (atomar), Notizbücher, Papierkorb

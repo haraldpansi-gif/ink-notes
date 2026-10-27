@@ -167,6 +167,7 @@ mod tests {
         ("text.rs", include_str!("text.rs")),
         ("ui.rs", include_str!("ui.rs")),
         ("updater.rs", include_str!("updater.rs")),
+        ("xopp.rs", include_str!("xopp.rs")),
     ];
 
     /// Alle Texte in `t!("…")` und `tn!("…")` eines Quelltexts, auch über mehrere Zeilen
