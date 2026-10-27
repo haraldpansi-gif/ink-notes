@@ -3,6 +3,7 @@
 Notebook app for pen, touch and mouse on Linux (tested on Zorin OS 18 / Ubuntu 24.04).
 
 ### Highlights:
+- **Import from Xournal++ and Rnote**: ☰ → Import (or dragging the file into the window) now also opens Xournal++ (`.xopp`, `.xoj`) and Rnote (`.rnote`) notebooks as new notebooks – strokes with pen pressure, highlighters, shapes, texts, images, paper patterns and Xournal++ PDF backgrounds; PDF pages imported in Rnote become images, infinite Rnote documents an endless notebook
 - **Faster export**: PDF and PNG export and copying a selection as an image are about six times faster and PDFs are up to eight times smaller, because stroke outlines are simplified before export (at most 0.01 mm off; `INK_NOTES_EXACT_OUTLINES=1` exports every point as before)
 - **Fling timing**: The swipe speed for gliding is measured with the touch screen's own event times (Wayland), so a fast swipe glides even when the lift is handled late; the fling diagnostics also report slow event handling
 - **Fling fix**: A finger swipe is no longer lost when the view touches the edge of the notebook, so the page glides on after a fast swipe; the fling diagnostics (`INK_NOTES_DEBUG_FLING=1`) log moves, distance and timing
