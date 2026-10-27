@@ -19,7 +19,21 @@ use crate::storage::{self, NotebookManifest, OpenMarker, PageData};
 /// Time between two checks.
 pub const INTERVAL: Duration = Duration::from_secs(3);
 
-type Fingerprint = (Option<SystemTime>, u64);
+/// Modification time, size and, for small files, a hash of the content.
+type Fingerprint = (Option<SystemTime>, u64, Option<u64>);
+
+/// Files up to this size are also compared by content: file times are only as fine as the
+/// kernel clock tick, so a file rewritten right after a check with the same length (e.g. a
+/// manifest with one page replaced by another) would otherwise look unchanged.
+const HASHED_FILE_SIZE: u64 = 64 * 1024;
+
+fn content_hash(path: &Path) -> Option<u64> {
+    use std::hash::{Hash, Hasher};
+    let bytes = fs::read(path).ok()?;
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    bytes.hash(&mut hasher);
+    Some(hasher.finish())
+}
 
 /// What a check found and took over.
 #[derive(Debug, Default, Clone, PartialEq)]
@@ -61,8 +75,13 @@ fn scan(dir: &Path) -> HashMap<String, Fingerprint> {
                 return None;
             }
             let meta = entry.metadata().ok()?;
-            meta.is_file()
-                .then(|| (name, (meta.modified().ok(), meta.len())))
+            if !meta.is_file() {
+                return None;
+            }
+            let hash = (meta.len() <= HASHED_FILE_SIZE)
+                .then(|| content_hash(&entry.path()))
+                .flatten();
+            Some((name, (meta.modified().ok(), meta.len(), hash)))
         })
         .collect()
 }
