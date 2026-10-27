@@ -669,7 +669,7 @@ impl UiState {
         self.open_file_picker(PickerKind::Image);
     }
 
-    /// Opens the file picker "Import" (PDF, Xournal++, Rnote) in the last used folder.
+    /// Opens the file picker "Import" (PDF, Xournal++, Rnote, Saber) in the last used folder.
     pub fn open_import_picker(&mut self) {
         self.open_file_picker(PickerKind::Import);
     }
@@ -2831,12 +2831,12 @@ fn file_picker_dialog(ctx: &egui::Context, state: &mut UiState, actions: &mut Ve
             t!("Importieren"),
             t!("📄 Importieren"),
             "📄",
-            t!("Keine Ordner, PDF-, Xournal++- oder Rnote-Dateien"),
+            t!("Keine Ordner oder importierbaren Dateien (PDF, Xournal++, Rnote, Saber)"),
             t!(
                 "Die Datei wird als neues Notizbuch angelegt. PDF: eine Seite je PDF-Seite, \
              beim Export liegen deine Notizen über den Originalseiten. \
-             Xournal++ (.xopp, .xoj) und Rnote (.rnote): Striche, Formen, Texte und Bilder \
-             werden übernommen, bei Xournal++ auch PDF-Hintergründe."
+             Xournal++ (.xopp, .xoj), Rnote (.rnote) und Saber (.sbn2, .sba): Striche, Formen, \
+             Texte und Bilder werden übernommen, bei Xournal++ und Saber auch PDF-Hintergründe."
             ),
         ),
     };
@@ -4197,8 +4197,8 @@ pub fn render_ui(
                                 state.open_image_picker();
                             }
                             if ui
-                                .add_sized([ui.available_width(), 30.0], egui::Button::new(t!("📄  Importieren (PDF, Xournal++, Rnote) …")))
-                                .on_hover_text(t!("Vorlesungsfolien, Übungsblätter, Formulare oder Notizbücher aus Xournal++ und Rnote als neues Notizbuch öffnen und darauf schreiben"))
+                                .add_sized([ui.available_width(), 30.0], egui::Button::new(t!("📄  Importieren (PDF, Xournal++, Rnote, Saber) …")))
+                                .on_hover_text(t!("Vorlesungsfolien, Übungsblätter, Formulare oder Notizbücher aus Xournal++, Rnote und Saber als neues Notizbuch öffnen und darauf schreiben"))
                                 .clicked()
                             {
                                 state.open_import_picker();

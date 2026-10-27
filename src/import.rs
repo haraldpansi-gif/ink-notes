@@ -1,6 +1,6 @@
 //! Import of other formats as a new notebook (Issue #47): PDF (`storage`), Xournal++
-//! (`xopp`) and Rnote (`rnote`). This module holds what the importers share: building
-//! strokes, texts and images in the stored format and creating the notebook.
+//! (`xopp`), Rnote (`rnote`) and Saber (`saber`). This module holds what the importers
+//! share: building strokes, texts and images in the stored format and creating the notebook.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -37,9 +37,10 @@ pub fn is_importable_path(path: &Path) -> bool {
     crate::file_picker::is_pdf_path(path)
         || crate::xopp::is_xopp_path(path)
         || crate::rnote::is_rnote_path(path)
+        || crate::saber::is_saber_path(path)
 }
 
-/// Imports a PDF, Xournal++ or Rnote file as a new notebook titled `title`.
+/// Imports a PDF, Xournal++, Rnote or Saber file as a new notebook titled `title`.
 pub fn import_file(
     base_dir: &Path,
     title: &str,
@@ -49,6 +50,8 @@ pub fn import_file(
         crate::xopp::create_notebook_from_xopp(base_dir, title, path)
     } else if crate::rnote::is_rnote_path(path) {
         crate::rnote::create_notebook_from_rnote(base_dir, title, path)
+    } else if crate::saber::is_saber_path(path) {
+        crate::saber::create_notebook_from_saber(base_dir, title, path)
     } else {
         let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
         storage::create_notebook_from_pdf(base_dir, title, bytes)
@@ -226,6 +229,37 @@ pub fn image_stroke(id: u64, asset: String, corners: [glam::Vec2; 4]) -> StrokeD
         image: Some(asset),
         text: None,
     }
+}
+
+/// Premultiplied RGBA (Rnote, tiny-skia) to straight RGBA.
+pub fn unpremultiply(pixels: &mut [u8]) {
+    for px in pixels.as_chunks_mut::<4>().0 {
+        let a = px[3] as u32;
+        if a > 0 && a < 255 {
+            for c in &mut px[..3] {
+                *c = ((*c as u32 * 255 + a / 2) / a).min(255) as u8;
+            }
+        }
+    }
+}
+
+/// Rasterizes an SVG for a box of `size` page units (about 250 dpi).
+pub fn rasterize_svg(svg: &str, size: glam::Vec2) -> Option<(u32, u32, Vec<u8>)> {
+    use resvg::{tiny_skia, usvg};
+    let tree = usvg::Tree::from_str(svg, &usvg::Options::default()).ok()?;
+    let max = crate::assets::MAX_IMPORT_DIMENSION as f32;
+    let px_per_unit = 250.0 / 254.0;
+    let width = (size.x * px_per_unit).round().clamp(1.0, max) as u32;
+    let height = (size.y * px_per_unit).round().clamp(1.0, max) as u32;
+    let mut pixmap = tiny_skia::Pixmap::new(width, height)?;
+    let transform = tiny_skia::Transform::from_scale(
+        width as f32 / tree.size().width(),
+        height as f32 / tree.size().height(),
+    );
+    resvg::render(&tree, transform, &mut pixmap.as_mut());
+    let mut pixels = pixmap.take();
+    unpremultiply(&mut pixels);
+    Some((width, height, pixels))
 }
 
 fn corner_samples(corners: [glam::Vec2; 4]) -> Vec<SampleData> {

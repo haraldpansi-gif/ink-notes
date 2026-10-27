@@ -22,6 +22,7 @@ pub mod pdf_merge;
 pub mod platform;
 pub mod rnote;
 pub mod ruler;
+pub mod saber;
 pub mod selection;
 pub mod settings;
 pub mod spline;

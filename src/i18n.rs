@@ -169,6 +169,7 @@ mod tests {
         ("updater.rs", include_str!("updater.rs")),
         ("import.rs", include_str!("import.rs")),
         ("rnote.rs", include_str!("rnote.rs")),
+        ("saber.rs", include_str!("saber.rs")),
         ("xopp.rs", include_str!("xopp.rs")),
     ];
 

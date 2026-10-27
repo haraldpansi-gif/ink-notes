@@ -11,7 +11,7 @@
 
 ---
 
-ink-notes stores handwriting as vectors, can recognize shapes, imports PDFs for annotation as well as Xournal++ and Rnote notebooks, inserts images and text boxes, and exports everything again as PDF, PNG or SVG. Saving happens automatically in the background.
+ink-notes stores handwriting as vectors, can recognize shapes, imports PDFs for annotation as well as Xournal++, Rnote and Saber notebooks, inserts images and text boxes, and exports everything again as PDF, PNG or SVG. Saving happens automatically in the background.
 
 It is mainly tested on Zorin OS 18 / Ubuntu 24.04 (Wayland and X11).
 
@@ -50,6 +50,7 @@ The interface is available in English and German; ink-notes follows the system l
 - **Import** (☰ menu, or drag the file into the window) – **PDF**: Every PDF page becomes a notebook page with the PDF page as background. Portrait pages become A4; landscape pages (e.g. slides) get a landscape page without an empty strip below. When you zoom in, PDF pages are re-rendered more sharply.
   **Xournal++** (`.xopp`, also `.xoj` from Xournal): strokes with pen pressure, highlighters, texts, images, lined/squared/dotted paper and PDF backgrounds are taken over (the PDF is looked for at its old place and next to the file). LaTeX formulas are skipped.
   **Rnote** (`.rnote`, from Rnote 0.5.10): strokes with pen pressure, shapes, texts and images; PDF pages imported in Rnote become images. Pages stay pages, infinite documents become an endless notebook.
+  **Saber** (`.sbn2` with its asset files `.sbn2.0`, `.sbn2.1`, … next to it, `.sba` archives, old `.sbn`): strokes with pen pressure, highlighters, shapes, typed text, images and PDF backgrounds.
 
 ### Pages and view
 - **Backgrounds:** blank, squared (5 mm), ruled (7.5 mm), dot grid (5 mm). The **color of squares, lines and dots** is selectable (light, medium, strong, blue, green) and also applies to exports.
@@ -176,6 +177,7 @@ src/
 ├── import.rs       # Import as a new notebook (shared parts)
 ├── xopp.rs         # Import of Xournal++/Xournal notebooks
 ├── rnote.rs        # Import of Rnote notebooks
+├── saber.rs        # Import of Saber notebooks
 ├── document.rs     # Data model: notebook, pages, strokes, page sizes
 ├── history.rs      # Undo/redo
 ├── storage.rs      # Loading/saving (atomic), notebooks, trash

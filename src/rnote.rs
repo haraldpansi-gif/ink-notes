@@ -380,7 +380,7 @@ fn bitmapimage(value: &Value) -> Option<RnoteItem> {
     if pixels.len() != width as usize * height as usize * 4 {
         return None;
     }
-    unpremultiply(&mut pixels);
+    import::unpremultiply(&mut pixels);
     Some(RnoteItem::Bitmap {
         width,
         height,
@@ -405,37 +405,6 @@ fn rectangle_corners(rectangle: &Value) -> Option<[DVec2; 4]> {
         [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)]
             .map(|(x, y)| apply(&affine, DVec2::new(x * half.x, y * half.y))),
     )
-}
-
-/// Premultiplied RGBA (Rnote, tiny-skia) to straight RGBA.
-fn unpremultiply(pixels: &mut [u8]) {
-    for px in pixels.as_chunks_mut::<4>().0 {
-        let a = px[3] as u32;
-        if a > 0 && a < 255 {
-            for c in &mut px[..3] {
-                *c = ((*c as u32 * 255 + a / 2) / a).min(255) as u8;
-            }
-        }
-    }
-}
-
-/// Rasterizes an SVG for a box of `size` page units (about 250 dpi).
-fn rasterize_svg(svg: &str, size: glam::Vec2) -> Option<(u32, u32, Vec<u8>)> {
-    use resvg::{tiny_skia, usvg};
-    let tree = usvg::Tree::from_str(svg, &usvg::Options::default()).ok()?;
-    let max = crate::assets::MAX_IMPORT_DIMENSION as f32;
-    let px_per_unit = 250.0 / 254.0;
-    let width = (size.x * px_per_unit).round().clamp(1.0, max) as u32;
-    let height = (size.y * px_per_unit).round().clamp(1.0, max) as u32;
-    let mut pixmap = tiny_skia::Pixmap::new(width, height)?;
-    let transform = tiny_skia::Transform::from_scale(
-        width as f32 / tree.size().width(),
-        height as f32 / tree.size().height(),
-    );
-    resvg::render(&tree, transform, &mut pixmap.as_mut());
-    let mut pixels = pixmap.take();
-    unpremultiply(&mut pixels);
-    Some((width, height, pixels))
 }
 
 /// Rnote's version as (major, minor, patch).
@@ -680,7 +649,7 @@ fn convert(doc: &RnoteDocument, notebook_dir: &Path) -> Imported {
                     corners[0].distance(corners[1]),
                     corners[0].distance(corners[3]),
                 );
-                let image = rasterize_svg(svg, size).and_then(|(width, height, pixels)| {
+                let image = import::rasterize_svg(svg, size).and_then(|(width, height, pixels)| {
                     assets.import_rgba(width, height, pixels).ok()
                 });
                 match image {

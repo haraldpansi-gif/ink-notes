@@ -2216,7 +2216,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
 
-                    // Bilddatei ins Fenster gezogen: an der Ablagestelle einfügen; PDF/Xournal++/Rnote: importieren
+                    // Bilddatei ins Fenster gezogen: an der Ablagestelle einfügen; PDF/Xournal++/Rnote/Saber: importieren
                     WindowEvent::DroppedFile(path) => {
                         if crate::import::is_importable_path(&path) {
                             ui_state.queued_actions.push(UiAction::ImportFile(path));
