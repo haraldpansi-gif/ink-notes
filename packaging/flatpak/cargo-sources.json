@@ -119,6 +119,32 @@
     {
         "type": "archive",
         "archive-type": "tar-gzip",
+        "url": "https://static.crates.io/crates/android_log-sys/android_log-sys-0.3.2.crate",
+        "sha256": "84521a3cf562bc62942e294181d9eef17eb38ceb8c68677bc49f144e4c3d4f8d",
+        "dest": "cargo/vendor/android_log-sys-0.3.2"
+    },
+    {
+        "type": "inline",
+        "contents": "{\"package\": \"84521a3cf562bc62942e294181d9eef17eb38ceb8c68677bc49f144e4c3d4f8d\", \"files\": {}}",
+        "dest": "cargo/vendor/android_log-sys-0.3.2",
+        "dest-filename": ".cargo-checksum.json"
+    },
+    {
+        "type": "archive",
+        "archive-type": "tar-gzip",
+        "url": "https://static.crates.io/crates/android_logger/android_logger-0.13.3.crate",
+        "sha256": "c494134f746c14dc653a35a4ea5aca24ac368529da5370ecf41fe0341c35772f",
+        "dest": "cargo/vendor/android_logger-0.13.3"
+    },
+    {
+        "type": "inline",
+        "contents": "{\"package\": \"c494134f746c14dc653a35a4ea5aca24ac368529da5370ecf41fe0341c35772f\", \"files\": {}}",
+        "dest": "cargo/vendor/android_logger-0.13.3",
+        "dest-filename": ".cargo-checksum.json"
+    },
+    {
+        "type": "archive",
+        "archive-type": "tar-gzip",
         "url": "https://static.crates.io/crates/android_system_properties/android_system_properties-0.1.6.crate",
         "sha256": "ae221649c9976a6f6c56ae1facf410f3ddb33cc661c4b7b61020a912d4237fbc",
         "dest": "cargo/vendor/android_system_properties-0.1.6"
@@ -1011,6 +1037,19 @@
         "type": "inline",
         "contents": "{\"package\": \"aa18ce2bc66555b3218614519ac839ddb759a7d6720732f979ef8d13be147ecd\", \"files\": {}}",
         "dest": "cargo/vendor/enum_dispatch-0.3.13",
+        "dest-filename": ".cargo-checksum.json"
+    },
+    {
+        "type": "archive",
+        "archive-type": "tar-gzip",
+        "url": "https://static.crates.io/crates/env_logger/env_logger-0.10.2.crate",
+        "sha256": "4cd405aab171cb85d6735e5c8d9db038c17d3ca007a4d2c25f337935c3d90580",
+        "dest": "cargo/vendor/env_logger-0.10.2"
+    },
+    {
+        "type": "inline",
+        "contents": "{\"package\": \"4cd405aab171cb85d6735e5c8d9db038c17d3ca007a4d2c25f337935c3d90580\", \"files\": {}}",
+        "dest": "cargo/vendor/env_logger-0.10.2",
         "dest-filename": ".cargo-checksum.json"
     },
     {

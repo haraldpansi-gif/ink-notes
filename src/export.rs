@@ -56,19 +56,16 @@ pub fn default_documents_dir() -> PathBuf {
         }
     }
 
-    if let Ok(home) = std::env::var("HOME") {
-        if !home.trim().is_empty() {
-            let home = PathBuf::from(home);
-            let user_dirs =
-                std::fs::read_to_string(home.join(".config/user-dirs.dirs")).unwrap_or_default();
-            if let Some(dir) =
-                crate::file_picker::parse_user_dir(&user_dirs, "XDG_DOCUMENTS_DIR", &home)
-                    .filter(|dir| *dir != home)
-            {
-                return dir;
-            }
-            return home.join("Documents");
+    if let Some(home) = crate::paths::home_dir() {
+        let user_dirs =
+            std::fs::read_to_string(home.join(".config/user-dirs.dirs")).unwrap_or_default();
+        if let Some(dir) =
+            crate::file_picker::parse_user_dir(&user_dirs, "XDG_DOCUMENTS_DIR", &home)
+                .filter(|dir| *dir != home)
+        {
+            return dir;
         }
+        return home.join("Documents");
     }
 
     PathBuf::from(".")

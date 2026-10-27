@@ -484,4 +484,9 @@ pub const EN: &[(&str, &str)] = &[
     ("✔  Diesen Ordner wählen", "✔  Choose this folder"),
     ("📁  Ändern …", "📁  Change …"),
     ("📁 Speicherort wählen", "📁 Choose storage location"),
+    ("Update installiert – gilt ab dem nächsten Start", "Update installed – takes effect at the next start"),
+    ("🔄 Update installieren", "🔄 Install update"),
+    ("Konnte Backup ({path}) nicht anlegen: {e}. Update abgebrochen, altes Programm unverändert.", "Could not create backup ({path}): {e}. Update cancelled, old program unchanged."),
+    ("Konnte Programm nicht ersetzen: {e}. Altes Programm bleibt unverändert.", "Could not replace the program: {e}. The old program stays unchanged."),
+    ("Ungültiger Programmpfad.", "Invalid program path."),
 ];

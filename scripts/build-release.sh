@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # Haupt-Release-Build-Skript für ink-notes (Zorin OS 18 / Linux)
-# Erstellt .deb, .AppImage, SHA256-Prüfsummen und deren Minisign-Signatur in target/
+# Erstellt .deb, .AppImage, Windows-.exe, SHA256-Prüfsummen und deren Minisign-Signatur in target/
 # ==============================================================================
 set -euo pipefail
 
@@ -13,6 +13,7 @@ cd "${ROOT_DIR}"
 VERSION=$(grep -m1 '^version = ' Cargo.toml | cut -d '"' -f2)
 DEB_NAME="ink-notes_${VERSION}_amd64.deb"
 APPIMAGE_NAME="ink-notes_${VERSION}_x86_64.AppImage"
+EXE_NAME="ink-notes_${VERSION}_x86_64.exe"
 CHECKSUM_FILE="SHA256SUMS.txt"
 
 echo "======================================================================"
@@ -25,12 +26,15 @@ echo "======================================================================"
 # 2. AppImage bauen (.AppImage)
 "${SCRIPT_DIR}/package-appimage.sh"
 
-# 3. Checksums berechnen
+# 3. Portable Windows program (.exe)
+"${SCRIPT_DIR}/package-windows.sh"
+
+# 4. Checksums berechnen
 echo "=== Berechne SHA256-Prüfsummen in target/${CHECKSUM_FILE} ==="
 cd "${ROOT_DIR}/target"
-sha256sum "${DEB_NAME}" "${APPIMAGE_NAME}" > "${CHECKSUM_FILE}"
+sha256sum "${DEB_NAME}" "${APPIMAGE_NAME}" "${EXE_NAME}" > "${CHECKSUM_FILE}"
 
-# 4. Prüfsummen signieren (Pflicht für In-App-Updates)
+# 5. Prüfsummen signieren (Pflicht für In-App-Updates)
 # Signiert wird mit rsign2 (minisign-kompatibles Format): Der Schlüssel wurde mit
 # `rsign generate -W` erzeugt; das minisign-CLI kann ihn ohne Terminal nicht laden.
 SIGNATURE_FILE="${CHECKSUM_FILE}.minisig"
@@ -73,7 +77,7 @@ fi
 echo "======================================================================"
 echo "Release-Artefakte für v${VERSION} erfolgreich erstellt:"
 echo "======================================================================"
-ls -lh "${DEB_NAME}" "${APPIMAGE_NAME}" "${CHECKSUM_FILE}"
+ls -lh "${DEB_NAME}" "${APPIMAGE_NAME}" "${EXE_NAME}" "${CHECKSUM_FILE}"
 if [ -f "${SIGNATURE_FILE}" ]; then ls -lh "${SIGNATURE_FILE}"; fi
 echo ""
 echo "Inhalt von target/${CHECKSUM_FILE}:"

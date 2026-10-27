@@ -29,6 +29,8 @@ Dieses Dokument beschreibt, wo und wie ink-notes Notizbücher speichert, und die
 ~/.config/ink-notes/ui.json            ($XDG_CONFIG_HOME) Einstellungen der Oberfläche
 ```
 
+Unter Windows liegt dieselbe Struktur in `%APPDATA%\ink-notes` (Notizbücher, `recovery`, `ui.json`); heruntergeladene Updates landen in `%LOCALAPPDATA%\ink-notes`.
+
 Der Ordner `notebooks/` lässt sich in den Einstellungen verlegen (`storage_dir` in `ui.json`), z. B. nach `~/Nextcloud/ink-notes`; `recovery/` bleibt, wo es ist.
 
 - **Notizbuch-IDs** werden aus dem Titel und dem Zeitpunkt gebildet (z. B. `mathematik_1775460000`); das erste Notizbuch heißt `default`.

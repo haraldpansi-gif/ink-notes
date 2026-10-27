@@ -5076,6 +5076,7 @@ pub fn render_ui(
                                 let is_recommended = match updater.runtime() {
                                     crate::updater::RuntimeEnvironment::AppImage { .. } => is_appimage,
                                     crate::updater::RuntimeEnvironment::DebPackage { .. } => is_deb,
+                                    crate::updater::RuntimeEnvironment::WindowsExe { .. } => asset.name.ends_with(".exe"),
                                     _ => false,
                                 };
 
@@ -5141,6 +5142,7 @@ pub fn render_ui(
                                 crate::updater::RuntimeEnvironment::DebPackage { .. } => t!("📦 Paket mit Software-Center öffnen / installieren"),
                                 crate::updater::RuntimeEnvironment::PortableOrDev { .. }
                                 | crate::updater::RuntimeEnvironment::Flatpak => t!("📂 Im Dateimanager anzeigen"),
+                                crate::updater::RuntimeEnvironment::WindowsExe { .. } => t!("🔄 Update installieren"),
                             };
 
                             ui.horizontal(|ui| {

@@ -994,21 +994,9 @@ fn copy_dir(from: &Path, to: &Path) -> io::Result<()> {
 
 /// Gibt das Standard-Verzeichnis für Notizbücher zurück (gemäß XDG-Spezifikation).
 pub fn default_storage_dir() -> PathBuf {
-    if let Ok(xdg) = std::env::var("XDG_DATA_HOME") {
-        if !xdg.is_empty() {
-            return PathBuf::from(xdg).join("ink-notes").join("notebooks");
-        }
-    }
-    if let Ok(home) = std::env::var("HOME") {
-        if !home.is_empty() {
-            return PathBuf::from(home)
-                .join(".local")
-                .join("share")
-                .join("ink-notes")
-                .join("notebooks");
-        }
-    }
-    PathBuf::from("./data/notebooks")
+    crate::paths::data_dir()
+        .map(|d| d.join("notebooks"))
+        .unwrap_or_else(|| PathBuf::from("./data/notebooks"))
 }
 
 /// Status eines Notizbuchs in der Dokumentenliste.
@@ -1130,7 +1118,11 @@ impl NotebookLock {
             }
             Err(e) => {
                 let kind = e.kind();
-                if kind == io::ErrorKind::WouldBlock || e.raw_os_error() == Some(11) {
+                // Windows reports a held lock as ERROR_LOCK_VIOLATION
+                if kind == io::ErrorKind::WouldBlock
+                    || e.raw_os_error() == Some(11)
+                    || e.raw_os_error() == fs2::lock_contended_error().raw_os_error()
+                {
                     Err(StorageError::AlreadyLocked(t!(
                         "Notizbuch '{path}' wird bereits von einer anderen Instanz verwendet",
                         path = notebook_dir.display()

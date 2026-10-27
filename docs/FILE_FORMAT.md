@@ -29,6 +29,8 @@ This document describes where and how ink-notes stores notebooks, and the versio
 ~/.config/ink-notes/ui.json            ($XDG_CONFIG_HOME) interface settings
 ```
 
+On Windows the same structure lies in `%APPDATA%\ink-notes` (notebooks, `recovery`, `ui.json`); downloaded updates go to `%LOCALAPPDATA%\ink-notes`.
+
 The folder `notebooks/` can be moved elsewhere in the settings (`storage_dir` in `ui.json`), e.g. to `~/Nextcloud/ink-notes`; `recovery/` stays where it is.
 
 - **Notebook IDs** are built from the title and the time (e.g. `mathematik_1775460000`); the first notebook is called `default`.

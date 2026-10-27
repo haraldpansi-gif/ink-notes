@@ -18,6 +18,7 @@ pub mod import;
 pub mod library;
 pub mod osk;
 pub mod page_export;
+pub mod paths;
 pub mod pdf_doc;
 pub mod pdf_merge;
 pub mod platform;
@@ -33,3 +34,36 @@ pub mod ui;
 pub mod updater;
 pub mod viewport;
 pub mod xopp;
+
+/// Entry point on Android (Issue #42), called by the native activity.
+///
+/// Builds with `cargo rustc --lib --crate-type cdylib --target aarch64-linux-android`. Not
+/// usable yet: the window surface still has to be created on `Resumed` and dropped on
+/// `Suspended`.
+#[cfg(target_os = "android")]
+#[no_mangle]
+fn android_main(app: winit::platform::android::activity::AndroidApp) {
+    use winit::platform::android::EventLoopBuilderExtAndroid;
+
+    android_logger::init_once(
+        android_logger::Config::default()
+            .with_max_level(log::LevelFilter::Info)
+            .with_tag("ink-notes"),
+    );
+    if let Some(dir) = app.internal_data_path() {
+        paths::set_app_dir(dir);
+    }
+    let event_loop = match winit::event_loop::EventLoopBuilder::new()
+        .with_android_app(app)
+        .build()
+    {
+        Ok(event_loop) => event_loop,
+        Err(err) => {
+            log::error!("event loop: {err}");
+            return;
+        }
+    };
+    if let Err(err) = app::run_with(event_loop) {
+        log::error!("{err}");
+    }
+}

@@ -258,13 +258,9 @@ impl Default for UiSettings {
 }
 
 impl UiSettings {
-    /// Standardpfad gemäß XDG-Spezifikation.
+    /// Standardpfad gemäß XDG-Spezifikation (see [`crate::paths`] for other systems).
     pub fn default_path() -> Option<PathBuf> {
-        let base = match std::env::var("XDG_CONFIG_HOME") {
-            Ok(dir) if !dir.trim().is_empty() => PathBuf::from(dir),
-            _ => PathBuf::from(std::env::var("HOME").ok()?).join(".config"),
-        };
-        Some(base.join("ink-notes").join("ui.json"))
+        crate::paths::config_dir().map(|d| d.join("ui.json"))
     }
 
     /// Lädt die Einstellungen; bei fehlender oder beschädigter Datei gelten Standardwerte.

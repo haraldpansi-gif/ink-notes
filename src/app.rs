@@ -3,6 +3,18 @@
 //! notebook persistence (autosave). Lives in the library so that other entry points (e.g.
 //! Android, Issue #42) can start it too.
 
+// On Android the pen state is unused until pen input arrives there (Issue #44)
+#![cfg_attr(
+    target_os = "android",
+    allow(
+        unused_mut,
+        unused_variables,
+        unused_assignments,
+        unused_imports,
+        dead_code
+    )
+)]
+
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Sender};
 use std::sync::Arc;
@@ -11,10 +23,8 @@ use winit::{
     event::{
         ElementState, Event, KeyEvent, MouseButton, MouseScrollDelta, TouchPhase, WindowEvent,
     },
-    event_loop::{ControlFlow, EventLoopBuilder},
+    event_loop::ControlFlow,
     keyboard::{Key, ModifiersState, NamedKey},
-    platform::{wayland::EventLoopBuilderExtWayland, x11::EventLoopBuilderExtX11},
-    raw_window_handle::{HasDisplayHandle, RawDisplayHandle},
     window::{Window, WindowBuilder},
 };
 
@@ -31,7 +41,7 @@ use crate::image_layer::TextureSource;
 use crate::library::Library;
 use crate::osk::{self, KeyboardRequester};
 use crate::pdf_doc::PdfRenderService;
-use crate::platform::{self, DisplayBackend};
+use crate::platform;
 use crate::selection::{
     render_selection_overlay, scale_factors, DragMode, SelectionHandleHit, SelectionState,
 };
@@ -163,6 +173,7 @@ fn activate_tool(tool: ActiveTool, ui_state: &mut UiState, canvas: &mut CanvasSt
 
 /// Kennung einer Stifttaste, die über Programmstarts hinweg gleich bleibt (die Tablet-
 /// Schnittstelle liefert nur eine undurchsichtige, aber vergleichbare Kennung).
+#[cfg(not(target_os = "android"))]
 fn stylus_button_key(id: &octotablet::tool::ButtonID) -> u64 {
     use std::hash::{Hash, Hasher};
     // DefaultHasher::new() verwendet feste Schlüssel: gleiche Taste, gleicher Wert
@@ -523,7 +534,7 @@ impl Drop for SlowEventLog {
 /// Zwischenablage: interne Objekte (Strg+C in ink-notes), Bilder aus der
 /// Systemzwischenablage (Screenshots, aus anderen Programmen kopierte Bilder) und Text.
 struct ClipboardBridge {
-    system: Option<arboard::Clipboard>,
+    system: Option<platform::clipboard::Clipboard>,
     /// Prüfsumme des Systembildes zum Zeitpunkt des letzten internen Kopierens: Strg+V fügt
     /// das Systembild nur ein, wenn es danach kopiert wurde (die jüngste Kopie gewinnt)
     image_hash_at_copy: Option<[u8; 32]>,
@@ -544,9 +555,9 @@ impl ClipboardBridge {
     }
 
     /// Bild in der Systemzwischenablage samt Prüfsumme.
-    fn system_image(&mut self) -> Option<(arboard::ImageData<'static>, [u8; 32])> {
+    fn system_image(&mut self) -> Option<(platform::clipboard::ImageData<'static>, [u8; 32])> {
         if self.system.is_none() {
-            self.system = arboard::Clipboard::new()
+            self.system = platform::clipboard::Clipboard::new()
                 .map_err(|e| eprintln!("[Zwischenablage] Nicht verfügbar: {e}"))
                 .ok();
         }
@@ -563,7 +574,7 @@ impl ClipboardBridge {
     /// Text in der Systemzwischenablage (nicht nur Leerraum).
     fn system_text(&mut self) -> Option<String> {
         if self.system.is_none() {
-            self.system = arboard::Clipboard::new().ok();
+            self.system = platform::clipboard::Clipboard::new().ok();
         }
         let text = self.system.as_mut()?.get_text().ok()?;
         (!text.trim().is_empty()).then_some(text)
@@ -596,12 +607,12 @@ impl ClipboardBridge {
             }
         };
         if self.system.is_none() {
-            self.system = arboard::Clipboard::new().ok();
+            self.system = platform::clipboard::Clipboard::new().ok();
         }
         let Some(system) = self.system.as_mut() else {
             return false;
         };
-        let data = arboard::ImageData {
+        let data = platform::clipboard::ImageData {
             width: image.width as usize,
             height: image.height as usize,
             bytes: std::borrow::Cow::Owned(image.pixels),
@@ -1252,7 +1263,16 @@ fn insert_image_file(
 }
 
 /// Runs the app until the window is closed (the desktop entry point is `src/main.rs`).
+#[cfg(not(target_os = "android"))]
 pub fn run() -> Result<(), Box<dyn std::error::Error>> {
+    // Anzeigesystem wählen: Unter WSL (WSLg) bricht Wayland ab, X11 (Xwayland) läuft stabil
+    run_with(platform::desktop_event_loop()?)
+}
+
+/// Runs the app on `event_loop` (desktop: [`run`], Android: `android_main` in `lib.rs`).
+pub fn run_with(
+    event_loop: winit::event_loop::EventLoop<()>,
+) -> Result<(), Box<dyn std::error::Error>> {
     // Gespeicherte UI-Einstellungen; zuerst, damit alle Texte in der gewählten Sprache sind
     let ui_settings_path = UiSettings::default_path();
     let mut ui_settings = ui_settings_path
@@ -1261,20 +1281,6 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_default();
     i18n::set_language(ui_settings.language.unwrap_or_else(Language::system));
 
-    // Anzeigesystem wählen: Unter WSL (WSLg) bricht Wayland ab, X11 (Xwayland) läuft stabil
-    let mut event_loop_builder = EventLoopBuilder::new();
-    match platform::display_backend_from_env() {
-        DisplayBackend::X11 => {
-            eprintln!("[Anzeige] Verwende X11 (unter WSL Standard; übersteuerbar mit INK_NOTES_DISPLAY=wayland)");
-            event_loop_builder.with_x11();
-        }
-        DisplayBackend::Wayland => {
-            eprintln!("[Anzeige] Verwende Wayland (INK_NOTES_DISPLAY=wayland)");
-            event_loop_builder.with_wayland();
-        }
-        DisplayBackend::Automatic => {}
-    }
-    let event_loop = event_loop_builder.build()?;
     // App-Kennung wie die .desktop-Datei (eu.pansi.ink-notes): Daran ordnen Dock und Taskleiste
     // das Fenster dem App-Symbol zu (Wayland: app_id, X11: WM_CLASS). Das Fenstersymbol selbst
     // nutzt nur X11.
@@ -1282,10 +1288,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         .with_title("ink-notes")
         .with_inner_size(winit::dpi::LogicalSize::new(1280.0, 850.0))
         .with_window_icon(app_icon());
-    let builder =
-        winit::platform::wayland::WindowBuilderExtWayland::with_name(builder, APP_ID, "ink-notes");
-    let builder =
-        winit::platform::x11::WindowBuilderExtX11::with_name(builder, APP_ID, "ink-notes");
+    let builder = platform::with_app_id(builder, APP_ID);
     let window = Arc::new(builder.build(&event_loop)?);
 
     let mut canvas = match pollster::block_on(CanvasState::new(window.clone())) {
@@ -1296,25 +1299,32 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    let mut tablet_manager = match octotablet::builder::Builder::default().build_shared(&window) {
-        Ok(mgr) => {
+    // Android has no octotablet: the pen arrives as touch events there (Issue #44).
+    // octotablet panics on Windows without the Tablet PC components (RealTimeStylus not
+    // registered); the app then runs with mouse and touch events only
+    #[cfg(not(target_os = "android"))]
+    let tablet_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        octotablet::builder::Builder::default().build_shared(&window)
+    }));
+    #[cfg(not(target_os = "android"))]
+    let mut tablet_manager = match tablet_result {
+        Ok(Ok(mgr)) => {
             println!("[Input] Octotablet Stylus-/Tablet-Manager erfolgreich initialisiert (Wayland/X11 Tablet-Protokoll aktiv).");
             Some(mgr)
         }
-        Err(err) => {
+        Ok(Err(err)) => {
             println!("[Input] Hinweis: Octotablet Tablet-Manager nicht aktiv ({err}). Nutze Standard-Event-Pipeline.");
+            None
+        }
+        Err(_) => {
+            println!("[Input] Hinweis: Octotablet Tablet-Manager abgestürzt. Nutze Standard-Event-Pipeline.");
             None
         }
     };
 
     // Bildschirmtastatur (nur Wayland): eigenes text-input-Objekt, siehe osk.rs
-    let mut keyboard_requester = match window.display_handle().map(|handle| handle.as_raw()) {
-        // Safety: `window` lebt bis zum Ende von main, die Event-Schleife besitzt beide
-        Ok(RawDisplayHandle::Wayland(handle)) => {
-            Some(unsafe { KeyboardRequester::new(handle.display.as_ptr()) })
-        }
-        _ => None,
-    };
+    // Safety: `window` lives until the end of run(), the event loop owns both
+    let mut keyboard_requester = unsafe { KeyboardRequester::for_window(&window) };
     let mut ime_was_active = false;
     let mut ime_composing = false;
 
@@ -1515,6 +1525,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     // that touch it while the pen is near, are ignored until they are lifted
     let mut palm_touch_ids: std::collections::HashSet<u64> = std::collections::HashSet::new();
     let mut stylus_left_at: Option<Instant> = None;
+    #[cfg(not(target_os = "android"))]
     let mut stylus_tool_id: Option<octotablet::tool::ID> = None;
     // Gedrückte Stifttaste (Kennung, Belegung) und das Werkzeug, das während eines Strichs mit
     // einer Werkzeug-Taste (Auswählen, Textmarker, Stift) vertreten wird
@@ -1695,7 +1706,10 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                 }
 
                 // Stylus-/Tablet-Events via Octotablet abfragen (Wayland/X11 Tablet-Protokoll für aktive Stifte wie Lazarite)
+                #[cfg(not(target_os = "android"))]
                 if let Some(ref mut mgr) = tablet_manager {
+                    // Infallible on Windows
+                    #[allow(irrefutable_let_patterns)]
                     if let Ok(tablet_events) = mgr.pump() {
                         let scale = window.scale_factor() as f32;
                         let now = start_time.elapsed().as_secs_f64();
@@ -1744,8 +1758,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                                     pinch_prev_distance = None;
                                     pinch_prev_center = None;
                                     stylus_left_at = None;
-                                    #[cfg(target_os = "linux")]
-                                    winit::platform::wayland::ignore_decoration_touches_until(Some(
+                                    platform::ignore_decoration_touches_until(Some(
                                         Instant::now() + Duration::from_secs(24 * 3600),
                                     ));
                                     window.request_redraw();
@@ -1760,8 +1773,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                                     | octotablet::events::ToolEvent::Removed => {
                                         if is_stylus_in_proximity {
                                             stylus_left_at = Some(Instant::now());
-                                            #[cfg(target_os = "linux")]
-                                            winit::platform::wayland::ignore_decoration_touches_until(Some(
+                                            platform::ignore_decoration_touches_until(Some(
                                                 Instant::now() + PALM_GRACE,
                                             ));
                                         }
@@ -3038,7 +3050,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                         let handled_at = Instant::now();
                         let event_time = match touch.phase {
                             TouchPhase::Cancelled => None,
-                            phase => winit::platform::wayland::take_touch_time(touch.id, phase),
+                            phase => platform::take_touch_time(touch.id, phase),
                         };
                         if let (TouchPhase::Started, Some(time)) = (touch.phase, event_time) {
                             touch_clock = Some((handled_at, time));
@@ -4139,6 +4151,8 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                                 UiAction::InstallOrOpenUpdate(path) => {
                                     if let Err(err) = updater.install_or_open(&path) {
                                         ui_state.set_export_message(t!("Update-Fehler: {err}", err = err));
+                                    } else if matches!(updater.runtime(), crate::updater::RuntimeEnvironment::WindowsExe { .. }) {
+                                        ui_state.set_export_message(t!("Update installiert – gilt ab dem nächsten Start"));
                                     } else {
                                         ui_state.set_export_message(t!("Update gestartet / geöffnet"));
                                     }

@@ -58,6 +58,69 @@ pub fn display_backend_from_env() -> DisplayBackend {
     )
 }
 
+/// Event loop for the desktop; on Linux with the display backend chosen above.
+#[cfg(not(target_os = "android"))]
+pub fn desktop_event_loop() -> Result<winit::event_loop::EventLoop<()>, winit::error::EventLoopError>
+{
+    #[allow(unused_mut)]
+    let mut builder = winit::event_loop::EventLoopBuilder::new();
+    #[cfg(target_os = "linux")]
+    {
+        use winit::platform::{wayland::EventLoopBuilderExtWayland, x11::EventLoopBuilderExtX11};
+        match display_backend_from_env() {
+            DisplayBackend::X11 => {
+                eprintln!("[Anzeige] Verwende X11 (unter WSL Standard; übersteuerbar mit INK_NOTES_DISPLAY=wayland)");
+                builder.with_x11();
+            }
+            DisplayBackend::Wayland => {
+                eprintln!("[Anzeige] Verwende Wayland (INK_NOTES_DISPLAY=wayland)");
+                builder.with_wayland();
+            }
+            DisplayBackend::Automatic => {}
+        }
+    }
+    builder.build()
+}
+
+/// Gives the window the app id (Wayland: app_id, X11: WM_CLASS), so that dock and task bar
+/// show the app icon for it.
+pub fn with_app_id(
+    builder: winit::window::WindowBuilder,
+    #[allow(unused_variables)] app_id: &str,
+) -> winit::window::WindowBuilder {
+    #[cfg(target_os = "linux")]
+    {
+        let builder = winit::platform::wayland::WindowBuilderExtWayland::with_name(
+            builder,
+            app_id,
+            "ink-notes",
+        );
+        winit::platform::x11::WindowBuilderExtX11::with_name(builder, app_id, "ink-notes")
+    }
+    #[cfg(not(target_os = "linux"))]
+    builder
+}
+
+/// Ignores touches on the client-side title bar until `until` (palm rejection while the pen
+/// is near; only Wayland draws its own title bar).
+pub fn ignore_decoration_touches_until(
+    #[allow(unused_variables)] until: Option<std::time::Instant>,
+) {
+    #[cfg(target_os = "linux")]
+    winit::platform::wayland::ignore_decoration_touches_until(until);
+}
+
+/// Time of a touch event as reported by the compositor (milliseconds, Wayland only).
+pub fn take_touch_time(
+    #[allow(unused_variables)] id: u64,
+    #[allow(unused_variables)] phase: winit::event::TouchPhase,
+) -> Option<u32> {
+    #[cfg(target_os = "linux")]
+    return winit::platform::wayland::take_touch_time(id, phase);
+    #[cfg(not(target_os = "linux"))]
+    None
+}
+
 /// Bringt die Ereignisse eines Tablet-Frames in eine brauchbare Reihenfolge: octotablet meldet
 /// das Aufsetzen des Stifts (`Down`) vor der Position desselben Frames (`Pose`). Bis dahin
 /// gälte noch die alte Position – kam der Stift schnell heran (Annähern und Aufsetzen im selben
@@ -89,6 +152,56 @@ pub fn down_after_pose<T>(
     }
     ordered.extend(deferred);
     ordered
+}
+
+/// System clipboard: arboard on the desktop; on Android not available yet (Issue #42).
+pub mod clipboard {
+    #[cfg(not(target_os = "android"))]
+    pub use arboard::{Clipboard, ImageData};
+
+    #[cfg(target_os = "android")]
+    pub use android::{Clipboard, ImageData};
+
+    #[cfg(target_os = "android")]
+    mod android {
+        use std::borrow::Cow;
+
+        pub struct ImageData<'a> {
+            pub width: usize,
+            pub height: usize,
+            pub bytes: Cow<'a, [u8]>,
+        }
+
+        impl ImageData<'_> {
+            pub fn to_owned_img(&self) -> ImageData<'static> {
+                ImageData {
+                    width: self.width,
+                    height: self.height,
+                    bytes: Cow::Owned(self.bytes.to_vec()),
+                }
+            }
+        }
+
+        pub struct Clipboard;
+
+        impl Clipboard {
+            pub fn new() -> Result<Self, &'static str> {
+                Err("not available on Android")
+            }
+
+            pub fn get_image(&mut self) -> Result<ImageData<'static>, &'static str> {
+                Err("not available on Android")
+            }
+
+            pub fn get_text(&mut self) -> Result<String, &'static str> {
+                Err("not available on Android")
+            }
+
+            pub fn set_image(&mut self, _image: ImageData) -> Result<(), &'static str> {
+                Err("not available on Android")
+            }
+        }
+    }
 }
 
 #[cfg(test)]

@@ -38,11 +38,9 @@ semver = "1.0"
 sha2 = "0.10"
 ureq = { version = "2.10", default-features = false, features = ["tls", "gzip", "json"] }
 url = "2.5"
-octotablet = "0.1.0"
 
 # Bilder einfügen: Dekodieren (PNG/JPEG/GIF/WebP/BMP) und Systemzwischenablage
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
-arboard = { version = "3", default-features = false, features = ["image-data"] }
 minisign-verify = "0.3.0"
 fs2 = "0.4"
 hayro = "0.8"
@@ -58,10 +56,32 @@ resvg = { version = "0.49", default-features = false, features = ["raster-images
 # Text-Werkzeug: Schriftmetriken und Rasterung (Schriften aus egui)
 ab_glyph = "0.2"
 
+# Pen input with pressure on Linux (Wayland/X11) and Windows (Windows Ink)
+[target.'cfg(not(target_os = "android"))'.dependencies]
+octotablet = "0.1.0"
+# Systemzwischenablage (Bilder und Text)
+arboard = { version = "3", default-features = false, features = ["image-data"] }
+
 # Bildschirmtastatur unter Wayland anfordern (eigenes text-input-Objekt, siehe src/osk.rs)
+[target.'cfg(target_os = "linux")'.dependencies]
 wayland-client = "0.31"
 wayland-backend = { version = "0.3", features = ["client_system"] }
 wayland-protocols = { version = "0.31", features = ["client", "unstable"] }
+
+# Android (Issue #42): winit bound to the native activity. The library is built as
+# cdylib with `cargo rustc --lib --crate-type cdylib --target aarch64-linux-android`
+[target.'cfg(target_os = "android")'.dependencies]
+winit = { version = "0.29", features = ["rwh_06", "android-native-activity"] }
+android_logger = { version = "0.13", default-features = false }
+log = "0.4"
+
+[package.metadata.android]
+package = "eu.pansi.inknotes"
+apk_name = "ink-notes"
+
+[package.metadata.android.sdk]
+min_sdk_version = 26
+target_sdk_version = 34
 
 [profile.dev]
 opt-level = 1 # Erhöht Rendering-Performance auch im Debug-Modus

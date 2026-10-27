@@ -690,21 +690,9 @@ impl AutosaveController {
 
 /// Liefert das Verzeichnis für Notfall-Wiederherstellungsdateien ($XDG_DATA_HOME/ink-notes/recovery).
 pub fn recovery_dir() -> PathBuf {
-    if let Ok(xdg) = std::env::var("XDG_DATA_HOME") {
-        if !xdg.is_empty() {
-            return PathBuf::from(xdg).join("ink-notes").join("recovery");
-        }
-    }
-    if let Ok(home) = std::env::var("HOME") {
-        if !home.is_empty() {
-            return PathBuf::from(home)
-                .join(".local")
-                .join("share")
-                .join("ink-notes")
-                .join("recovery");
-        }
-    }
-    PathBuf::from(".").join(".recovery")
+    crate::paths::data_dir()
+        .map(|d| d.join("recovery"))
+        .unwrap_or_else(|| PathBuf::from(".").join(".recovery"))
 }
 
 impl Drop for AutosaveController {

@@ -121,6 +121,8 @@ pub enum RuntimeEnvironment {
     /// Als Flatpak installiert: Updates kommen über die Software-Verwaltung, ink-notes lädt
     /// selbst nichts herunter (Vorgabe von Flathub)
     Flatpak,
+    /// Portable `.exe` on Windows (Issue #48), replaced in place like the AppImage
+    WindowsExe { exe_path: PathBuf },
 }
 
 impl RuntimeEnvironment {
@@ -132,8 +134,13 @@ impl RuntimeEnvironment {
         ) {
             return RuntimeEnvironment::Flatpak;
         }
-        let appimage_var = std::env::var("APPIMAGE").ok();
         let current_exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("ink-notes"));
+        if cfg!(windows) {
+            return RuntimeEnvironment::WindowsExe {
+                exe_path: current_exe,
+            };
+        }
+        let appimage_var = std::env::var("APPIMAGE").ok();
         Self::detect_from(appimage_var.as_deref(), &current_exe)
     }
 
@@ -166,6 +173,7 @@ impl RuntimeEnvironment {
             RuntimeEnvironment::DebPackage { .. } => t!("System-Paket (.deb)"),
             RuntimeEnvironment::PortableOrDev { .. } => t!("Entwicklung / Lokal"),
             RuntimeEnvironment::Flatpak => "Flatpak",
+            RuntimeEnvironment::WindowsExe { .. } => "Windows",
         }
     }
 
@@ -210,18 +218,9 @@ pub fn sanitize_asset_name(raw_name: &str) -> Result<String, String> {
 
 /// Liefert das isolierte Cache-Verzeichnis für Downloads pro Nutzer mit Rechten 0700.
 pub fn get_updates_cache_dir() -> Result<PathBuf, String> {
-    let base = if let Ok(xdg) = std::env::var("XDG_CACHE_HOME") {
-        let trimmed = xdg.trim();
-        if !trimmed.is_empty() {
-            PathBuf::from(trimmed)
-        } else {
-            default_user_cache_dir()?
-        }
-    } else {
-        default_user_cache_dir()?
-    };
-
-    let dir = base.join("ink-notes").join("updates");
+    let dir = crate::paths::cache_dir()
+        .ok_or_else(|| t!("HOME-Umgebungsvariable ist nicht gesetzt.").to_string())?
+        .join("updates");
     std::fs::create_dir_all(&dir).map_err(|e| {
         t!(
             "Konnte Update-Cache-Verzeichnis nicht anlegen ({path}): {e}",
@@ -237,12 +236,6 @@ pub fn get_updates_cache_dir() -> Result<PathBuf, String> {
     }
 
     Ok(dir)
-}
-
-fn default_user_cache_dir() -> Result<PathBuf, String> {
-    let home = std::env::var("HOME")
-        .map_err(|_| t!("HOME-Umgebungsvariable ist nicht gesetzt.").to_string())?;
-    Ok(PathBuf::from(home).join(".cache"))
 }
 
 /// Löscht alte temporäre Downloads aus dem Cache-Verzeichnis.
@@ -549,6 +542,48 @@ fn http_get_with_auth_guard(
     }
 
     Err(t!("Zu viele Weiterleitungen (Redirect-Schleife abgebrochen).").to_string())
+}
+
+/// Replaces the running `.exe` with the downloaded one (Windows). A running program can't be
+/// overwritten but can be renamed: the old one becomes `<name>.bak`, the new one takes its
+/// place and starts with the next launch.
+pub fn replace_running_exe(downloaded: &Path, exe_path: &Path) -> Result<(), String> {
+    let file_name = exe_path
+        .file_name()
+        .ok_or_else(|| t!("Ungültiger Programmpfad.").to_string())?
+        .to_string_lossy()
+        .into_owned();
+    let dir = exe_path
+        .parent()
+        .ok_or_else(|| t!("Ungültiger Programmpfad.").to_string())?;
+    let new_file = dir.join(format!("{file_name}.new"));
+    let backup = dir.join(format!("{file_name}.bak"));
+
+    std::fs::copy(downloaded, &new_file).map_err(|e| {
+        let _ = std::fs::remove_file(&new_file);
+        t!("Konnte temporäre Update-Datei nicht schreiben: {e}", e = e)
+    })?;
+    // A backup of an earlier update is no longer running
+    let _ = std::fs::remove_file(&backup);
+    if let Err(e) = std::fs::rename(exe_path, &backup) {
+        let _ = std::fs::remove_file(&new_file);
+        return Err(t!(
+            "Konnte Backup ({path}) nicht anlegen: {e}. Update abgebrochen, altes Programm unverändert.",
+            path = backup.display(),
+            e = e
+        ));
+    }
+    if let Err(e) = std::fs::rename(&new_file, exe_path) {
+        // Put the old program back
+        let _ = std::fs::rename(&backup, exe_path);
+        let _ = std::fs::remove_file(&new_file);
+        return Err(t!(
+            "Konnte Programm nicht ersetzen: {e}. Altes Programm bleibt unverändert.",
+            e = e
+        ));
+    }
+    let _ = std::fs::remove_file(downloaded);
+    Ok(())
 }
 
 /// Asynchroner Controller für Update-Prüfung und Asset-Download.
@@ -915,6 +950,7 @@ impl UpdaterController {
                 "Die Flatpak-Version wird über die Software-Verwaltung aktualisiert."
             )
             .to_string()),
+            RuntimeEnvironment::WindowsExe { exe_path } => replace_running_exe(file_path, exe_path),
         }
     }
 
@@ -1099,6 +1135,31 @@ dcdeb7ac87d9e6cb8022e5a71bc7f2c56d779b4fce4efdd5bae5be3b0214884a  ink-notes_0.1.
             RuntimeEnvironment::PortableOrDev {
                 binary_path: PathBuf::from("/home/user/ink-notes/target/release/ink-notes")
             }
+        );
+    }
+
+    #[test]
+    fn test_replace_running_exe() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join("ink-notes.exe");
+        let downloaded = dir.path().join("ink-notes_9.9.9_x86_64.exe");
+        std::fs::write(&exe, b"old").unwrap();
+        std::fs::write(&downloaded, b"new").unwrap();
+        replace_running_exe(&downloaded, &exe).unwrap();
+        assert_eq!(std::fs::read(&exe).unwrap(), b"new");
+        assert_eq!(
+            std::fs::read(dir.path().join("ink-notes.exe.bak")).unwrap(),
+            b"old"
+        );
+        assert!(!downloaded.exists());
+
+        // Again: the backup of the first update is replaced
+        std::fs::write(&downloaded, b"newer").unwrap();
+        replace_running_exe(&downloaded, &exe).unwrap();
+        assert_eq!(std::fs::read(&exe).unwrap(), b"newer");
+        assert_eq!(
+            std::fs::read(dir.path().join("ink-notes.exe.bak")).unwrap(),
+            b"new"
         );
     }
 

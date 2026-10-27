@@ -140,7 +140,7 @@ pub fn list_dir(dir: &Path, kind: PickerKind) -> std::io::Result<Vec<PickerEntry
 /// mit den Ordnern aus `~/.config/user-dirs.dirs` (z. B. „Bilder“ statt „Pictures“). Die
 /// Bezeichnungen sind deutsch, angezeigt werden sie mit `i18n::tr`.
 pub fn shortcuts() -> Vec<(&'static str, PathBuf)> {
-    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+    let Some(home) = crate::paths::home_dir() else {
         return Vec::new();
     };
     let user_dirs =
@@ -162,6 +162,30 @@ pub fn shortcuts() -> Vec<(&'static str, PathBuf)> {
         list.push((tn!("🖥 Schreibtisch"), p));
     }
     list.push((tn!("🏠 Persönlicher Ordner"), home));
+    // Drives (Windows has no single root)
+    #[cfg(windows)]
+    {
+        const DRIVES: [&str; 24] = [
+            "💽 C:", "💽 D:", "💽 E:", "💽 F:", "💽 G:", "💽 H:", "💽 I:", "💽 J:", "💽 K:",
+            "💽 L:", "💽 M:", "💽 N:", "💽 O:", "💽 P:", "💽 Q:", "💽 R:", "💽 S:", "💽 T:",
+            "💽 U:", "💽 V:", "💽 W:", "💽 X:", "💽 Y:", "💽 Z:",
+        ];
+        // Looked up once: a disconnected network drive can take seconds to answer
+        static FOUND: std::sync::OnceLock<Vec<(&str, PathBuf)>> = std::sync::OnceLock::new();
+        let found = FOUND.get_or_init(|| {
+            DRIVES
+                .iter()
+                .map(|label| {
+                    (
+                        *label,
+                        PathBuf::from(format!("{}\\", &label[label.len() - 2..])),
+                    )
+                })
+                .filter(|(_, root)| root.is_dir())
+                .collect()
+        });
+        list.extend(found.iter().cloned());
+    }
     list
 }
 
@@ -254,6 +278,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn test_parse_user_dirs() {
         let home = Path::new("/home/anna");
         let content = "# Kommentar\nXDG_DESKTOP_DIR=\"$HOME/Schreibtisch\"\nXDG_PICTURES_DIR=\"$HOME/Bilder\"\nXDG_MUSIC_DIR=\"/daten/Musik\"\n";

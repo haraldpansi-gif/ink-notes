@@ -13,7 +13,7 @@
 
 ink-notes speichert Handschrift als Vektoren, erkennt auf Wunsch Formen, kann PDFs zum Beschriften sowie Notizbücher aus Xournal++, Rnote und Saber importieren, Bilder und Textfelder einfügen und alles wieder als PDF, PNG oder SVG exportieren. Gespeichert wird automatisch im Hintergrund.
 
-Getestet wird vor allem unter Zorin OS 18 / Ubuntu 24.04 (Wayland und X11).
+Getestet wird vor allem unter Zorin OS 18 / Ubuntu 24.04 (Wayland und X11). Eine Windows-Version gibt es als experimentelles portables Programm.
 
 Die Oberfläche gibt es auf Deutsch und Englisch; ink-notes folgt der Systemsprache, umstellen lässt sie sich im ☰-Menü unter „Sprache / Language“.
 
@@ -87,7 +87,7 @@ Die Oberfläche gibt es auf Deutsch und Englisch; ink-notes folgt der Systemspra
 
 ## Installation
 
-Pakete gibt es unter [Releases](https://gitea.pansi.eu/harald/ink-notes/releases) als `.deb` und `.AppImage` (x86_64). `<version>` steht für die Versionsnummer, z. B. `0.11.0`.
+Pakete gibt es unter [Releases](https://gitea.pansi.eu/harald/ink-notes/releases) als `.deb`, `.AppImage` und für Windows als `.exe` (x86_64). `<version>` steht für die Versionsnummer, z. B. `0.11.0`.
 
 ```bash
 # Debian-Paket (Zorin OS 18 / Ubuntu 24.04)
@@ -101,6 +101,8 @@ chmod +x ink-notes_<version>_x86_64.AppImage
 Hinweise:
 - Benötigt `glibc >= 2.39` (Ubuntu 24.04, Zorin OS 18) und einen Grafiktreiber mit Vulkan oder OpenGL.
 - Meldet das AppImage einen Fehler zu `libfuse.so.2`, entweder `sudo apt install libfuse2t64` installieren oder mit `--appimage-extract-and-run` starten.
+
+**Windows (experimentell):** `ink-notes_<version>_x86_64.exe` ist ein portables Programm für Windows 10/11 – ohne Installation einfach starten (Windows SmartScreen fragt evtl. einmal nach, da das Programm nicht signiert ist). Stifteingabe mit Druck läuft über Windows Ink (noch nicht auf echter Hardware getestet). Notizbücher und Einstellungen liegen in `%APPDATA%\ink-notes`. Updates ersetzen die `.exe` an Ort und Stelle und gelten ab dem nächsten Start.
 
 ---
 
@@ -152,6 +154,10 @@ cargo test                   # Unit- und Integrationstests
 
 Die CI prüft zusätzlich `cargo fmt --check` und `cargo clippy --all-targets -- -D warnings`.
 
+Andere Systeme:
+- **Windows** wird unter Linux übersetzt: `scripts/package-windows.sh` (braucht `gcc-mingw-w64-x86-64`); die Tests laufen mit `wine` als Runner (`CARGO_TARGET_X86_64_PC_WINDOWS_GNU_RUNNER=wine cargo test --target x86_64-pc-windows-gnu`).
+- **Android** (in Arbeit, Issue #42): `cargo check --target aarch64-linux-android` und `cargo rustc --lib --crate-type cdylib --target aarch64-linux-android` mit dem NDK-Compiler in `CC_aarch64_linux_android`. Dort startet die App noch nicht: Die Fensterfläche muss erst dem Lebenszyklus der Activity folgen.
+
 ### Projektstruktur
 
 ```text
@@ -187,7 +193,8 @@ src/
 ├── page_export.rs  # Seite als PNG/SVG, Auswahl als Bild
 ├── file_picker.rs  # Eingebaute Dateiauswahl
 ├── settings.rs     # Einstellungen (~/.config/ink-notes/ui.json)
-├── platform.rs     # Wayland/X11-Erkennung
+├── platform.rs     # Wayland/X11-Erkennung, Unterschiede zwischen Linux, Windows und Android
+├── paths.rs        # Ordner für Daten, Einstellungen und Downloads je System
 ├── updater.rs      # Updates von Gitea (Signatur- und Prüfsummenprüfung)
 └── ui.rs           # Oberfläche (egui): Werkzeugleiste, Menüs, Dialoge
 ```

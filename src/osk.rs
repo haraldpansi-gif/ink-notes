@@ -12,21 +12,29 @@
 //! ohnehin nicht aus. Daher meldet das eigene Objekt einen Platzhalter als Umgebungstext und
 //! übersetzt die Löschwünsche in Tastendrücke (Rücktaste/Entf) für egui.
 
-use std::ffi::c_void;
+#[cfg(target_os = "linux")]
+mod wayland;
+#[cfg(target_os = "linux")]
+pub use wayland::KeyboardRequester;
 
-use wayland_client::{
-    delegate_noop,
-    protocol::{wl_registry, wl_seat},
-    Connection, Dispatch, EventQueue, QueueHandle,
-};
-use wayland_protocols::wp::text_input::zv3::client::{
-    zwp_text_input_manager_v3::ZwpTextInputManagerV3,
-    zwp_text_input_v3::{self, ZwpTextInputV3},
-};
+/// Elsewhere the system shows the on-screen keyboard by itself; nothing to request.
+#[cfg(not(target_os = "linux"))]
+pub struct KeyboardRequester;
 
-/// Platzhalter-Umgebungstext: ein Zeichen vor der Schreibmarke, damit die Rücktaste der
-/// Bildschirmtastatur immer etwas zu löschen hat (ein Byte = ein Zeichen)
-const SURROUNDING_PLACEHOLDER: &str = " ";
+#[cfg(not(target_os = "linux"))]
+impl KeyboardRequester {
+    /// # Safety
+    /// Nothing to uphold; `unsafe` like the Wayland version.
+    pub unsafe fn for_window(_window: &winit::window::Window) -> Option<Self> {
+        None
+    }
+
+    pub fn request(&mut self) {}
+
+    pub fn take_deletions(&mut self) -> Vec<egui::Event> {
+        Vec::new()
+    }
+}
 
 /// Wandelt Texteingaben ohne Vorschau (Preedit) in normale Texteingaben um.
 ///
@@ -72,135 +80,6 @@ pub fn deletion_key_events(back: u32, forward: u32) -> Vec<egui::Event> {
 /// zugeklappt wurde).
 pub fn should_request(was_active: bool, active: bool, pressed: bool) -> bool {
     active && (!was_active || pressed)
-}
-
-#[derive(Default)]
-struct State {
-    seat: Option<wl_seat::WlSeat>,
-    manager: Option<ZwpTextInputManagerV3>,
-    text_input: Option<ZwpTextInputV3>,
-    /// Von der Bildschirmtastatur gewünschtes Löschen (Zeichen vor/nach der Schreibmarke)
-    delete_back: u32,
-    delete_forward: u32,
-}
-
-/// Eigenes text-input-Objekt, mit dem ink-notes die Bildschirmtastatur anfordert
-pub struct KeyboardRequester {
-    conn: Connection,
-    queue: EventQueue<State>,
-    state: State,
-}
-
-impl KeyboardRequester {
-    /// Hängt sich an die Wayland-Verbindung des Fensters.
-    ///
-    /// # Safety
-    /// `wl_display` muss auf die `wl_display` des Fensters zeigen und gültig bleiben, solange
-    /// der `KeyboardRequester` lebt.
-    pub unsafe fn new(wl_display: *mut c_void) -> Self {
-        // Safety: an den Aufrufer weitergereicht
-        let backend =
-            unsafe { wayland_backend::client::Backend::from_foreign_display(wl_display.cast()) };
-        let conn = Connection::from_backend(backend);
-        let queue = conn.new_event_queue();
-        conn.display().get_registry(&queue.handle(), ());
-        let _ = conn.flush();
-        Self {
-            conn,
-            queue,
-            state: State::default(),
-        }
-    }
-
-    /// Verarbeitet eingetroffene Ereignisse; einmal pro Frame aufrufen.
-    pub fn pump(&mut self) {
-        let _ = self.queue.dispatch_pending(&mut self.state);
-        if self.state.text_input.is_none() {
-            if let (Some(manager), Some(seat)) = (&self.state.manager, &self.state.seat) {
-                self.state.text_input =
-                    Some(manager.get_text_input(seat, &self.queue.handle(), ()));
-            }
-        }
-    }
-
-    /// Bittet den Compositor, die Bildschirmtastatur einzublenden. Muss nach dem `enable` von
-    /// winit kommen (also nach `handle_platform_output`).
-    pub fn request(&mut self) {
-        self.pump();
-        if let Some(text_input) = &self.state.text_input {
-            text_input.enable();
-            self.send_surrounding_placeholder();
-        }
-    }
-
-    /// Tastendrücke für das seit dem letzten Aufruf gewünschte Löschen (vor `begin_frame`
-    /// aufrufen und an die egui-Eingabe anhängen)
-    pub fn take_deletions(&mut self) -> Vec<egui::Event> {
-        self.pump();
-        // Den Platzhalter hier nicht neu melden: Die Tastatur löscht bei jeder neuen Meldung
-        // erneut, solange die Rücktaste gedrückt ist – ein kurzes Antippen löschte sonst doppelt.
-        let back = std::mem::take(&mut self.state.delete_back);
-        let forward = std::mem::take(&mut self.state.delete_forward);
-        deletion_key_events(back, forward)
-    }
-
-    fn send_surrounding_placeholder(&self) {
-        if let Some(text_input) = &self.state.text_input {
-            let len = SURROUNDING_PLACEHOLDER.len() as i32;
-            text_input.set_surrounding_text(SURROUNDING_PLACEHOLDER.to_owned(), len, len);
-            text_input.commit();
-            let _ = self.conn.flush();
-        }
-    }
-}
-
-impl Dispatch<wl_registry::WlRegistry, ()> for State {
-    fn event(
-        state: &mut Self,
-        registry: &wl_registry::WlRegistry,
-        event: wl_registry::Event,
-        _: &(),
-        _: &Connection,
-        qh: &QueueHandle<Self>,
-    ) {
-        if let wl_registry::Event::Global {
-            name, interface, ..
-        } = event
-        {
-            match interface.as_str() {
-                "wl_seat" if state.seat.is_none() => {
-                    state.seat = Some(registry.bind(name, 1, qh, ()));
-                }
-                "zwp_text_input_manager_v3" if state.manager.is_none() => {
-                    state.manager = Some(registry.bind(name, 1, qh, ()));
-                }
-                _ => {}
-            }
-        }
-    }
-}
-
-delegate_noop!(State: ignore wl_seat::WlSeat);
-delegate_noop!(State: ZwpTextInputManagerV3);
-impl Dispatch<ZwpTextInputV3, ()> for State {
-    fn event(
-        state: &mut Self,
-        _: &ZwpTextInputV3,
-        event: zwp_text_input_v3::Event,
-        _: &(),
-        _: &Connection,
-        _: &QueueHandle<Self>,
-    ) {
-        // Getippter Text kommt über winit; hier nur das Löschen
-        if let zwp_text_input_v3::Event::DeleteSurroundingText {
-            before_length,
-            after_length,
-        } = event
-        {
-            state.delete_back += before_length;
-            state.delete_forward += after_length;
-        }
-    }
 }
 
 #[cfg(test)]

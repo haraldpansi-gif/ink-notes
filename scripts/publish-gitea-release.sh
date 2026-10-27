@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # Veröffentlicht ein Release auf dem Gitea-Server (gitea.pansi.eu)
-# Lädt .deb, .AppImage, SHA256SUMS.txt und SHA256SUMS.txt.minisig idempotent als Release-Assets hoch.
+# Lädt .deb, .AppImage, .exe, SHA256SUMS.txt und SHA256SUMS.txt.minisig idempotent als Release-Assets hoch.
 # ==============================================================================
 set -euo pipefail
 
@@ -32,6 +32,7 @@ RELEASE_TITLE="ink-notes ${TAG_NAME}"
 
 DEB_FILE="${ROOT_DIR}/target/ink-notes_${VERSION}_amd64.deb"
 APPIMAGE_FILE="${ROOT_DIR}/target/ink-notes_${VERSION}_x86_64.AppImage"
+EXE_FILE="${ROOT_DIR}/target/ink-notes_${VERSION}_x86_64.exe"
 CHECKSUMS_FILE="${ROOT_DIR}/target/SHA256SUMS.txt"
 SIGNATURE_FILE="${CHECKSUMS_FILE}.minisig"
 TEMPLATE_FILE="${ROOT_DIR}/packaging/release-notes.md.tmpl"
@@ -42,7 +43,7 @@ if [ ! -f "${TEMPLATE_FILE}" ]; then
 fi
 
 # Sicherstellen, dass die Artefakte existieren
-if [ ! -f "${DEB_FILE}" ] || [ ! -f "${APPIMAGE_FILE}" ] || [ ! -f "${CHECKSUMS_FILE}" ]; then
+if [ ! -f "${DEB_FILE}" ] || [ ! -f "${APPIMAGE_FILE}" ] || [ ! -f "${EXE_FILE}" ] || [ ! -f "${CHECKSUMS_FILE}" ]; then
     echo "Artefakte nicht vollständig gefunden. Führe build-release.sh aus..."
     "${SCRIPT_DIR}/build-release.sh"
 fi
@@ -236,6 +237,7 @@ except Exception:
 
 upload_asset "${DEB_FILE}"
 upload_asset "${APPIMAGE_FILE}"
+upload_asset "${EXE_FILE}"
 upload_asset "${CHECKSUMS_FILE}"
 upload_asset "${SIGNATURE_FILE}"
 
