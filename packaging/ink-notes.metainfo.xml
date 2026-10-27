@@ -84,6 +84,11 @@
   </branding>
   <content_rating type="oars-1.1" />
   <releases>
+    <release version="0.39.1" date="2026-10-27">
+      <description>
+        <p>Windows: the mouse works again; Windows Ink no longer reports it as a pen.</p>
+      </description>
+    </release>
     <release version="0.39.0" date="2026-10-27">
       <description>
         <p>First experimental Windows version as a portable program. Internal groundwork for Android; nothing changes on Linux.</p>

@@ -3,6 +3,7 @@
 Notebook app for pen, touch and mouse on Linux (tested on Zorin OS 18 / Ubuntu 24.04).
 
 ### Highlights:
+- **Windows mouse fix**: The mouse works normally again in the Windows version – Windows Ink reported it as a pen, so clicks and moves went the wrong way. Nothing changes on Linux
 - **Windows (experimental)**: `ink-notes_<version>_x86_64.exe` is a portable program for Windows 10/11 – just start it, no installation. Notebooks and settings are stored in `%APPDATA%\ink-notes`, pen input uses Windows Ink, updates replace the `.exe` and take effect at the next start. Not yet tested on real tablet hardware – feedback welcome. Nothing changes on Linux; internally the groundwork for an Android version was laid
 - **Sync between devices**: ☰ → Storage location puts the notebooks into a folder synced by Nextcloud, Google Drive, Syncthing or Dropbox (existing notebooks are copied, the originals stay). Changes from other devices show up within seconds while everything local is saved, conflict copies of the sync client become pages of their own, and opening a notebook that is open on another device shows a warning
 - **Import from Saber**: ☰ → Import (or dragging the file into the window) now also opens Saber notebooks (`.sbn2` with its asset files next to it, `.sba` archives, old `.sbn`) – strokes with pen pressure, highlighters, shapes, typed text, images and PDF backgrounds
