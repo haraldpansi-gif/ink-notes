@@ -1,0 +1,25 @@
+# Build environment for the Android APK (Issue #45): fixed versions of the JDK, Android SDK,
+# NDK and Rust, so that the APK can be built the same way anywhere.
+# Used by scripts/build-apk-container.sh (podman or docker).
+FROM docker.io/library/ubuntu:24.04
+
+ARG RUST_VERSION=1.99.0
+
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        ca-certificates curl unzip zip openjdk-17-jdk-headless build-essential pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV ANDROID_HOME=/opt/android-sdk \
+    RUSTUP_HOME=/opt/rustup \
+    CARGO_HOME=/opt/cargo \
+    PATH=/opt/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+COPY scripts/setup-android-sdk.sh /tmp/setup-android-sdk.sh
+RUN /tmp/setup-android-sdk.sh && rm /tmp/setup-android-sdk.sh
+
+RUN curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal \
+        --default-toolchain "${RUST_VERSION}" --target aarch64-linux-android \
+    && chmod -R a+rwX /opt/cargo /opt/rustup
+
+WORKDIR /src

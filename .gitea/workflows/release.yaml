@@ -79,3 +79,60 @@ jobs:
           GITEA_SERVER: ${{ github.server_url }}
           REPO_OWNER: ${{ github.repository_owner }}
           REPO_NAME: ${{ github.event.repository.name }}
+
+  android:
+    # Experimental (Issue #45): builds the APK and keeps it as a workflow artifact. It is not
+    # part of the release yet, and a failure here does not stop the release above.
+    name: Android APK (experimental)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4.2.2
+
+      - name: Install JDK and Tools
+        run: |
+          export DEBIAN_FRONTEND=noninteractive
+          SUDO=""
+          if [ "$(id -u)" -ne 0 ] && command -v sudo >/dev/null 2>&1; then
+            SUDO="sudo"
+          fi
+          $SUDO apt-get update -y
+          $SUDO apt-get install -y --no-install-recommends \
+            openjdk-17-jdk-headless build-essential pkg-config curl unzip zip
+
+      - name: Setup Rust Toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1.11.0
+        with:
+          toolchain: stable
+          target: aarch64-linux-android
+          cache: true
+          rustflags: ""
+
+      - name: Cache Android SDK
+        uses: actions/cache@v4.2.3
+        with:
+          path: ~/android-sdk
+          key: android-sdk-${{ hashFiles('scripts/setup-android-sdk.sh') }}
+
+      - name: Install Android SDK and NDK
+        run: ./scripts/setup-android-sdk.sh
+
+      - name: Build APK
+        run: |
+          if [ -n "${ANDROID_KEYSTORE_B64}" ]; then
+            KEYSTORE="${RUNNER_TEMP:-/tmp}/release.keystore"
+            printf '%s' "${ANDROID_KEYSTORE_B64}" | base64 -d > "${KEYSTORE}"
+            export ANDROID_KEYSTORE="${KEYSTORE}"
+          fi
+          ./scripts/package-android.sh
+        env:
+          ANDROID_KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
+          ANDROID_KEYSTORE_PASS: ${{ secrets.ANDROID_KEYSTORE_PASS }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+
+      - name: Keep APK as Artifact
+        uses: actions/upload-artifact@v4.6.2
+        with:
+          name: ink-notes-android-apk
+          path: target/ink-notes_*_arm64.apk
