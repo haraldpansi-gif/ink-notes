@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- Manifest of the Android app (Issue #42). scripts/package-android.sh fills in the version.
-     NativeActivity loads libink_notes.so, whose android_main runs the app. -->
+     InkActivity (packaging/android/java) extends NativeActivity, which loads libink_notes.so;
+     its android_main runs the app. -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="eu.pansi.inknotes"
     android:versionCode="@VERSION_CODE@"
@@ -11,13 +12,13 @@
     <application
         android:label="ink-notes"
         android:icon="@mipmap/ic_launcher"
-        android:hasCode="false"
+        android:hasCode="true"
         android:extractNativeLibs="true"
         android:theme="@android:style/Theme.Material.Light.NoActionBar">
         <!-- configChanges: rotating the tablet or attaching a keyboard must not restart the
              activity; the app adapts to the new window size itself -->
         <activity
-            android:name="android.app.NativeActivity"
+            android:name="eu.pansi.inknotes.InkActivity"
             android:exported="true"
             android:launchMode="singleTask"
             android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboard|keyboardHidden|navigation|density|uiMode|fontScale|locale|layoutDirection">

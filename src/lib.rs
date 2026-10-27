@@ -1,5 +1,7 @@
 //! ink-notes: Latenzoptimierte Inking-App für Linux.
 
+#[cfg(target_os = "android")]
+pub mod android_bridge;
 pub mod app;
 pub mod assets;
 pub mod autosave;

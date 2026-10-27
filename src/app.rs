@@ -1664,6 +1664,10 @@ pub fn run_with(
                 window.request_redraw();
             }
             Event::AboutToWait => {
+                #[cfg(target_os = "android")]
+                if crate::android_bridge::has_messages() {
+                    window.request_redraw();
+                }
                 let prev_status = autosave.status();
                 let new_status = autosave.update();
                 if new_status != prev_status {
@@ -4036,6 +4040,13 @@ pub fn run_with(
                         osk::plain_ime_commits_to_text(&mut raw_input.events, &mut ime_composing);
                         if let Some(requester) = keyboard_requester.as_mut() {
                             raw_input.events.extend(requester.take_deletions());
+                        }
+                        // Android: text from the keyboard and files from the system dialog
+                        #[cfg(target_os = "android")]
+                        {
+                            let (events, actions) = crate::android_bridge::take_messages();
+                            raw_input.events.extend(events);
+                            ui_state.queued_actions.extend(actions);
                         }
                         egui_ctx.begin_frame(raw_input);
 

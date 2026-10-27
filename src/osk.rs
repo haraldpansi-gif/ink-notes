@@ -17,30 +17,29 @@ mod wayland;
 #[cfg(target_os = "linux")]
 pub use wayland::KeyboardRequester;
 
-/// Android: NativeActivity shows the soft keyboard only when asked to (Issue #42). The typed
-/// characters arrive as key events. Characters the keyboard can't send as key events (e.g.
-/// umlauts chosen by long press, which it commits as text) don't arrive.
+/// Android: the soft keyboard is shown only when asked to (Issue #42). Its text comes through
+/// the activity's input connection (`android_bridge`); keys like Enter or Backspace may also
+/// arrive as key events through winit.
 #[cfg(target_os = "android")]
-pub struct KeyboardRequester {
-    app: winit::platform::android::activity::AndroidApp,
-}
+pub struct KeyboardRequester;
 
 #[cfg(target_os = "android")]
 impl KeyboardRequester {
     /// # Safety
     /// Nothing to uphold; `unsafe` like the Wayland version.
     pub unsafe fn for_window(_window: &winit::window::Window) -> Option<Self> {
-        crate::platform::android_app().map(|app| Self { app })
+        Some(Self)
     }
 
     pub fn request(&mut self) {
-        self.app.show_soft_input(false);
+        crate::android_bridge::show_keyboard(true);
     }
 
     pub fn release(&mut self) {
-        self.app.hide_soft_input(false);
+        crate::android_bridge::show_keyboard(false);
     }
 
+    /// Typed text and deletions; taking them is left to the app's frame (see `app.rs`)
     pub fn take_deletions(&mut self) -> Vec<egui::Event> {
         Vec::new()
     }
@@ -104,6 +103,30 @@ pub fn deletion_key_events(back: u32, forward: u32) -> Vec<egui::Event> {
             })
         })
         .collect()
+}
+
+/// egui input for committed text: line breaks become the Enter key, as egui's text fields
+/// take them only that way.
+pub fn committed_text_events(text: &str) -> Vec<egui::Event> {
+    let mut events = Vec::new();
+    for (i, line) in text.split('\n').enumerate() {
+        if i > 0 {
+            for pressed in [true, false] {
+                events.push(egui::Event::Key {
+                    key: egui::Key::Enter,
+                    physical_key: None,
+                    pressed,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                });
+            }
+        }
+        let line = line.trim_end_matches('\r');
+        if !line.is_empty() {
+            events.push(egui::Event::Text(line.to_string()));
+        }
+    }
+    events
 }
 
 /// Entscheidet, ob die Bildschirmtastatur angefordert wird: sobald ein Textfeld den Fokus
@@ -194,6 +217,20 @@ mod tests {
             ]
         );
         assert!(deletion_key_events(0, 0).is_empty());
+    }
+
+    #[test]
+    fn committed_line_breaks_become_enter() {
+        let events = committed_text_events("ab\nc\n");
+        let kinds: Vec<String> = events
+            .iter()
+            .map(|e| match e {
+                egui::Event::Text(t) => t.clone(),
+                egui::Event::Key { pressed: true, .. } => "⏎".into(),
+                _ => "-".into(),
+            })
+            .collect();
+        assert_eq!(kinds, ["ab", "⏎", "-", "c", "⏎", "-"]);
     }
 
     #[test]

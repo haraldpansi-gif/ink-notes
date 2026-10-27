@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # Builds the Android app target/ink-notes_<version>_arm64.apk (Issues #42, #45)
-# without Gradle: the Rust library is built as cdylib with the NDK, aapt2 links the
-# manifest and the icon, zipalign and apksigner finish the APK.
+# without Gradle: the Rust library is built as cdylib with the NDK, javac and d8 compile the
+# activity (packaging/android/java), aapt2 links the manifest and the icon, zipalign and
+# apksigner finish the APK. Needs a JDK (javac, keytool).
 #
 # Needs the Android SDK (build-tools, platform android-34) and the NDK:
 #   ANDROID_HOME      SDK folder (default: ~/android-sdk)
@@ -35,12 +36,16 @@ BUILD_TOOLS=$(ls -d "${ANDROID_HOME}"/build-tools/*/ 2>/dev/null | sort -V | tai
 ANDROID_JAR="${ANDROID_HOME}/platforms/android-${TARGET_SDK}/android.jar"
 NDK_BIN="${ANDROID_NDK_HOME%/}/toolchains/llvm/prebuilt/linux-x86_64/bin"
 
-for needed in "${NDK_BIN}/${TARGET}${MIN_SDK}-clang" "${BUILD_TOOLS}aapt2" "${ANDROID_JAR}"; do
+for needed in "${NDK_BIN}/${TARGET}${MIN_SDK}-clang" "${BUILD_TOOLS}aapt2" "${BUILD_TOOLS}d8" "${ANDROID_JAR}"; do
     if [ ! -e "${needed}" ]; then
         echo "FEHLER: ${needed} nicht gefunden (Android-SDK/NDK, siehe Kopf des Skripts)."
         exit 1
     fi
 done
+if ! command -v javac >/dev/null 2>&1; then
+    echo "FEHLER: javac nicht gefunden (JDK 17 oder neuer)."
+    exit 1
+fi
 if command -v rustup >/dev/null 2>&1; then
     rustup target add "${TARGET}"
 fi
@@ -55,7 +60,7 @@ LIB="${CARGO_TARGET_DIR:-target}/${TARGET}/release/libink_notes.so"
 echo "=== [2/4] Ressourcen und Manifest ==="
 WORK="target/android-apk"
 rm -rf "${WORK}"
-mkdir -p "${WORK}/res/mipmap-xxxhdpi" "${WORK}/compiled" "${WORK}/apk/lib/${ABI}"
+mkdir -p "${WORK}/res/mipmap-xxxhdpi" "${WORK}/compiled" "${WORK}/apk/lib/${ABI}" "${WORK}/classes"
 cp assets/ink-notes.png "${WORK}/res/mipmap-xxxhdpi/ic_launcher.png"
 sed -e "s/@VERSION_CODE@/${VERSION_CODE}/" -e "s/@VERSION@/${VERSION}/" \
     packaging/android/AndroidManifest.xml >"${WORK}/AndroidManifest.xml"
@@ -65,9 +70,13 @@ sed -e "s/@VERSION_CODE@/${VERSION_CODE}/" -e "s/@VERSION@/${VERSION}/" \
     --min-sdk-version "${MIN_SDK}" --target-sdk-version "${TARGET_SDK}" \
     "${WORK}/compiled/res.zip"
 
-echo "=== [3/4] Native Bibliothek hinzufügen ==="
+echo "=== [3/4] Activity und native Bibliothek hinzufügen ==="
+javac -source 8 -target 8 -nowarn -Xlint:-options -classpath "${ANDROID_JAR}" \
+    -d "${WORK}/classes" $(find packaging/android/java -name '*.java')
+"${BUILD_TOOLS}d8" --min-api "${MIN_SDK}" --lib "${ANDROID_JAR}" --output "${WORK}/apk" \
+    $(find "${WORK}/classes" -name '*.class')
 cp "${LIB}" "${WORK}/apk/lib/${ABI}/"
-(cd "${WORK}/apk" && zip -q -r ../unaligned.apk lib)
+(cd "${WORK}/apk" && zip -q -r ../unaligned.apk classes.dex lib)
 "${BUILD_TOOLS}zipalign" -f -p 4 "${WORK}/unaligned.apk" "${WORK}/aligned.apk"
 
 echo "=== [4/4] Signieren ==="

@@ -690,6 +690,11 @@ impl UiState {
     fn open_file_picker(&mut self, kind: PickerKind) {
         let dir = self.last_picker_dir.clone();
         self.close_overlays();
+        // Android: the app can't look into other apps' folders; the system dialog can
+        #[cfg(target_os = "android")]
+        if crate::android_bridge::pick_file(kind) {
+            return;
+        }
         self.file_picker = Some(FilePicker::open(kind, dir.as_deref()));
     }
 
