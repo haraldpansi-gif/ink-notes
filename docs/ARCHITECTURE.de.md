@@ -195,7 +195,7 @@ Jede Seite hat einen eigenen Verlauf (`history.rs`): Hinzufügen, Entfernen, Ers
 2. **PDF** (nur im Notfall): importierte PDF-Seite als Bild, falls sie sich nicht als Vektor übernehmen lässt.
 3. **Images:** eingefügte Bilder (höchstens 300 dpi).
 4. **Text:** Textfelder als echter Text mit eingebetteter Schrift (durchsuchbar, kopierbar). Jedes Feld liegt in einem eigenen Koordinatensystem, das eine Transformationsmatrix auf seine Ecken abbildet.
-5. **Ink:** Striche als gefüllte Polygone, Formen als Pfade. Halbtransparente Striche (Textmarker) bekommen einen Grafikzustand mit Deckkraft (`ca`/`CA`); printpdf kann solche Zustände nicht anlegen, deshalb trägt `add_alpha_states` sie nach dem Speichern mit `lopdf` in die Seitenressourcen ein. Jeder Strich ist ein einziger Pfad und deckt sich daher nicht selbst doppelt.
+5. **Ink:** Striche als gefüllte Polygone, Formen als Pfade. Halbtransparente Striche (Textmarker) bekommen einen Grafikzustand mit Deckkraft (`ca`/`CA`); printpdf kann solche Zustände nicht anlegen, deshalb trägt `add_alpha_states` sie nach dem Speichern mit `lopdf` in die Seitenressourcen ein. Jeder Strich ist ein einziger Pfad und deckt sich daher nicht selbst doppelt. Der Umriss eines Strichs wird vor dem Export vereinfacht (`geometry::simplify_closed_outline`, höchstens 0,01 mm vom gezeichneten entfernt): Das Netz hat etwa 16 Punkte je Stiftpunkt, und mit allen dauerte der Export einer vollen Seite Sekunden. `INK_NOTES_EXACT_OUTLINES=1` exportiert wie bisher jeden Punkt.
 
 Importierte PDF-Seiten werden anschließend als Form-XObject unter die Seite gelegt (`pdf_merge.rs`), bleiben also Vektorgrafik. Seitentitel werden zu Lesezeichen.
 

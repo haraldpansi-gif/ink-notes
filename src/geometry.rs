@@ -352,6 +352,63 @@ fn rdp_recursive(points: &[Vec2], epsilon: f32) -> Vec<Vec2> {
     }
 }
 
+/// Simplifies a closed outline (the last point connects back to the first) so that no point
+/// of the original lies farther than `tolerance` from the result. Unlike
+/// [`ramer_douglas_peucker`], it measures the distance to the segment, not to the infinite
+/// line, so stroke tips that turn back are kept. Works without recursion, so long strokes
+/// cannot overflow the stack.
+pub fn simplify_closed_outline(points: &[Vec2], tolerance: f32) -> Vec<Vec2> {
+    if points.len() <= 3 {
+        return points.to_vec();
+    }
+    // Two chains between the first point and the point farthest from it: the start of an
+    // outline often lies on top of its end (round cap), which would leave no chord to measure
+    let far = (1..points.len())
+        .max_by(|&i, &j| {
+            points[i]
+                .distance_squared(points[0])
+                .total_cmp(&points[j].distance_squared(points[0]))
+        })
+        .unwrap_or(1);
+    let mut keep = vec![false; points.len()];
+    keep[0] = true;
+    keep[far] = true;
+    let mut stack = vec![(0, far), (far, points.len())];
+    while let Some((start, end)) = stack.pop() {
+        // `end == points.len()` closes the ring back to the first point
+        let (a, b) = (points[start], points[end % points.len()]);
+        let mut worst = (0.0_f32, start);
+        for (i, &p) in points.iter().enumerate().take(end).skip(start + 1) {
+            let d = point_to_segment_dist(p, a, b);
+            if d > worst.0 {
+                worst = (d, i);
+            }
+        }
+        if worst.0 > tolerance {
+            keep[worst.1] = true;
+            stack.push((start, worst.1));
+            stack.push((worst.1, end));
+        }
+    }
+    points
+        .iter()
+        .zip(keep)
+        .filter_map(|(&p, keep)| keep.then_some(p))
+        .collect()
+}
+
+/// Abstand eines Punktes `p` zur Strecke von `a` nach `b`.
+#[inline]
+pub fn point_to_segment_dist(p: Vec2, a: Vec2, b: Vec2) -> f32 {
+    let ab = b - a;
+    let len_sq = ab.length_squared();
+    if len_sq < 1e-12 {
+        return p.distance(a);
+    }
+    let t = ((p - a).dot(ab) / len_sq).clamp(0.0, 1.0);
+    p.distance(a + ab * t)
+}
+
 /// Abstand eines Punktes `p` zur Geraden durch `a` und `b`.
 #[inline]
 pub fn point_to_line_dist(p: Vec2, a: Vec2, b: Vec2) -> f32 {
@@ -2326,6 +2383,78 @@ pub fn shape_to_stroke(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Largest distance of any point of `original` from the closed outline `simplified`.
+    fn outline_deviation(original: &[Vec2], simplified: &[Vec2]) -> f32 {
+        original
+            .iter()
+            .map(|&p| {
+                (0..simplified.len())
+                    .map(|i| {
+                        point_to_segment_dist(
+                            p,
+                            simplified[i],
+                            simplified[(i + 1) % simplified.len()],
+                        )
+                    })
+                    .fold(f32::INFINITY, f32::min)
+            })
+            .fold(0.0, f32::max)
+    }
+
+    #[test]
+    fn test_simplified_stroke_outline_stays_within_tolerance() {
+        // A handwritten loop like a letter, as the pen delivers it
+        let samples: Vec<StylusSample> = (0..30)
+            .map(|i| {
+                let t = i as f32 / 29.0 * std::f32::consts::TAU * 1.3;
+                StylusSample {
+                    position: Vec2::new(500.0 + 12.0 * t.cos() + t * 4.0, 800.0 + 20.0 * t.sin()),
+                    pressure: 0.4 + 0.3 * (t * 0.7).sin().abs(),
+                    timestamp: i as f64 * 0.008,
+                }
+            })
+            .collect();
+        let vertices = crate::storage::reconstruct_stroke_vertices(
+            &samples,
+            [0.0, 0.0, 0.0, 1.0],
+            5.0,
+            Default::default(),
+            true,
+        );
+        let n = vertices.len() / 2;
+        let outline: Vec<Vec2> = (0..n)
+            .map(|i| vertices[i * 2].position)
+            .chain((0..n).rev().map(|i| vertices[i * 2 + 1].position))
+            .map(Vec2::from)
+            .collect();
+        let tolerance = 0.1;
+        let simplified = simplify_closed_outline(&outline, tolerance);
+        let deviation = outline_deviation(&outline, &simplified);
+        assert!(deviation <= tolerance + 1e-4, "{deviation}");
+        assert!(
+            simplified.len() * 4 < outline.len(),
+            "{} -> {} points",
+            outline.len(),
+            simplified.len()
+        );
+    }
+
+    #[test]
+    fn test_simplified_outline_keeps_tips_that_turn_back() {
+        // Thin hairpin: out along y = 0 to x = 20, back along y = 0.05. Measured against the
+        // infinite line, the tip would vanish.
+        let mut outline: Vec<Vec2> = (0..=20).map(|x| Vec2::new(x as f32, 0.0)).collect();
+        outline.extend((0..20).rev().map(|x| Vec2::new(x as f32, 0.05)));
+        let simplified = simplify_closed_outline(&outline, 0.1);
+        let reach = simplified.iter().map(|p| p.x).fold(f32::MIN, f32::max);
+        assert_eq!(reach, 20.0, "{simplified:?}");
+        assert!(outline_deviation(&outline, &simplified) <= 0.1);
+        assert!(simplified.len() <= 4, "{simplified:?}");
+        // Tiny outlines stay as they are
+        let dot = [Vec2::ZERO, Vec2::X, Vec2::Y];
+        assert_eq!(simplify_closed_outline(&dot, 0.1), dot.to_vec());
+    }
 
     #[test]
     fn test_detect_line() {

@@ -1222,21 +1222,25 @@ fn render_stroke_polygon(layer: &printpdf::PdfLayerReference, stroke: &Stroke) {
 
     // Geschlossener Pfad um den Ribbon-Rand:
     // Left[0] -> Left[1] -> ... -> Left[n-1] -> Right[n-1] -> Right[n-2] -> ... -> Right[0]
-    let mut ring = Vec::with_capacity(n * 2);
-
-    // 1. Linke Hüllkurve vorwärts
-    for i in 0..n {
-        let v = stroke.vertices[i * 2];
-        let (x, y) = page_to_pdf_mm(v.position[0], v.position[1]);
-        ring.push((Point::new(Mm(x), Mm(y)), false));
-    }
-
-    // 2. Rechte Hüllkurve rückwärts
-    for i in (0..n).rev() {
-        let v = stroke.vertices[i * 2 + 1];
-        let (x, y) = page_to_pdf_mm(v.position[0], v.position[1]);
-        ring.push((Point::new(Mm(x), Mm(y)), false));
-    }
+    let outline: Vec<glam::Vec2> = (0..n)
+        .map(|i| stroke.vertices[i * 2].position)
+        .chain((0..n).rev().map(|i| stroke.vertices[i * 2 + 1].position))
+        .map(glam::Vec2::from)
+        .collect();
+    // The mesh has about 16 points per pen sample, far more than the eye (or a printer) can
+    // tell apart; fewer points make the PDF, PNG export and copying as an image much faster
+    let outline = if exact_outlines() {
+        outline
+    } else {
+        crate::geometry::simplify_closed_outline(&outline, OUTLINE_TOLERANCE)
+    };
+    let ring: Vec<(Point, bool)> = outline
+        .iter()
+        .map(|p| {
+            let (x, y) = page_to_pdf_mm(p.x, p.y);
+            (Point::new(Mm(x), Mm(y)), false)
+        })
+        .collect();
 
     let fill_color = Color::Rgb(Rgb::new(
         stroke.color[0],
@@ -1252,6 +1256,17 @@ fn render_stroke_polygon(layer: &printpdf::PdfLayerReference, stroke: &Stroke) {
         winding_order: WindingOrder::NonZero,
     };
     layer.add_polygon(poly);
+}
+
+/// Largest deviation of an exported stroke outline from the drawn one, in page units
+/// (0.01 mm: a tenth of a pixel at 200 dpi).
+pub const OUTLINE_TOLERANCE: f32 = 0.1;
+
+/// `INK_NOTES_EXACT_OUTLINES=1` exports every point of the stroke outlines, as before this change
+/// (fallback in case the simplified outlines ever look wrong).
+fn exact_outlines() -> bool {
+    static EXACT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *EXACT.get_or_init(|| std::env::var_os("INK_NOTES_EXACT_OUTLINES").is_some_and(|v| v != "0"))
 }
 
 /// Strategie B: Kubische Bézier-Kurven aus den Abtastpunkten via printpdf::Line.
