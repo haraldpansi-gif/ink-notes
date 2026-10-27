@@ -84,6 +84,11 @@
   </branding>
   <content_rating type="oars-1.1" />
   <releases>
+    <release version="0.38.0" date="2026-10-27">
+      <description>
+        <p>The notebooks can be stored in a folder synced by Nextcloud, Google Drive, Syncthing or Dropbox. Changes from other devices are taken over automatically, conflict copies become pages of their own, and a warning appears when a notebook is open on another device.</p>
+      </description>
+    </release>
     <release version="0.37.0" date="2026-10-27">
       <description>
         <p>Saber notebooks (.sbn2, .sba, .sbn) can be imported as new notebooks, with strokes, pen pressure, highlighters, shapes, typed text, images and PDF backgrounds.</p>
