@@ -127,6 +127,147 @@ where
     event_loop.run(handler)
 }
 
+/// The Android activity, for calls winit doesn't offer (soft keyboard, Issue #42).
+#[cfg(target_os = "android")]
+static ANDROID_APP: std::sync::OnceLock<winit::platform::android::activity::AndroidApp> =
+    std::sync::OnceLock::new();
+
+/// Remembers the activity; called once by `android_main`.
+#[cfg(target_os = "android")]
+pub fn set_android_app(app: winit::platform::android::activity::AndroidApp) {
+    let _ = ANDROID_APP.set(app);
+}
+
+#[cfg(target_os = "android")]
+pub fn android_app() -> Option<winit::platform::android::activity::AndroidApp> {
+    ANDROID_APP.get().cloned()
+}
+
+/// Makes an exported file available to the user. Desktop: it already is (the path is
+/// returned). Android: copied to `Download/ink-notes` through the MediaStore (Android 10 and
+/// newer), as other apps can't see the app's own folder; older versions keep it there.
+pub fn publish_export(path: std::path::PathBuf) -> Result<std::path::PathBuf, String> {
+    #[cfg(target_os = "android")]
+    match android_files::publish_to_downloads(&path) {
+        Ok(location) => {
+            let _ = std::fs::remove_file(&path);
+            return Ok(location);
+        }
+        Err(err) => log::warn!("export not copied to Downloads: {err}"),
+    }
+    Ok(path)
+}
+
+#[cfg(target_os = "android")]
+mod android_files {
+    use jni::objects::{JObject, JValue};
+    use jni::JNIEnv;
+    use std::path::{Path, PathBuf};
+
+    /// Folder below the shared storage the exports go to
+    const RELATIVE_PATH: &str = "Download/ink-notes";
+
+    fn mime_type(path: &Path) -> &'static str {
+        match path.extension().and_then(|e| e.to_str()) {
+            Some("pdf") => "application/pdf",
+            Some("png") => "image/png",
+            Some("svg") => "image/svg+xml",
+            _ => "application/octet-stream",
+        }
+    }
+
+    pub fn publish_to_downloads(path: &Path) -> Result<PathBuf, String> {
+        let app = super::android_app().ok_or("no activity")?;
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .ok_or("invalid file name")?
+            .to_string();
+        let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+        // Safety: pointers to the VM and the activity (a global reference) that live as long
+        // as the app
+        let vm =
+            unsafe { jni::JavaVM::from_raw(app.vm_as_ptr().cast()) }.map_err(|e| e.to_string())?;
+        let mut env = vm.attach_current_thread().map_err(|e| e.to_string())?;
+        let activity = unsafe { JObject::from_raw(app.activity_as_ptr().cast()) };
+        let result = insert(&mut env, &activity, &name, mime_type(path), &bytes);
+        if env.exception_check().unwrap_or(false) {
+            let _ = env.exception_describe();
+            let _ = env.exception_clear();
+        }
+        result.map_err(|e| e.to_string())?;
+        Ok(Path::new(RELATIVE_PATH).join(name))
+    }
+
+    fn insert(
+        env: &mut JNIEnv,
+        activity: &JObject,
+        name: &str,
+        mime: &str,
+        bytes: &[u8],
+    ) -> jni::errors::Result<()> {
+        let sdk = env
+            .get_static_field("android/os/Build$VERSION", "SDK_INT", "I")?
+            .i()?;
+        if sdk < 29 {
+            return Err(jni::errors::Error::JniCall(jni::errors::JniError::Unknown));
+        }
+        let values = env.new_object("android/content/ContentValues", "()V", &[])?;
+        for (key, value) in [
+            ("_display_name", name),
+            ("mime_type", mime),
+            ("relative_path", RELATIVE_PATH),
+        ] {
+            let key = env.new_string(key)?;
+            let value = env.new_string(value)?;
+            env.call_method(
+                &values,
+                "put",
+                "(Ljava/lang/String;Ljava/lang/String;)V",
+                &[JValue::Object(&key), JValue::Object(&value)],
+            )?;
+        }
+        let resolver = env
+            .call_method(
+                activity,
+                "getContentResolver",
+                "()Landroid/content/ContentResolver;",
+                &[],
+            )?
+            .l()?;
+        let collection = env
+            .get_static_field(
+                "android/provider/MediaStore$Downloads",
+                "EXTERNAL_CONTENT_URI",
+                "Landroid/net/Uri;",
+            )?
+            .l()?;
+        let uri = env
+            .call_method(
+                &resolver,
+                "insert",
+                "(Landroid/net/Uri;Landroid/content/ContentValues;)Landroid/net/Uri;",
+                &[JValue::Object(&collection), JValue::Object(&values)],
+            )?
+            .l()?;
+        if uri.is_null() {
+            return Err(jni::errors::Error::NullPtr("MediaStore insert"));
+        }
+        let stream = env
+            .call_method(
+                &resolver,
+                "openOutputStream",
+                "(Landroid/net/Uri;)Ljava/io/OutputStream;",
+                &[JValue::Object(&uri)],
+            )?
+            .l()?;
+        let array = env.byte_array_from_slice(bytes)?;
+        env.call_method(&stream, "write", "([B)V", &[JValue::Object(&array)])?;
+        env.call_method(&stream, "close", "()V", &[])?;
+        Ok(())
+    }
+}
+
 /// Gives the window the app id (Wayland: app_id, X11: WM_CLASS), so that dock and task bar
 /// show the app icon for it.
 pub fn with_app_id(

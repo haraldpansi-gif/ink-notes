@@ -11,7 +11,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use android_activity::input::{InputEvent, KeyAction, Keycode, MotionAction};
+use android_activity::input::{InputEvent, KeyAction, Keycode, MotionAction, ToolType};
 use android_activity::{
     AndroidApp, AndroidAppWaker, ConfigurationRef, InputStatus, MainEvent, Rect,
 };
@@ -382,6 +382,7 @@ impl<T: 'static> EventLoop<T> {
             InputEvent::MotionEvent(motion_event) => {
                 let window_id = window::WindowId(WindowId);
                 let device_id = event::DeviceId(DeviceId(motion_event.device_id()));
+                record_pen_samples(motion_event);
 
                 let phase = match motion_event.action() {
                     MotionAction::Down | MotionAction::PointerDown => {
@@ -408,6 +409,10 @@ impl<T: 'static> EventLoop<T> {
                         };
 
                     for pointer in pointers {
+                        // ink-notes patch: pens are reported through `take_pen_samples`
+                        if is_pen(&pointer) {
+                            continue;
+                        }
                         let location = PhysicalPosition {
                             x: pointer.x() as _,
                             y: pointer.y() as _,
@@ -450,6 +455,15 @@ impl<T: 'static> EventLoop<T> {
                             &mut self.combining_accent,
                         );
 
+                        // ink-notes patch: the character typed, so that text fields receive it
+                        let text = match (state, &key_char) {
+                            (
+                                event::ElementState::Pressed,
+                                Some(android_activity::input::KeyMapChar::Unicode(c)),
+                            ) if !c.is_control() => Some(smol_str::SmolStr::from_iter([*c])),
+                            _ => None,
+                        };
+
                         let event = event::Event::WindowEvent {
                             window_id: window::WindowId(WindowId),
                             event: event::WindowEvent::KeyboardInput {
@@ -460,7 +474,7 @@ impl<T: 'static> EventLoop<T> {
                                     logical_key: keycodes::to_logical(key_char, keycode),
                                     location: keycodes::to_location(keycode),
                                     repeat: key.repeat_count() > 0,
-                                    text: None,
+                                    text,
                                     platform_specific: KeyEventExtra {},
                                 },
                                 is_synthetic: false,
@@ -1123,4 +1137,56 @@ impl VideoMode {
     pub fn monitor(&self) -> MonitorHandle {
         self.monitor.clone()
     }
+}
+
+/// ink-notes patch: pen samples waiting for `take_pen_samples` (Issue #44)
+static PEN_SAMPLES: Mutex<Vec<crate::platform::android::PenSample>> = Mutex::new(Vec::new());
+
+fn is_pen(pointer: &android_activity::input::Pointer<'_>) -> bool {
+    matches!(pointer.tool_type(), ToolType::Stylus | ToolType::Eraser)
+}
+
+fn record_pen_samples(motion_event: &android_activity::input::MotionEvent<'_>) {
+    use crate::platform::android::{PenAction, PenSample};
+
+    let action = match motion_event.action() {
+        MotionAction::Down | MotionAction::PointerDown => PenAction::Down,
+        MotionAction::Up | MotionAction::PointerUp => PenAction::Up,
+        MotionAction::Move => PenAction::Move,
+        MotionAction::Cancel => PenAction::Cancel,
+        MotionAction::HoverEnter => PenAction::HoverEnter,
+        MotionAction::HoverMove => PenAction::HoverMove,
+        MotionAction::HoverExit => PenAction::HoverExit,
+        _ => return,
+    };
+    let buttons = motion_event.button_state().0;
+    let mut record = |pointer: android_activity::input::Pointer<'_>| {
+        if !is_pen(&pointer) {
+            return;
+        }
+        let sample = PenSample {
+            action,
+            x: pointer.x(),
+            y: pointer.y(),
+            pressure: pointer.pressure(),
+            eraser: pointer.tool_type() == ToolType::Eraser,
+            buttons,
+        };
+        let mut samples = PEN_SAMPLES.lock().unwrap_or_else(|e| e.into_inner());
+        // Nobody collects them (app without pen support): don't grow without bound
+        if samples.len() >= 4096 {
+            samples.remove(0);
+        }
+        samples.push(sample);
+    };
+    match action {
+        PenAction::Down | PenAction::Up => {
+            record(motion_event.pointer_at_index(motion_event.pointer_index()))
+        }
+        _ => motion_event.pointers().for_each(record),
+    }
+}
+
+pub fn take_pen_samples() -> Vec<crate::platform::android::PenSample> {
+    std::mem::take(&mut *PEN_SAMPLES.lock().unwrap_or_else(|e| e.into_inner()))
 }

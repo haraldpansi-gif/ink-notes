@@ -92,6 +92,10 @@ impl KeyboardRequester {
         }
     }
 
+    /// The text field lost focus. Nothing to do: the compositor hides the keyboard once
+    /// winit disables text input.
+    pub fn release(&mut self) {}
+
     /// Tastendrücke für das seit dem letzten Aufruf gewünschte Löschen (vor `begin_frame`
     /// aufrufen und an die egui-Eingabe anhängen)
     pub fn take_deletions(&mut self) -> Vec<egui::Event> {

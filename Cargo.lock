@@ -1556,6 +1556,7 @@ dependencies = [
  "hayro",
  "hayro-svg",
  "image",
+ "jni",
  "log",
  "lopdf",
  "minisign-verify",

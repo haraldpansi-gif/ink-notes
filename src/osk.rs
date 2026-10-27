@@ -17,11 +17,40 @@ mod wayland;
 #[cfg(target_os = "linux")]
 pub use wayland::KeyboardRequester;
 
+/// Android: NativeActivity shows the soft keyboard only when asked to (Issue #42). The typed
+/// characters arrive as key events. Characters the keyboard can't send as key events (e.g.
+/// umlauts chosen by long press, which it commits as text) don't arrive.
+#[cfg(target_os = "android")]
+pub struct KeyboardRequester {
+    app: winit::platform::android::activity::AndroidApp,
+}
+
+#[cfg(target_os = "android")]
+impl KeyboardRequester {
+    /// # Safety
+    /// Nothing to uphold; `unsafe` like the Wayland version.
+    pub unsafe fn for_window(_window: &winit::window::Window) -> Option<Self> {
+        crate::platform::android_app().map(|app| Self { app })
+    }
+
+    pub fn request(&mut self) {
+        self.app.show_soft_input(false);
+    }
+
+    pub fn release(&mut self) {
+        self.app.hide_soft_input(false);
+    }
+
+    pub fn take_deletions(&mut self) -> Vec<egui::Event> {
+        Vec::new()
+    }
+}
+
 /// Elsewhere the system shows the on-screen keyboard by itself; nothing to request.
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
 pub struct KeyboardRequester;
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
 impl KeyboardRequester {
     /// # Safety
     /// Nothing to uphold; `unsafe` like the Wayland version.
@@ -30,6 +59,8 @@ impl KeyboardRequester {
     }
 
     pub fn request(&mut self) {}
+
+    pub fn release(&mut self) {}
 
     pub fn take_deletions(&mut self) -> Vec<egui::Event> {
         Vec::new()

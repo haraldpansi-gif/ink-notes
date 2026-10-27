@@ -77,6 +77,41 @@ impl<T> EventLoopBuilderExtAndroid for EventLoopBuilder<T> {
 /// depending on the `android_activity` crate, and instead consume the API that
 /// is re-exported by Winit.
 ///
+/// ink-notes patch: what a pen sample reports (Issue #44).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PenAction {
+    /// Pen comes near the screen, moves above it or leaves it
+    HoverEnter,
+    HoverMove,
+    HoverExit,
+    /// Pen touches the screen, moves on it, is lifted or the gesture is cancelled
+    Down,
+    Move,
+    Up,
+    Cancel,
+}
+
+/// ink-notes patch: one sample of a pen (tool type stylus or eraser). Such pointers are not
+/// reported as `WindowEvent::Touch`; the app collects them with [`take_pen_samples`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PenSample {
+    pub action: PenAction,
+    /// Position in physical pixels
+    pub x: f32,
+    pub y: f32,
+    /// Usually 0..=1
+    pub pressure: f32,
+    /// Eraser end of the pen (tool type eraser)
+    pub eraser: bool,
+    /// `MotionEvent.getButtonState()`; the pen buttons are 0x20 (primary) and 0x40 (secondary)
+    pub buttons: u32,
+}
+
+/// ink-notes patch: the pen samples received since the last call, oldest first.
+pub fn take_pen_samples() -> Vec<PenSample> {
+    crate::platform_impl::take_pen_samples()
+}
+
 /// For compatibility applications should then import the `AndroidApp` type for
 /// their `android_main(app: AndroidApp)` function like:
 /// ```rust

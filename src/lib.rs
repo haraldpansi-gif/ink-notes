@@ -22,6 +22,7 @@ pub mod paths;
 pub mod pdf_doc;
 pub mod pdf_merge;
 pub mod pdf_writer;
+pub mod pen;
 pub mod platform;
 pub mod rnote;
 pub mod ruler;
@@ -51,6 +52,7 @@ fn android_main(app: winit::platform::android::activity::AndroidApp) {
     );
     // Panics would otherwise only go to stderr, which Android discards
     std::panic::set_hook(Box::new(|info| log::error!("{info}")));
+    platform::set_android_app(app.clone());
     if let Some(dir) = app.internal_data_path() {
         paths::set_app_dir(dir);
     }

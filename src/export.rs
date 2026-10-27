@@ -51,6 +51,13 @@ pub fn sanitize_filename_component(title: &str) -> String {
 /// `~/.config/user-dirs.dirs` (z. B. „Dokumente“), sonst `~/Documents`. Im Flatpak ist nur
 /// dieser Ordner beschreibbar, der Fallback allein träfe bei deutschen Systemen daneben.
 pub fn default_documents_dir() -> PathBuf {
+    // Android: written into the app's own folder first, then copied to Downloads
+    // (`platform::publish_export`)
+    #[cfg(target_os = "android")]
+    if let Some(dir) = crate::platform::android_app().and_then(|app| app.external_data_path()) {
+        return dir.join("Documents");
+    }
+
     if let Ok(dir) = std::env::var("XDG_DOCUMENTS_DIR") {
         if !dir.trim().is_empty() {
             return PathBuf::from(dir);
