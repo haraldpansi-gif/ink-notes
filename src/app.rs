@@ -2409,7 +2409,6 @@ pub fn run_with(
                 // Bei anstehenden Änderungen, aktivem Toast, Stylus in Proximity oder aktivem Zeichnen regelmäßig aufwachen
                 if new_status == AutosaveStatus::Pending
                     || new_status == AutosaveStatus::Saving
-                    || ui_state.export_message.is_some()
                     || (is_drawing && !stroke_already_snapped)
                     || is_stylus_drawing
                     || is_stylus_in_proximity
@@ -2420,6 +2419,13 @@ pub fn run_with(
                     egui_repaint_at,
                     long_press.deadline(),
                     Some(disk_watch.deadline()),
+                    // The updater thread does not wake the loop: look for its results now and then
+                    matches!(
+                        updater.status(),
+                        crate::updater::UpdaterStatus::Checking
+                            | crate::updater::UpdaterStatus::Downloading { .. }
+                    )
+                    .then(|| Instant::now() + Duration::from_millis(100)),
                 ]
                 .into_iter()
                 .flatten()
@@ -2457,7 +2463,10 @@ pub fn run_with(
                 } else {
                     egui_winit_state.on_window_event(&window, &event)
                 };
-                if egui_response.repaint {
+                // egui-winit asks for a repaint after every RedrawRequested as well; following
+                // that would redraw endlessly even when idle (high CPU load in the app and the
+                // compositor). Follow-up frames egui needs come via `repaint_delay` instead.
+                if egui_response.repaint && !matches!(event, WindowEvent::RedrawRequested) {
                     window.request_redraw();
                 }
 
@@ -5513,8 +5522,16 @@ pub fn run_with(
                             pixels_per_point: egui_ctx.pixels_per_point(),
                         };
 
-                        if ui_state.export_message.is_some() {
-                            window.request_redraw();
+                        // The toast only changes while it fades out (its last second); until
+                        // then a single wake-up at the start of the fade is enough
+                        if let Some((_, shown)) = &ui_state.export_message {
+                            let fade = *shown + Duration::from_secs(3);
+                            if Instant::now() >= fade {
+                                window.request_redraw();
+                            } else {
+                                egui_repaint_at =
+                                    Some(egui_repaint_at.map_or(fade, |at| at.min(fade)));
+                            }
                         }
 
                         // 5. Canvas (Pass 1) und egui UI (Pass 2) in Surface-Textur rendern
