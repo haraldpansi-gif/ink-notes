@@ -84,6 +84,11 @@
   </branding>
   <content_rating type="oars-1.1" />
   <releases>
+    <release version="0.41.0" date="2026-10-28">
+      <description>
+        <p>Experimental: computes handwritten formulas after an equals sign and offers the result next to it (turn on in the menu under input).</p>
+      </description>
+    </release>
     <release version="0.40.0" date="2026-10-28">
       <description>
         <p>New Android version: a signed APK for 64-bit ARM devices with pen, touch, soft keyboard, file import and exports to Downloads.</p>
