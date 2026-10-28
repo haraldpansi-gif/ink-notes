@@ -191,6 +191,7 @@ src/
 ├── storage.rs      # Laden/Speichern (atomar), Notizbücher, Papierkorb, Speicherort
 ├── disk_watch.rs   # Änderungen anderer Geräte übernehmen (Sync-Clients)
 ├── library.rs      # Ordner der Notizbücher (library.json)
+├── math.rs         # Exaktes Ausrechnen handgeschriebener Formeln (Issue #46)
 ├── autosave.rs     # Speichern im Hintergrund
 ├── export.rs       # PDF-Export
 ├── page_export.rs  # Seite als PNG/SVG, Auswahl als Bild

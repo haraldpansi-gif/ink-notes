@@ -18,6 +18,7 @@ pub mod i18n;
 pub mod image_layer;
 pub mod import;
 pub mod library;
+pub mod math;
 pub mod osk;
 pub mod page_export;
 pub mod paths;
