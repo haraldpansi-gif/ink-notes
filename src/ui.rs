@@ -343,6 +343,15 @@ pub enum UiAction {
     ImportFile(std::path::PathBuf),
     /// Store the notebooks in this folder, `None` for the default location (Issue #49)
     SetStorageDir(Option<std::path::PathBuf>),
+    /// Sign in to a Nextcloud server through the browser; with the fingerprint of a
+    /// certificate the user trusts (Issue #49, stage 2)
+    CloudConnect {
+        server: String,
+        trusted: Option<String>,
+    },
+    CloudCancel,
+    CloudSyncNow,
+    CloudDisconnect,
     /// Aktuelle Seite als Bild oder SVG exportieren
     ExportPage(PageExportKind),
     /// Titel einer Seite setzen (leer = entfernen)
@@ -513,6 +522,9 @@ pub struct UiState {
     /// Folder holding the notebooks and whether the user picked it (Issue #49)
     pub storage_dir: std::path::PathBuf,
     pub storage_dir_custom: bool,
+    /// Nextcloud sync as the app last saw it, and the server address being typed
+    pub cloud: crate::cloud_sync::View,
+    pub cloud_server_input: String,
 }
 
 impl Default for UiState {
@@ -601,6 +613,8 @@ impl Default for UiState {
             last_picker_dir: None,
             storage_dir: std::path::PathBuf::new(),
             storage_dir_custom: false,
+            cloud: crate::cloud_sync::View::default(),
+            cloud_server_input: String::new(),
         }
     }
 }
@@ -3190,6 +3204,171 @@ pub fn key_allowed_in_view_mode(key: &winit::keyboard::Key, ctrl: bool) -> bool 
     }
 }
 
+/// "How long ago" for the last sync.
+fn elapsed_label(at: std::time::SystemTime) -> String {
+    let secs = at.elapsed().map_or(0, |d| d.as_secs());
+    if secs < 60 {
+        t!("gerade eben").to_string()
+    } else if secs < 3600 {
+        t!("vor {minutes} min", minutes = secs / 60)
+    } else {
+        t!("vor {hours} h", hours = secs / 3600)
+    }
+}
+
+/// Nextcloud sync in the menu (Issue #49, stage 2).
+fn cloud_section(ui: &mut egui::Ui, state: &mut UiState, actions: &mut Vec<UiAction>) {
+    use crate::cloud_sync::Status;
+    let small = |text: String, color: egui::Color32| {
+        egui::Label::new(egui::RichText::new(text).size(11.5).color(color)).wrap(true)
+    };
+    let grey = egui::Color32::from_gray(190);
+    let warn = egui::Color32::from_rgb(240, 180, 80);
+    let button = |text: String| egui::Button::new(text).min_size(egui::vec2(115.0, 28.0));
+    ui.add_space(4.0);
+    ui.label(
+        egui::RichText::new(t!("NEXTCLOUD"))
+            .size(10.5)
+            .strong()
+            .color(egui::Color32::from_gray(160)),
+    );
+    let status = state.cloud.status.clone();
+    if matches!(
+        status,
+        Status::Connecting | Status::WaitingForLogin { .. } | Status::Syncing
+    ) {
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_millis(500));
+    }
+    match status {
+        Status::Off | Status::Failed(_) if state.cloud.account.is_none() => {
+            if let Status::Failed(msg) = &status {
+                ui.add(small(format!("⚠ {msg}"), warn));
+            }
+            let field = ui.add(
+                egui::TextEdit::singleline(&mut state.cloud_server_input)
+                    .hint_text(t!("z. B. cloud.example.org"))
+                    .margin(egui::vec2(8.0, 6.0))
+                    .desired_width(f32::INFINITY),
+            );
+            if state.cloud_server_input.trim().starts_with("http://") {
+                ui.add(small(
+                    t!("⚠ Ohne https ist das App-Passwort im Netz lesbar – nur im eigenen Heimnetz verwenden").to_string(),
+                    warn,
+                ));
+            }
+            let enter = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            if ui
+                .add_enabled(
+                    !state.cloud_server_input.trim().is_empty(),
+                    button(t!("🔗  Verbinden …").to_string()),
+                )
+                .on_hover_text(t!("Anmeldung im Browser; die App bekommt ein eigenes App-Passwort, das sich in Nextcloud jederzeit widerrufen lässt"))
+                .clicked()
+                || enter && !state.cloud_server_input.trim().is_empty()
+            {
+                actions.push(UiAction::CloudConnect {
+                    server: state.cloud_server_input.clone(),
+                    trusted: None,
+                });
+            }
+        }
+        Status::Off | Status::Connecting => {
+            ui.add(small(t!("⏳  Verbinde …").to_string(), grey));
+            if ui.add(button(t!("Abbrechen").to_string())).clicked() {
+                actions.push(UiAction::CloudCancel);
+            }
+        }
+        Status::Untrusted {
+            server,
+            fingerprint,
+        } => {
+            ui.add(small(
+                t!("⚠ Das Zertifikat von {server} ist von keiner bekannten Stelle signiert. Nur vertrauen, wenn dieser Fingerabdruck mit dem des Servers übereinstimmt:", server = server),
+                warn,
+            ));
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(&fingerprint)
+                        .monospace()
+                        .size(10.0)
+                        .color(grey),
+                )
+                .wrap(true),
+            );
+            ui.horizontal(|ui| {
+                if ui.add(button(t!("Vertrauen").to_string())).clicked() {
+                    actions.push(UiAction::CloudConnect {
+                        server: server.clone(),
+                        trusted: Some(fingerprint.clone()),
+                    });
+                }
+                if ui.add(button(t!("Abbrechen").to_string())).clicked() {
+                    actions.push(UiAction::CloudCancel);
+                }
+            });
+        }
+        Status::WaitingForLogin { url } => {
+            ui.add(small(
+                t!("Bitte im Browser anmelden und den Zugriff erlauben …").to_string(),
+                grey,
+            ));
+            ui.horizontal(|ui| {
+                if ui
+                    .add(button(t!("🌐  Browser öffnen").to_string()))
+                    .clicked()
+                {
+                    actions.push(UiAction::OpenUrlInBrowser(url.clone()));
+                }
+                if ui.add(button(t!("Abbrechen").to_string())).clicked() {
+                    actions.push(UiAction::CloudCancel);
+                }
+            });
+        }
+        Status::Idle { .. } | Status::Syncing | Status::Offline(_) | Status::Failed(_) => {
+            if let Some(account) = &state.cloud.account {
+                ui.add(small(format!("👤  {account}"), grey).truncate(true))
+                    .on_hover_text(account);
+            }
+            let (text, color) = match &status {
+                Status::Idle { last: Some(at) } => (
+                    t!("✔  Synchronisiert {when}", when = elapsed_label(*at)),
+                    egui::Color32::from_rgb(120, 200, 120),
+                ),
+                Status::Offline(msg) => (
+                    t!("⚪  Offline – neuer Versuch in Kürze ({msg})", msg = msg),
+                    grey,
+                ),
+                Status::Failed(msg) => (format!("⚠  {msg}"), warn),
+                _ => (t!("🔄  Synchronisiere …").to_string(), grey),
+            };
+            ui.add(small(text, color));
+            if state.cloud.insecure {
+                ui.add(small(t!("⚠ Unverschlüsselt (http)").to_string(), warn));
+            }
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(
+                        !matches!(status, Status::Syncing),
+                        button(t!("🔄  Jetzt").to_string()),
+                    )
+                    .on_hover_text(t!("Sofort mit dem Server abgleichen"))
+                    .clicked()
+                {
+                    actions.push(UiAction::CloudSyncNow);
+                }
+                if ui
+                    .add(button(t!("Trennen").to_string()))
+                    .on_hover_text(t!("Abgleich beenden und das App-Passwort widerrufen; die Notizbücher bleiben auf diesem Gerät und auf dem Server"))
+                    .clicked()
+                {
+                    actions.push(UiAction::CloudDisconnect);
+                }
+            });
+        }
+    }
+}
+
 /// Rendert die schwebende Toolbar und alle zugehörigen UI-Komponenten mit `egui`.
 ///
 /// Gibt eine Liste von `UiAction`-Events zurück, die vom Hauptprogramm verarbeitet werden.
@@ -4535,6 +4714,7 @@ pub fn render_ui(
                                     actions.push(UiAction::SetStorageDir(None));
                                 }
                             });
+                            cloud_section(ui, state, &mut actions);
 
                             section(ui, t!("STATUS"));
                             let (dot_color, status_text) = autosave_status_style(autosave_status);

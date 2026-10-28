@@ -172,6 +172,8 @@ mod tests {
         ("rnote.rs", include_str!("rnote.rs")),
         ("saber.rs", include_str!("saber.rs")),
         ("xopp.rs", include_str!("xopp.rs")),
+        ("nextcloud.rs", include_str!("nextcloud.rs")),
+        ("cloud_sync.rs", include_str!("cloud_sync.rs")),
     ];
 
     /// Alle Texte in `t!("…")` und `tn!("…")` eines Quelltexts, auch über mehrere Zeilen

@@ -74,6 +74,7 @@ The interface is available in English and German; ink-notes follows the system l
 - **When closing** (window or `Ctrl + Q`) and when switching notebooks, everything pending is written before continuing. If that fails, the app stays open and offers to retry or to make an emergency backup.
 - `Ctrl + S` saves immediately. The dot on the ☰ button shows the state: green = saved, orange = changes pending, yellow = saving, red = error.
 - **Storage location** (☰ menu, "Storage location"): put the notebooks into a folder that **Nextcloud, Google Drive, Syncthing or Dropbox** keep in sync, and they are available on all your devices. The notebooks are kept in the subfolder `ink-notes`; if it is still empty, the existing notebooks are copied there (the old ones stay). Changes arriving from another device show up within a few seconds without reopening – but only while everything local is saved, so nothing gets overwritten. If the sync client makes a conflict copy of a page, it is added as a page of its own („Conflict copy: …“) instead of getting lost. Opening a notebook that is open on another device shows a warning.
+- **Nextcloud built in** (☰ menu, "Nextcloud"; also on Android and without a sync client): enter the address of your Nextcloud – also a private server, in a subfolder (`example.org/nextcloud`) or with its own port. Signing in happens in the browser (also with two-factor sign-in); the app gets an app password of its own, which you can revoke in Nextcloud under Settings → Security at any time, and never sees your real password. The notebooks are synced with the folder `ink-notes` in your Nextcloud files every 30 seconds and shortly after saving; the app keeps working offline. If a page was changed on two devices, both versions are kept (the other one as a page of its own); deleted notebooks and pages go into the trash (locally `.trash`, on the server its trash bin). A self-signed certificate is trusted once you have confirmed its fingerprint; addresses with `http://` only work with a warning, since the app password would be readable on the network. "Disconnect" stops syncing and revokes the app password; the notebooks stay. Use either the built-in sync or a sync client's folder as storage location, not both for the same notebooks.
 
 ### Export
 - **PDF** (`Ctrl + E`) to `~/Documents/<title>.pdf`: strokes and shapes as vectors, text boxes as real, searchable text, imported PDF pages as vector background, page titles as bookmarks.
@@ -197,6 +198,8 @@ src/
 ├── history.rs      # Undo/redo
 ├── storage.rs      # Loading/saving (atomic), notebooks, trash, storage location
 ├── disk_watch.rs   # Taking over changes from other devices (sync clients)
+├── nextcloud.rs    # Nextcloud: sign-in in the browser, WebDAV, pinned certificates
+├── cloud_sync.rs   # Built-in sync with Nextcloud (comparison, merging, background thread)
 ├── library.rs      # Notebook folders (library.json)
 ├── math.rs         # Exact evaluation of handwritten math (Issue #46)
 ├── math_ink.rs     # Recognition of handwritten math ($P point clouds)

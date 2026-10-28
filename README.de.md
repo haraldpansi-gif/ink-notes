@@ -74,6 +74,7 @@ Die Oberfläche gibt es auf Deutsch und Englisch; ink-notes folgt der Systemspra
 - **Beim Schließen** (Fenster oder `Strg + Q`) und beim Wechsel des Notizbuchs wird alles Ausstehende geschrieben, bevor es weitergeht. Schlägt das fehl, bleibt die App offen und bietet Wiederholen oder eine Notfall-Sicherung an.
 - `Strg + S` speichert sofort. Der Punkt am ☰-Knopf zeigt den Stand: grün = gespeichert, orange = Änderungen warten, gelb = speichert gerade, rot = Fehler.
 - **Speicherort** (☰-Menü, „Speicherort“): Liegen die Notizbücher in einem Ordner, den **Nextcloud, Google Drive, Syncthing oder Dropbox** abgleichen, sind sie auf allen Geräten verfügbar. Die Notizbücher liegen im Unterordner `ink-notes`; ist er noch leer, werden die vorhandenen Notizbücher dorthin kopiert (die alten bleiben erhalten). Änderungen von einem anderen Gerät erscheinen nach wenigen Sekunden ohne neu zu öffnen – aber nur, solange lokal alles gespeichert ist, damit nichts überschrieben wird. Legt der Sync-Client eine Konfliktkopie einer Seite an, wird sie als eigene Seite („Konfliktkopie: …“) übernommen statt verloren zu gehen. Ist ein Notizbuch gerade auf einem anderen Gerät geöffnet, warnt die App beim Öffnen.
+- **Nextcloud eingebaut** (☰-Menü, „Nextcloud“; auch unter Android und ohne Sync-Client): Adresse der eigenen Nextcloud eingeben – auch ein privater Server, in einem Unterordner (`example.org/nextcloud`) oder mit eigenem Port. Die Anmeldung läuft im Browser (auch mit Zwei-Faktor-Anmeldung); die App bekommt ein eigenes App-Passwort, das sich in Nextcloud unter Einstellungen → Sicherheit jederzeit widerrufen lässt, und sieht das echte Passwort nie. Die Notizbücher werden alle 30 Sekunden und kurz nach dem Speichern mit dem Ordner `ink-notes` in den Nextcloud-Dateien abgeglichen; offline arbeitet die App normal weiter. Wurde eine Seite auf zwei Geräten geändert, bleiben beide Fassungen erhalten (die andere als eigene Seite); gelöschte Notizbücher und Seiten landen im Papierkorb (lokal `.trash`, auf dem Server dessen Papierkorb). Einem selbst signierten Zertifikat vertraut die App, nachdem du seinen Fingerabdruck bestätigt hast; Adressen mit `http://` gehen nur mit Warnung, weil das App-Passwort dann im Netz lesbar wäre. „Trennen“ beendet den Abgleich und widerruft das App-Passwort; die Notizbücher bleiben erhalten. Bitte entweder den eingebauten Abgleich oder den Ordner eines Sync-Clients als Speicherort verwenden, nicht beides für dieselben Notizbücher.
 
 ### Export
 - **PDF** (`Strg + E`) nach `~/Documents/<Titel>.pdf`: Striche und Formen als Vektoren, Textfelder als echter, durchsuchbarer Text, importierte PDF-Seiten als Vektor-Unterlage, Seitentitel als Lesezeichen.
@@ -195,6 +196,8 @@ src/
 ├── history.rs      # Rückgängig/Wiederholen
 ├── storage.rs      # Laden/Speichern (atomar), Notizbücher, Papierkorb, Speicherort
 ├── disk_watch.rs   # Änderungen anderer Geräte übernehmen (Sync-Clients)
+├── nextcloud.rs    # Nextcloud: Anmeldung im Browser, WebDAV, gemerkte Zertifikate
+├── cloud_sync.rs   # Eingebauter Abgleich mit Nextcloud (Vergleich, Zusammenführen, Hintergrund)
 ├── library.rs      # Ordner der Notizbücher (library.json)
 ├── math.rs         # Exaktes Ausrechnen handgeschriebener Formeln (Issue #46)
 ├── math_ink.rs     # Erkennung handgeschriebener Formeln ($P-Punktwolken)

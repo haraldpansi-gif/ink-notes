@@ -1483,6 +1483,8 @@ pub fn run_with(
     ui_state.library = Library::load(&storage_base_dir);
     ui_state.storage_dir = storage_base_dir.clone();
     ui_state.storage_dir_custom = ui_settings.storage_dir.is_some();
+    // Built-in Nextcloud sync of the storage folder (Issue #49, stage 2)
+    let mut cloud = crate::cloud_sync::CloudSync::new(storage_base_dir.clone());
     if let Some(warning) = startup_warning {
         refresh_notebooks(&storage_base_dir, &mut ui_state);
         ui_state.set_export_message(warning);
@@ -1730,6 +1732,21 @@ pub fn run_with(
                         ui_state.active_tool,
                         new_status,
                     );
+                }
+
+                // Built-in sync: changes from the server to the open notebook wait while it
+                // has unsaved changes; a pass soon after saving
+                let unsaved = new_status != AutosaveStatus::Saved
+                    || is_drawing
+                    || is_stylus_drawing
+                    || ui_state.text_edit.is_some();
+                if cloud.update(&manifest.id, unsaved) {
+                    disk_watch.check_soon(Instant::now());
+                    refresh_notebooks(&storage_base_dir, &mut ui_state);
+                    window.request_redraw();
+                }
+                if prev_status != AutosaveStatus::Saved && new_status == AutosaveStatus::Saved {
+                    cloud.sync_soon();
                 }
 
                 // Take over changes from other devices (Issue #49), but only while everything
@@ -2461,6 +2478,7 @@ pub fn run_with(
                     long_press.deadline(),
                     ui_state.math.deadline(),
                     Some(disk_watch.deadline()),
+                    cloud.deadline(),
                     // The updater thread does not wake the loop: look for its results now and then
                     matches!(
                         updater.status(),
@@ -2578,6 +2596,7 @@ pub fn run_with(
                     WindowEvent::Focused(true) => {
                         // Coming back from another app: look for changes right away
                         disk_watch.check_soon(Instant::now());
+                        cloud.sync_soon();
                         window.request_redraw();
                     }
 
@@ -4180,6 +4199,7 @@ pub fn run_with(
                             .as_ref()
                             .filter(|(id, _, _)| *id == manifest.id)
                             .map(|(_, index, _)| index + 1);
+                        ui_state.cloud = cloud.view();
                         let actions = ui::render_ui(
                             &egui_ctx,
                             &mut ui_state,
@@ -5241,6 +5261,26 @@ pub fn run_with(
                                     }
                                     window.request_redraw();
                                 }
+                                UiAction::CloudConnect { server, trusted } => {
+                                    cloud.connect(&server, trusted);
+                                    window.request_redraw();
+                                }
+                                UiAction::CloudCancel => {
+                                    cloud.cancel_login();
+                                    window.request_redraw();
+                                }
+                                UiAction::CloudSyncNow => {
+                                    let _ = autosave.flush();
+                                    cloud.sync_now();
+                                    window.request_redraw();
+                                }
+                                UiAction::CloudDisconnect => {
+                                    cloud.disconnect();
+                                    ui_state.set_export_message(
+                                        t!("Nextcloud getrennt – die Notizbücher bleiben auf diesem Gerät").to_string(),
+                                    );
+                                    window.request_redraw();
+                                }
                                 UiAction::OpenUrlInBrowser(url) => {
                                     let _ = webbrowser::open(&url);
                                 }
@@ -5343,6 +5383,7 @@ pub fn run_with(
                                                 ui_state.storage_dir = storage_base_dir.clone();
                                                 ui_state.storage_dir_custom =
                                                     ui_settings.storage_dir.is_some();
+                                                cloud.set_local_dir(storage_base_dir.clone());
                                                 refresh_notebooks(&storage_base_dir, &mut ui_state);
                                                 // Same notebook if it exists there, otherwise the first one
                                                 let open_id = ui_state

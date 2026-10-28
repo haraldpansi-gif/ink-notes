@@ -38,6 +38,10 @@ semver = "1.0"
 sha2 = "0.10"
 ureq = { version = "2.10", default-features = false, features = ["tls", "gzip", "json"] }
 url = "2.5"
+# Nextcloud sync (Issue #49): pinning a self-signed certificate needs our own verifier;
+# same versions and features as ureq uses
+rustls = { version = "0.23", default-features = false, features = ["logging", "ring", "std", "tls12"] }
+webpki-roots = "0.26"
 
 # Bilder einfügen: Dekodieren (PNG/JPEG/GIF/WebP/BMP) und Systemzwischenablage
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }

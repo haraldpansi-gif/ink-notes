@@ -87,7 +87,7 @@ fn scan(dir: &Path) -> HashMap<String, Fingerprint> {
 }
 
 /// Page id of a regular page file (`page_<id>.json`).
-fn page_file_id(name: &str) -> Option<u64> {
+pub(crate) fn page_file_id(name: &str) -> Option<u64> {
     name.strip_prefix("page_")?
         .strip_suffix(".json")?
         .parse()

@@ -1565,6 +1565,7 @@ dependencies = [
  "pollster",
  "quick-xml",
  "resvg",
+ "rustls",
  "semver",
  "serde",
  "serde_json",
@@ -1576,6 +1577,7 @@ dependencies = [
  "wayland-client",
  "wayland-protocols",
  "webbrowser",
+ "webpki-roots 0.26.11",
  "wgpu",
  "winit",
 ]
