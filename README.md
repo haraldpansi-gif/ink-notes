@@ -194,6 +194,7 @@ src/
 ├── disk_watch.rs   # Taking over changes from other devices (sync clients)
 ├── library.rs      # Notebook folders (library.json)
 ├── math.rs         # Exact evaluation of handwritten math (Issue #46)
+├── math_ink.rs     # Recognition of handwritten math ($P point clouds)
 ├── autosave.rs     # Saving in the background
 ├── export.rs       # PDF export
 ├── page_export.rs  # Page as PNG/SVG, selection as image

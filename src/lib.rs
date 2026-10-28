@@ -19,6 +19,7 @@ pub mod image_layer;
 pub mod import;
 pub mod library;
 pub mod math;
+pub mod math_ink;
 pub mod osk;
 pub mod page_export;
 pub mod paths;

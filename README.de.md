@@ -192,6 +192,7 @@ src/
 ├── disk_watch.rs   # Änderungen anderer Geräte übernehmen (Sync-Clients)
 ├── library.rs      # Ordner der Notizbücher (library.json)
 ├── math.rs         # Exaktes Ausrechnen handgeschriebener Formeln (Issue #46)
+├── math_ink.rs     # Erkennung handgeschriebener Formeln ($P-Punktwolken)
 ├── autosave.rs     # Speichern im Hintergrund
 ├── export.rs       # PDF-Export
 ├── page_export.rs  # Seite als PNG/SVG, Auswahl als Bild
