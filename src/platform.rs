@@ -143,6 +143,20 @@ pub fn android_app() -> Option<winit::platform::android::activity::AndroidApp> {
     ANDROID_APP.get().cloned()
 }
 
+/// Window edges (left, top, right, bottom; physical pixels) covered by system bars or display
+/// cutouts. Android: the app draws below the status and navigation bars, so its buttons must
+/// keep out of them (Issue #50). Desktop: none.
+pub fn safe_area_insets() -> [f32; 4] {
+    #[cfg(target_os = "android")]
+    {
+        crate::android_bridge::insets()
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        [0.0; 4]
+    }
+}
+
 /// Makes an exported file available to the user. Desktop: it already is (the path is
 /// returned). Android: copied to `Download/ink-notes` through the MediaStore (Android 10 and
 /// newer), as other apps can't see the app's own folder; older versions keep it there.

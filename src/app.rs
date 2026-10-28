@@ -4150,6 +4150,17 @@ pub fn run_with(
                             raw_input.events.extend(events);
                             ui_state.queued_actions.extend(actions);
                         }
+                        // Keep the UI out of system bars and cutouts (Android, Issue #50)
+                        let safe_area = platform::safe_area_insets();
+                        if let Some(rect) = raw_input.screen_rect.filter(|_| safe_area != [0.0; 4])
+                        {
+                            let ppp = egui_ctx.pixels_per_point();
+                            let [left, top, right, bottom] = safe_area.map(|v| v / ppp);
+                            raw_input.screen_rect = Some(egui::Rect::from_min_max(
+                                rect.min + egui::vec2(left, top),
+                                rect.max - egui::vec2(right, bottom),
+                            ));
+                        }
                         egui_ctx.begin_frame(raw_input);
 
                         // 2. Auswahl-Overlay rendern (Bounding Box, Griffe, Lasso)
@@ -4182,8 +4193,8 @@ pub fn run_with(
                         let reserved =
                             ui_state.sidebar_reserved_width() * window.scale_factor() as f32;
                         let (inset_left, inset_right) = match ui_state.sidebar_side {
-                            SidebarSide::Left => (reserved, 0.0),
-                            SidebarSide::Right => (0.0, reserved),
+                            SidebarSide::Left => (reserved + safe_area[0], safe_area[2]),
+                            SidebarSide::Right => (safe_area[0], reserved + safe_area[2]),
                         };
                         if canvas.set_ui_insets(inset_left, inset_right) {
                             window.request_redraw();

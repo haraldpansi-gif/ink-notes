@@ -497,8 +497,9 @@ pub struct UiState {
     pub scrollbar_grab: Option<f32>,
     /// Aktuelle Abbildung Seite ↔ Bildschirm (für Lineal und Treffertests)
     pub page_view: Option<PageView>,
-    /// Fenstergröße in logischen Punkten (vom letzten Bild)
-    pub screen_size: egui::Vec2,
+    /// Usable part of the window in logical points (from the last frame; on Android without the
+    /// system bars)
+    pub screen_rect: egui::Rect,
     /// Eingabefeld „Titel dieser Seite“ in der Seitenübersicht und die Seite, zu der es gehört
     pub page_title_input: String,
     pub page_title_for: Option<u64>,
@@ -593,7 +594,7 @@ impl Default for UiState {
             ruler_drag: None,
             scrollbar_grab: None,
             page_view: None,
-            screen_size: egui::Vec2::ZERO,
+            screen_rect: egui::Rect::ZERO,
             page_title_input: String::new(),
             page_title_for: None,
             page_picker_list: false,
@@ -666,7 +667,7 @@ impl UiState {
 
     /// Mitte des Bereichs neben der Werkzeugleiste (logische Punkte).
     fn visible_canvas_center(&self) -> egui::Pos2 {
-        (self.screen_size / 2.0).to_pos2()
+        self.screen_rect.center()
             + egui::vec2(
                 match self.sidebar_side {
                     SidebarSide::Left => self.sidebar_reserved_width() / 2.0,
@@ -3200,7 +3201,7 @@ pub fn render_ui(
     updater: &crate::updater::UpdaterController,
 ) -> Vec<UiAction> {
     let mut actions = std::mem::take(&mut state.queued_actions);
-    state.screen_size = ctx.screen_rect().size();
+    state.screen_rect = ctx.screen_rect();
     page_separators(ctx, state, notebook);
     page_scrollbar(ctx, state, notebook, &mut actions);
     space_preview(ctx, state, notebook);

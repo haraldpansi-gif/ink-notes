@@ -6,6 +6,7 @@
 //! below, possibly on another thread, so they only queue messages and wake the event loop.
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
 use jni::objects::{JObject, JString, JValue};
@@ -24,15 +25,23 @@ enum Message {
 static MESSAGES: Mutex<Vec<Message>> = Mutex::new(Vec::new());
 /// What the open file dialog is for
 static PICKING: Mutex<Option<PickerKind>> = Mutex::new(None);
+/// Window edges covered by system bars or cutouts (left, top, right, bottom; pixels)
+static INSETS: Mutex<[f32; 4]> = Mutex::new([0.0; 4]);
+/// The insets changed since the last frame
+static INSETS_CHANGED: AtomicBool = AtomicBool::new(false);
+
+fn wake() {
+    if let Some(app) = crate::platform::android_app() {
+        app.create_waker().wake();
+    }
+}
 
 fn push(message: Message) {
     MESSAGES
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .push(message);
-    if let Some(app) = crate::platform::android_app() {
-        app.create_waker().wake();
-    }
+    wake();
 }
 
 #[no_mangle]
@@ -75,16 +84,39 @@ pub extern "system" fn Java_eu_pansi_inknotes_InkActivity_nativeFilePicked(
     push(Message::Picked(path));
 }
 
-/// Is a message waiting (then the app draws a new frame to take it)?
+#[no_mangle]
+pub extern "system" fn Java_eu_pansi_inknotes_InkActivity_nativeSetInsets(
+    _env: JNIEnv,
+    _class: JObject,
+    left: jint,
+    top: jint,
+    right: jint,
+    bottom: jint,
+) {
+    let insets = [left, top, right, bottom].map(|v| v.max(0) as f32);
+    *INSETS.lock().unwrap_or_else(|e| e.into_inner()) = insets;
+    INSETS_CHANGED.store(true, Ordering::Relaxed);
+    wake();
+}
+
+/// Window edges covered by the status bar, the navigation bar or display cutouts (left, top,
+/// right, bottom; physical pixels)
+pub fn insets() -> [f32; 4] {
+    *INSETS.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Is a message waiting or did the insets change (then the app draws a new frame)?
 pub fn has_messages() -> bool {
-    !MESSAGES
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .is_empty()
+    INSETS_CHANGED.load(Ordering::Relaxed)
+        || !MESSAGES
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_empty()
 }
 
 /// Typed text and deletions as egui input, and the action for a picked file.
 pub fn take_messages() -> (Vec<egui::Event>, Vec<UiAction>) {
+    INSETS_CHANGED.store(false, Ordering::Relaxed);
     let messages = std::mem::take(&mut *MESSAGES.lock().unwrap_or_else(|e| e.into_inner()));
     let mut events = Vec::new();
     let mut actions = Vec::new();

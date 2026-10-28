@@ -5,11 +5,13 @@ import android.content.Context;
 import android.content.Intent;
 import android.database.Cursor;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
 import android.provider.OpenableColumns;
 import android.text.InputType;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.WindowInsets;
 import android.view.inputmethod.BaseInputConnection;
 import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.InputConnection;
@@ -29,6 +31,9 @@ import java.io.OutputStream;
  *   An invisible view with its own input connection passes committed text to Rust.
  * - Picking files: the system file dialog (ACTION_OPEN_DOCUMENT); the chosen file is copied to
  *   the cache folder, as Rust can only open files by path.
+ * - System bars: NativeActivity draws the whole window, also below the status and navigation
+ *   bars and display cutouts. Their sizes go to Rust, which keeps its buttons out of them
+ *   (Issue #50).
  *
  * Rust calls showKeyboard and pickFile through JNI and receives the native* calls
  * (src/android_bridge.rs).
@@ -49,6 +54,9 @@ public class InkActivity extends NativeActivity {
     /** Path of the copied file, or null if nothing was chosen or copying failed. */
     static native void nativeFilePicked(String path);
 
+    /** Window edges covered by system bars or cutouts, in pixels. */
+    static native void nativeSetInsets(int left, int top, int right, int bottom);
+
     private TextSink textSink;
 
     @Override
@@ -56,6 +64,26 @@ public class InkActivity extends NativeActivity {
         super.onCreate(savedInstanceState);
         textSink = new TextSink(this);
         addContentView(textSink, new ViewGroup.LayoutParams(1, 1));
+        View decor = getWindow().getDecorView();
+        decor.setOnApplyWindowInsetsListener((view, insets) -> {
+            reportInsets(insets);
+            return view.onApplyWindowInsets(insets);
+        });
+        decor.requestApplyInsets();
+    }
+
+    @SuppressWarnings("deprecation")
+    private static void reportInsets(WindowInsets insets) {
+        if (Build.VERSION.SDK_INT >= 30) {
+            android.graphics.Insets bars = insets.getInsets(
+                    WindowInsets.Type.systemBars() | WindowInsets.Type.displayCutout());
+            nativeSetInsets(bars.left, bars.top, bars.right, bars.bottom);
+        } else {
+            // Before Android 11 the system window insets include the bars (and since
+            // Android 9 the cutout)
+            nativeSetInsets(insets.getSystemWindowInsetLeft(), insets.getSystemWindowInsetTop(),
+                    insets.getSystemWindowInsetRight(), insets.getSystemWindowInsetBottom());
+        }
     }
 
     /** Shows or hides the soft keyboard; called from Rust on any thread. */
