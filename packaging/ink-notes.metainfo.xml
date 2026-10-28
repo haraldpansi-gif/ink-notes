@@ -84,6 +84,11 @@
   </branding>
   <content_rating type="oars-1.1" />
   <releases>
+    <release version="0.40.0" date="2026-10-28">
+      <description>
+        <p>New Android version: a signed APK for 64-bit ARM devices with pen, touch, soft keyboard, file import and exports to Downloads.</p>
+      </description>
+    </release>
     <release version="0.39.3" date="2026-10-27">
       <description>
         <p>Much lower battery use: the app no longer redraws the window continuously while nothing happens.</p>
