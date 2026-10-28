@@ -84,6 +84,11 @@
   </branding>
   <content_rating type="oars-1.1" />
   <releases>
+    <release version="0.42.0" date="2026-10-28">
+      <description>
+        <p>Built-in Nextcloud sync: sign in through the browser and the notebooks are synced with your Nextcloud, also private servers and without a sync client.</p>
+      </description>
+    </release>
     <release version="0.41.1" date="2026-10-28">
       <description>
         <p>Android: the toolbar no longer hides behind the status bar and the navigation bar.</p>
