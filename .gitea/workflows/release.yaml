@@ -19,12 +19,6 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4.2.2
 
-      - name: Fetch Android APK
-        uses: actions/download-artifact@v4.3.0
-        with:
-          name: ink-notes-android-apk
-          path: target
-
       - name: Install System Packaging Tools
         run: |
           export DEBIAN_FRONTEND=noninteractive
@@ -70,6 +64,14 @@ jobs:
           cargo fmt --check
           cargo clippy --all-targets -- -D warnings
           cargo test
+
+      # Only after the Rust cache step: restoring a cache that doesn't match exactly (e.g.
+      # after Cargo.lock changed) cleans target/ and would remove the APK again
+      - name: Fetch Android APK
+        uses: actions/download-artifact@v4.3.0
+        with:
+          name: ink-notes-android-apk
+          path: target
 
       - name: Build Release Artifacts (.deb, .AppImage, .exe, .apk, SHA256SUMS.txt + .minisig)
         run: |
