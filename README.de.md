@@ -37,6 +37,11 @@ Die Oberfläche gibt es auf Deutsch und Englisch; ink-notes folgt der Systemspra
 - Erkannt werden Linien, Pfeile, Kreise, Ellipsen, Rechtecke, Dreiecke, Rauten, Vielecke, Koordinatensysteme (L-Form), Achsenkreuze (ein „+“ in einem Zug oder zwei gekreuzte Geraden, Pfeilspitzen an allen vier Enden) und Oktaeder (Skizze als 3D-Körper).
 - Die Erkennung arbeitet rein geometrisch (Bogenlänge, Douglas-Peucker, Kreis-Fit), ohne Machine Learning. Nicht alles wird erkannt – was nicht passt, bleibt Handschrift.
 
+### Formeln ausrechnen (experimentell)
+- Einschalten im ☰-Menü unter Eingabe („Formeln nach „=“ ausrechnen“). Nach einem handgeschriebenen `=` und einer kurzen Pause erscheint daneben das Ergebnis samt dem Gelesenen, z. B. `2⁴ = 16` oder `(x + 3)² = x² + 6x + 9`; Antippen mit dem Stift oder Klicken fügt es als Textfeld in der Stiftfarbe und in der Höhe der Handschrift ein (Rückgängig entfernt es). Finger und Handballen lösen nichts aus.
+- Gelesen werden Ziffern, `+ − · : /`, Klammern, Hochzahlen (hochgestellt geschrieben), Bruchstriche, Dezimalkommas und die Variablen `x`, `y`, `a`, `b`. Zahlen werden exakt als Brüche gerechnet, Ausdrücke mit Variablen ausmultipliziert. Vor der Formel etwas Abstand lassen, damit weiter links Geschriebenes nicht mitgelesen wird; in einer Kette wie `x = 2 · 3 =` wird der Teil nach dem vorigen `=` gerechnet.
+- Die Zeichen werden mit Punktwolken-Vorlagen ($P) erkannt, ohne Machine Learning und offline. Zeigt der Vorschlag ein falsches Zeichen, ihn einfach ignorieren.
+
 ### Auswählen und Bearbeiten
 - **Auswahlwerkzeug** (`V`): antippen oder Rahmen aufziehen, dann verschieben, an den Ecken skalieren, am Griff drehen oder mit `R` um 90° drehen. Funktioniert mit Maus, Finger und Stift.
 - Auswahl über die Palette **umfärben**, **kopieren/einfügen** (`Strg + C/V`), **löschen** (`Entf`).
@@ -193,6 +198,7 @@ src/
 ├── library.rs      # Ordner der Notizbücher (library.json)
 ├── math.rs         # Exaktes Ausrechnen handgeschriebener Formeln (Issue #46)
 ├── math_ink.rs     # Erkennung handgeschriebener Formeln ($P-Punktwolken)
+├── math_assist.rs  # Ergebnis neben einem handgeschriebenen „=“ (Auslöser, Vorschlag)
 ├── autosave.rs     # Speichern im Hintergrund
 ├── export.rs       # PDF-Export
 ├── page_export.rs  # Seite als PNG/SVG, Auswahl als Bild

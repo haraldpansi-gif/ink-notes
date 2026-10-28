@@ -335,7 +335,7 @@ fn commit_stroke_to_notebook(
     notebook: &mut Notebook,
     manifest: &mut NotebookManifest,
     autosave: &mut AutosaveController,
-    ui_state: &UiState,
+    ui_state: &mut UiState,
     window: &Window,
     snapped_shape: Option<RecognizedShape>,
 ) {
@@ -357,6 +357,7 @@ fn commit_stroke_to_notebook(
             let page = notebook.current_page_mut();
             page.replace_stroke(previous_id, stroke);
             canvas.sync_page(page);
+            ui_state.math.stroke_committed(page, Instant::now());
             autosave.mark_dirty(notebook, manifest);
             window.request_redraw();
             return;
@@ -383,6 +384,8 @@ fn commit_stroke_to_notebook(
         let page = notebook.current_page_mut();
         page.add_stroke(stroke);
         canvas.sync_page(page);
+        // An `=` may have been completed (Issue #46)
+        ui_state.math.stroke_committed(page, Instant::now());
         manifest.next_stroke_id = notebook.next_stroke_id;
         autosave.mark_dirty(notebook, manifest);
         // Durchgehende Ansicht: unten auf der letzten Seite geht es auf einer neuen weiter
@@ -915,6 +918,54 @@ fn insert_text_on_page(
     ui_state.set_export_message(t!("Text eingefügt – mit dem Text-Werkzeug (T) änderbar"));
 }
 
+/// Inserts the result of a math suggestion as a text box next to its `=`, in the ink color
+/// and as high as the handwriting, as one undo step (Issue #46)
+fn insert_math_result(
+    suggestion: &crate::math_assist::Suggestion,
+    canvas: &mut CanvasState,
+    notebook: &mut Notebook,
+    manifest: &mut NotebookManifest,
+    autosave: &mut AutosaveController,
+) {
+    let page = notebook.current_page();
+    if page.id != suggestion.page_id || page.is_readonly() {
+        return;
+    }
+    let font = crate::text::TextFont::Sans;
+    let ascent_per_em = crate::text::TextBox::new(String::new(), 1.0, font, 1.0)
+        .layout()
+        .ascent;
+    let (origin, size) = suggestion.text_placement(ascent_per_em);
+    let mut edit = crate::text::TextEditing::new_at(
+        page.id,
+        origin,
+        page.text_right_edge(origin.x),
+        size,
+        font,
+        suggestion.color,
+    );
+    edit.origin = origin;
+    edit.text.content = suggestion.result.clone();
+    // As wide as the result, so that it does not wrap near the edge of the page
+    edit.text.wrap_width = edit
+        .text
+        .layout()
+        .lines
+        .iter()
+        .map(|line| line.width)
+        .fold(0.0, f32::max)
+        + size;
+    let id = notebook.next_stroke_id();
+    let Some(stroke) = edit.to_stroke(id) else {
+        return;
+    };
+    let page = notebook.current_page_mut();
+    page.add_stroke(stroke);
+    canvas.sync_page(page);
+    manifest.next_stroke_id = notebook.next_stroke_id;
+    autosave.mark_dirty(notebook, manifest);
+}
+
 /// Beendet eine laufende Textbearbeitung: übernimmt das Feld (neu, geändert oder – wenn
 /// geleert – entfernt) als einen Undo-Schritt auf seiner Seite.
 fn finish_text_edit(
@@ -1419,6 +1470,7 @@ pub fn run_with(
     ui_state.pen_presets = ui_settings.pen_presets;
     ui_state.stylus_buttons = ui_settings.stylus_buttons.clone();
     ui_state.set_eraser_radius_mm(ui_settings.eraser_radius_mm);
+    ui_state.math.set_enabled(ui_settings.math_assist);
     ui_state.select_pen(ui_settings.active_pen);
     ui_state.highlighter_colors = ui_settings.highlighter_colors;
     ui_state.select_highlighter_color(ui_settings.active_highlighter);
@@ -1864,7 +1916,7 @@ pub fn run_with(
                                             &mut notebook,
                                             &mut manifest,
                                             &mut autosave,
-                                            &ui_state,
+                                            &mut ui_state,
                                             &window,
                                             stroke_snapped_shape.take(),
                                         );
@@ -2047,6 +2099,26 @@ pub fn run_with(
                                 is_stylus_in_proximity = true;
                                 stylus_tool_id = Some(tool);
                                 let (sx, sy) = stylus_screen_pos;
+
+                                // Tapping a math suggestion inserts its result (Issue #46)
+                                if let Some(suggestion) = (!ui_state.view_mode)
+                                    .then(|| {
+                                        ui_state.math.take_hit(egui::pos2(sx / scale, sy / scale))
+                                    })
+                                    .flatten()
+                                {
+                                    insert_math_result(
+                                        &suggestion,
+                                        &mut canvas,
+                                        &mut notebook,
+                                        &mut manifest,
+                                        &mut autosave,
+                                    );
+                                    // The rest of this tap goes nowhere
+                                    stylus_ui_capture = true;
+                                    window.request_redraw();
+                                    continue;
+                                }
 
                                 if ui::is_screen_point_in_ui(&egui_ctx, &ui_state, (sx, sy), scale)
                                 {
@@ -2275,7 +2347,7 @@ pub fn run_with(
                                         &mut notebook,
                                         &mut manifest,
                                         &mut autosave,
-                                        &ui_state,
+                                        &mut ui_state,
                                         &window,
                                         snapped_shape,
                                     );
@@ -2351,6 +2423,16 @@ pub fn run_with(
                     window.request_redraw();
                 }
 
+                // Pause after an `=` is over: compute the expression (Issue #46)
+                if ui_state.math.update(
+                    notebook.current_page(),
+                    Instant::now(),
+                    is_drawing || is_stylus_drawing,
+                    crate::i18n::language() == crate::i18n::Language::German,
+                ) {
+                    window.request_redraw();
+                }
+
                 // Nachgleiten nach dem Wischen
                 if let Some(delta) = fling.step(Instant::now()) {
                     canvas.pan(delta.x, delta.y);
@@ -2377,6 +2459,7 @@ pub fn run_with(
                 } else if let Some(at) = [
                     egui_repaint_at,
                     long_press.deadline(),
+                    ui_state.math.deadline(),
                     Some(disk_watch.deadline()),
                     // The updater thread does not wake the loop: look for its results now and then
                     matches!(
@@ -3176,6 +3259,25 @@ pub fn run_with(
                                     return;
                                 }
 
+                                // Clicking a math suggestion inserts its result (Issue #46)
+                                if button == MouseButton::Left && !ui_state.view_mode {
+                                    let (sx, sy) = cursor_screen_pos;
+                                    let scale = window.scale_factor() as f32;
+                                    if let Some(suggestion) =
+                                        ui_state.math.take_hit(egui::pos2(sx / scale, sy / scale))
+                                    {
+                                        insert_math_result(
+                                            &suggestion,
+                                            &mut canvas,
+                                            &mut notebook,
+                                            &mut manifest,
+                                            &mut autosave,
+                                        );
+                                        window.request_redraw();
+                                        return;
+                                    }
+                                }
+
                                 fling.stop();
                                 // 1. Pan via mittlere Maustaste oder Leertaste + Linksklick
                                 // In view-only mode the left and right buttons move the page too (Issue #35)
@@ -3380,7 +3482,7 @@ pub fn run_with(
                                         &mut notebook,
                                         &mut manifest,
                                         &mut autosave,
-                                        &ui_state,
+                                        &mut ui_state,
                                         &window,
                                         snapped_shape,
                                     );
@@ -3958,7 +4060,7 @@ pub fn run_with(
                                             &mut notebook,
                                             &mut manifest,
                                             &mut autosave,
-                                            &ui_state,
+                                            &mut ui_state,
                                             &window,
                                             snapped_shape,
                                         );
@@ -5186,6 +5288,14 @@ pub fn run_with(
                                             window.request_redraw();
                                         }
                                     }
+                                }
+                                UiAction::SetMathAssist(on) => {
+                                    ui_settings.math_assist = on;
+                                    save_ui_settings(
+                                        &ui_settings,
+                                        ui_settings_path.as_deref(),
+                                        &mut ui_state,
+                                    );
                                 }
                                 UiAction::SetSidebarSide(side) => {
                                     ui_settings.sidebar_side = side;

@@ -317,6 +317,8 @@ pub enum UiAction {
     UnlockCorruptedPage(u64),
     /// Werkzeugleiste an die andere Fensterseite verlegen (wird gespeichert)
     SetSidebarSide(SidebarSide),
+    /// Compute handwritten math after `=` on or off (Issue #46)
+    SetMathAssist(bool),
     /// Sprache der Oberfläche; `None` = Sprache des Systems
     SetLanguage(Option<crate::i18n::Language>),
     /// Papierfarbe der Anzeige und Aufhellen dunkler Tinte (wird gespeichert)
@@ -413,6 +415,8 @@ pub struct UiState {
     pub update_modal_rect: Option<egui::Rect>,
     /// Steuert, ob Touch-Eingaben mit einem Finger zeichnen oder das Dokument verschieben (Default: false = reine Gesten-Navigation & Zoom)
     pub touch_draw_enabled: bool,
+    /// Computes handwritten math after an `=` (Issue #46)
+    pub math: crate::math_assist::MathAssist,
     /// Zuletzt gelöschtes Notizbuch für Rückgängig während der Sitzung (Papierkorb-Pfad, Titel)
     pub last_deleted_notebook: Option<(std::path::PathBuf, String)>,
     /// Stifte der Werkzeugleiste (Farbe und Stärke) und der gewählte davon; `pen_color` und
@@ -546,6 +550,7 @@ impl Default for UiState {
             show_updater_config: false,
             update_modal_rect: None,
             touch_draw_enabled: false,
+            math: crate::math_assist::MathAssist::default(),
             last_deleted_notebook: None,
             pen_presets: DEFAULT_PEN_PRESETS,
             active_pen: 0,
@@ -1652,6 +1657,57 @@ fn text_style_buttons(ui: &mut egui::Ui, btn: f32, state: &mut UiState) {
 
 /// Bearbeitung eines Textfelds: egui-Textfeld an der Stelle und in der Größe des Felds auf
 /// dem Blatt (ungedreht), mit derselben Schrift. Esc beendet die Bearbeitung.
+/// The result offered next to a handwritten `=` (Issue #46): what was read and the result,
+/// e.g. `2⁴ = 16`. Not interactive for egui, so that fingers and palms pass through to the
+/// page; the pen and the mouse take it via [`crate::math_assist::MathAssist::take_hit`].
+fn math_suggestion(ctx: &egui::Context, state: &mut UiState, notebook: &Notebook) {
+    state.math.chip_rect = None;
+    if state.view_mode {
+        return;
+    }
+    let (Some(view), Some(suggestion)) = (
+        state.page_view,
+        state.math.suggestion_for(notebook.current_page()).cloned(),
+    ) else {
+        return;
+    };
+    let size = (suggestion.symbol_height * view.scale * 0.8).clamp(14.0, 48.0);
+    let response = egui::Area::new(egui::Id::new("math_suggestion"))
+        .fixed_pos(view.to_screen(suggestion.anchor))
+        .pivot(egui::Align2::LEFT_CENTER)
+        .order(egui::Order::Foreground)
+        .interactable(false)
+        .show(ctx, |ui| {
+            egui::Frame::none()
+                .fill(egui::Color32::from_rgba_unmultiplied(30, 34, 44, 235))
+                .stroke(egui::Stroke::new(
+                    1.5_f32,
+                    egui::Color32::from_rgb(70, 130, 230),
+                ))
+                .rounding(size * 0.4)
+                .inner_margin(egui::vec2(size * 0.45, size * 0.2))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = size * 0.25;
+                        ui.label(
+                            egui::RichText::new(format!("{} =", suggestion.expression))
+                                .size(size * 0.7)
+                                .color(egui::Color32::from_gray(170)),
+                        );
+                        ui.label(
+                            egui::RichText::new(&suggestion.result)
+                                .size(size)
+                                .strong()
+                                .color(egui::Color32::WHITE),
+                        );
+                    });
+                });
+        })
+        .response;
+    // A little larger than drawn, as the pen does not hit exactly
+    state.math.chip_rect = Some(response.rect.expand(6.0));
+}
+
 fn text_edit_overlay(ctx: &egui::Context, state: &mut UiState) {
     let adapt = state.adapt_ink_colors && state.paper_theme.is_dark();
     let (Some(view), Some(edit)) = (state.page_view, state.text_edit.as_mut()) else {
@@ -3150,6 +3206,7 @@ pub fn render_ui(
     space_preview(ctx, state, notebook);
     ruler_overlay(ctx, state);
     text_edit_overlay(ctx, state);
+    math_suggestion(ctx, state, notebook);
     context_menu(ctx, state, &mut actions);
 
     let mut pen_btn_rect = None;
@@ -4383,6 +4440,15 @@ pub fn render_ui(
                             .on_hover_text(
                                 t!("Aus: ein Finger verschiebt, zwei Finger zoomen (empfohlen mit Stift).\nAn: ein Finger zeichnet."),
                             );
+                            let mut math = state.math.enabled;
+                            if ui
+                                .checkbox(&mut math, t!("Formeln nach „=“ ausrechnen"))
+                                .on_hover_text(t!("Nach einem handgeschriebenen „=“ erscheint das Ergebnis daneben, z. B. 2⁴ = 16. Antippen mit dem Stift oder Klicken fügt es als Text ein.\nGelesen werden Ziffern, + − · : /, Klammern, Hochzahlen, Brüche und x, y, a, b."))
+                                .changed()
+                            {
+                                state.math.set_enabled(math);
+                                actions.push(UiAction::SetMathAssist(math));
+                            }
                             if let Some(curve) = pressure_curve_editor(ui, state) {
                                 actions.push(UiAction::SavePressureCurve(curve));
                             }

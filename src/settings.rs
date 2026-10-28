@@ -232,6 +232,8 @@ pub struct UiSettings {
     /// Folder of the notebooks, e.g. inside a Nextcloud folder; default location if unset
     /// (Issue #49)
     pub storage_dir: Option<PathBuf>,
+    /// Compute handwritten math after `=` (Issue #46)
+    pub math_assist: bool,
 }
 
 impl Default for UiSettings {
@@ -253,6 +255,7 @@ impl Default for UiSettings {
             language: None,
             eraser_radius_mm: 3.0,
             storage_dir: None,
+            math_assist: false,
         }
     }
 }
@@ -350,6 +353,7 @@ mod tests {
             language: Some(Language::English),
             eraser_radius_mm: 6.0,
             storage_dir: Some(PathBuf::from("/home/pia/Nextcloud/ink-notes")),
+            math_assist: true,
         };
         settings.save_to(&path).unwrap();
         assert_eq!(UiSettings::load_from(&path), settings);

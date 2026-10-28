@@ -37,6 +37,11 @@ The interface is available in English and German; ink-notes follows the system l
 - Recognized shapes: lines, arrows, circles, ellipses, rectangles, triangles, rhombuses, polygons, coordinate systems (L shape), axis crosses (a "+" in one stroke or two crossing straight lines, arrowheads on all four ends) and octahedra (sketch as a 3D solid).
 - Recognition is purely geometric (arc length, Douglas-Peucker, circle fitting), without machine learning. Not everything is recognized – whatever does not fit stays handwriting.
 
+### Computing formulas (experimental)
+- Turn on in the ☰ menu under input ("Compute formulas after “=”"). After a handwritten `=` and a short pause, the result appears next to it together with what was read, e.g. `2⁴ = 16` or `(x + 3)² = x² + 6x + 9`; tapping it with the pen or clicking inserts it as a text box in the ink color, as high as the handwriting (undo removes it). Fingers and palms do not trigger it.
+- Read are digits, `+ − · : /`, parentheses, exponents (written raised), fraction bars, decimal commas and the variables `x`, `y`, `a`, `b`. Numbers are computed exactly as fractions, expressions with variables are multiplied out. Leave some space before the formula, so that writing further to the left is not read with it; in a chain such as `x = 2 · 3 =` the part after the previous `=` is computed.
+- The symbols are recognized with point-cloud templates ($P), without machine learning and offline. If the suggestion shows a wrong symbol, just ignore it.
+
 ### Selecting and editing
 - **Selection tool** (`V`): tap or drag a frame, then move, scale by the corners, rotate by the handle, or rotate by 90° with `R`. Works with mouse, finger and pen.
 - **Recolor** the selection with the palette, **copy/paste** (`Ctrl + C/V`), **delete** (`Del`).
@@ -195,6 +200,7 @@ src/
 ├── library.rs      # Notebook folders (library.json)
 ├── math.rs         # Exact evaluation of handwritten math (Issue #46)
 ├── math_ink.rs     # Recognition of handwritten math ($P point clouds)
+├── math_assist.rs  # Result next to a handwritten "=" (trigger, suggestion)
 ├── autosave.rs     # Saving in the background
 ├── export.rs       # PDF export
 ├── page_export.rs  # Page as PNG/SVG, selection as image

@@ -51,6 +51,14 @@ pub fn solve(expression: &str, decimal_comma: bool) -> Option<String> {
     Some(text)
 }
 
+/// `expression` written neatly for showing it, e.g. `2⁴` for `2^(4)`, `(x + 1)/2` for
+/// `((x+1)/(2))` or `2,5 · 3` for `2,5*3`. `None` if it cannot be read.
+pub fn display(expression: &str, decimal_comma: bool) -> Option<String> {
+    let tokens = tokenize(expression)?;
+    let ast = Parser::new(&tokens).parse()?;
+    Some(ast.display(decimal_comma))
+}
+
 // --- Rational numbers ---------------------------------------------------------------------
 
 /// Exact fraction `num / den` with `den > 0`, always reduced
@@ -351,7 +359,8 @@ enum Token {
     Plus,
     Minus,
     Times,
-    Divide,
+    /// `/` for a fraction, `:` for a division sign (`:` and `÷`)
+    Divide(char),
     Power,
     Open,
     Close,
@@ -396,7 +405,8 @@ fn tokenize(input: &str) -> Option<Vec<Token>> {
             '+' => Some(Token::Plus),
             '-' | '−' | '–' => Some(Token::Minus),
             '*' | '·' | '⋅' | '∙' | '×' => Some(Token::Times),
-            '/' | ':' | '÷' => Some(Token::Divide),
+            '/' => Some(Token::Divide('/')),
+            ':' | '÷' => Some(Token::Divide(':')),
             '^' => Some(Token::Power),
             '(' | '[' | '{' => Some(Token::Open),
             ')' | ']' | '}' => Some(Token::Close),
@@ -450,7 +460,8 @@ enum Expr {
     Add(Box<Expr>, Box<Expr>),
     Sub(Box<Expr>, Box<Expr>),
     Mul(Box<Expr>, Box<Expr>),
-    Div(Box<Expr>, Box<Expr>),
+    /// With the sign it was written with, for [`display`]
+    Div(Box<Expr>, Box<Expr>, char),
     Pow(Box<Expr>, Box<Expr>),
 }
 
@@ -463,9 +474,76 @@ impl Expr {
             Expr::Add(a, b) => a.eval()?.add(&b.eval()?)?,
             Expr::Sub(a, b) => a.eval()?.add(&b.eval()?.neg()?)?,
             Expr::Mul(a, b) => a.eval()?.mul(&b.eval()?)?,
-            Expr::Div(a, b) => a.eval()?.div(&b.eval()?)?,
+            Expr::Div(a, b, _) => a.eval()?.div(&b.eval()?)?,
             Expr::Pow(a, b) => a.eval()?.pow(&b.eval()?)?,
         })
+    }
+}
+
+impl Expr {
+    /// Binding strength for deciding on parentheses: sums < products < signs < powers < atoms
+    fn precedence(&self) -> u8 {
+        match self {
+            Expr::Add(..) | Expr::Sub(..) => 1,
+            Expr::Mul(..) | Expr::Div(..) => 2,
+            Expr::Neg(_) => 3,
+            Expr::Pow(..) => 4,
+            Expr::Number(_) | Expr::Variable(_) => 5,
+        }
+    }
+
+    /// The text of this expression, in parentheses if it binds weaker than `min`
+    fn display_at(&self, min: u8, decimal_comma: bool) -> String {
+        let text = self.display(decimal_comma);
+        if self.precedence() < min {
+            format!("({text})")
+        } else {
+            text
+        }
+    }
+
+    fn display(&self, decimal_comma: bool) -> String {
+        let dc = decimal_comma;
+        match self {
+            Expr::Number(value) => value.format_abs(dc),
+            Expr::Variable(name) => name.to_string(),
+            Expr::Neg(e) => format!("−{}", e.display_at(3, dc)),
+            Expr::Add(a, b) => format!("{} + {}", a.display_at(1, dc), b.display_at(1, dc)),
+            Expr::Sub(a, b) => format!("{} − {}", a.display_at(1, dc), b.display_at(2, dc)),
+            Expr::Mul(a, b) => {
+                let left = a.display_at(2, dc);
+                let right = b.display_at(3, dc);
+                // 2x, 3(x + 1), x², but 2 · 3 and x · 2
+                let implicit = !matches!(**a, Expr::Neg(_))
+                    && (matches!(**b, Expr::Variable(_))
+                        || matches!(&**b, Expr::Pow(base, _) if matches!(**base, Expr::Variable(_)))
+                        || right.starts_with('('));
+                if implicit {
+                    format!("{left}{right}")
+                } else {
+                    format!("{left} · {right}")
+                }
+            }
+            Expr::Div(a, b, sign) => match sign {
+                '/' => format!("{}/{}", a.display_at(4, dc), b.display_at(4, dc)),
+                _ => format!("{} : {}", a.display_at(2, dc), b.display_at(3, dc)),
+            },
+            Expr::Pow(base, exponent) => {
+                let base = base.display_at(5, dc);
+                let integer = |e: &Expr| match e {
+                    Expr::Number(v) => v.as_integer().map(|n| superscript(n as u32)),
+                    _ => None,
+                };
+                let small = match &**exponent {
+                    Expr::Neg(e) => integer(e).map(|s| format!("⁻{s}")),
+                    e => integer(e),
+                };
+                match small {
+                    Some(small) => format!("{base}{small}"),
+                    None => format!("{base}^({})", exponent.display(dc)),
+                }
+            }
+        }
     }
 }
 
@@ -516,8 +594,9 @@ impl<'a> Parser<'a> {
         loop {
             if self.eat(&Token::Times) {
                 left = Expr::Mul(Box::new(left), Box::new(self.unary()?));
-            } else if self.eat(&Token::Divide) {
-                left = Expr::Div(Box::new(left), Box::new(self.unary()?));
+            } else if let Some(&Token::Divide(sign)) = self.peek() {
+                self.pos += 1;
+                left = Expr::Div(Box::new(left), Box::new(self.unary()?), sign);
             } else if matches!(self.peek(), Some(Token::Variable(_) | Token::Open)) {
                 // Implicit multiplication: 2x, 3(x + 1), (a + b)(a − b). Two numbers in a
                 // row are not multiplied, they are more likely a misread.
@@ -642,6 +721,28 @@ mod tests {
         assert_eq!(de("x^0,5"), None);
         assert_eq!(de("2 ? 3"), None);
         assert_eq!(de("1,2,3"), None);
+    }
+
+    #[test]
+    fn displays_expressions() {
+        let show = |e: &str| display(e, true).unwrap();
+        assert_eq!(show("2^(4)"), "2⁴");
+        assert_eq!(show("(x+3)^(2)"), "(x + 3)²");
+        assert_eq!(show("2,5·3"), "2,5 · 3");
+        assert_eq!(show("9:3"), "9 : 3");
+        assert_eq!(show("((x+1)/(2))"), "(x + 1)/2");
+        assert_eq!(show("((1)/(2))+((1)/(2·3))"), "1/2 + 1/(2 · 3)");
+        assert_eq!(show("2^(-1)"), "2⁻¹");
+        assert_eq!(show("2^(x+1)"), "2^(x + 1)");
+        assert_eq!(show("3(x+1)"), "3(x + 1)");
+        assert_eq!(show("2x^(2)"), "2x²");
+        assert_eq!(show("x·2"), "x · 2");
+        assert_eq!(show("(a+b)(a-b)"), "(a + b)(a − b)");
+        assert_eq!(show("7-(5-2)"), "7 − (5 − 2)");
+        assert_eq!(show("-2^(2)"), "−2²");
+        assert_eq!(show("(-2)^(2)"), "(−2)²");
+        assert_eq!(show("0.5"), "0,5");
+        assert!(display("1 +", true).is_none());
     }
 
     #[test]

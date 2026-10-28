@@ -942,11 +942,11 @@ fn layout(elements: &[Element], line_height: f32) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// Deterministic pseudo-random numbers in [-1, 1]
-    struct Jitter(u64);
+    pub(crate) struct Jitter(pub u64);
 
     impl Jitter {
         fn next(&mut self) -> f32 {
@@ -1050,7 +1050,7 @@ mod tests {
     }
 
     /// Writes the symbols of `text` from left to right; `^` raises the next symbol
-    fn write_line(text: &str, jitter: &mut Jitter) -> Vec<Vec<Vec2>> {
+    pub(crate) fn write_line(text: &str, jitter: &mut Jitter) -> Vec<Vec<Vec2>> {
         let mut strokes = Vec::new();
         let mut x = 0.0;
         let mut raised = false;
