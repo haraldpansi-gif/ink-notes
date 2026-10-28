@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # Veröffentlicht ein Release auf dem Gitea-Server (gitea.pansi.eu)
-# Lädt .deb, .AppImage, .exe, SHA256SUMS.txt und SHA256SUMS.txt.minisig idempotent als Release-Assets hoch.
+# Lädt .deb, .AppImage, .exe, .apk (falls gebaut), SHA256SUMS.txt und SHA256SUMS.txt.minisig idempotent als Release-Assets hoch.
 # ==============================================================================
 set -euo pipefail
 
@@ -33,6 +33,7 @@ RELEASE_TITLE="ink-notes ${TAG_NAME}"
 DEB_FILE="${ROOT_DIR}/target/ink-notes_${VERSION}_amd64.deb"
 APPIMAGE_FILE="${ROOT_DIR}/target/ink-notes_${VERSION}_x86_64.AppImage"
 EXE_FILE="${ROOT_DIR}/target/ink-notes_${VERSION}_x86_64.exe"
+APK_FILE="${ROOT_DIR}/target/ink-notes_${VERSION}_arm64.apk"
 CHECKSUMS_FILE="${ROOT_DIR}/target/SHA256SUMS.txt"
 SIGNATURE_FILE="${CHECKSUMS_FILE}.minisig"
 TEMPLATE_FILE="${ROOT_DIR}/packaging/release-notes.md.tmpl"
@@ -238,6 +239,9 @@ except Exception:
 upload_asset "${DEB_FILE}"
 upload_asset "${APPIMAGE_FILE}"
 upload_asset "${EXE_FILE}"
+if [ -f "${APK_FILE}" ]; then
+    upload_asset "${APK_FILE}"
+fi
 upload_asset "${CHECKSUMS_FILE}"
 upload_asset "${SIGNATURE_FILE}"
 

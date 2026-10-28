@@ -13,7 +13,7 @@
 
 ink-notes speichert Handschrift als Vektoren, erkennt auf Wunsch Formen, kann PDFs zum Beschriften sowie Notizbücher aus Xournal++, Rnote und Saber importieren, Bilder und Textfelder einfügen und alles wieder als PDF, PNG oder SVG exportieren. Gespeichert wird automatisch im Hintergrund.
 
-Getestet wird vor allem unter Zorin OS 18 / Ubuntu 24.04 (Wayland und X11). Eine Windows-Version gibt es als experimentelles portables Programm.
+Getestet wird vor allem unter Zorin OS 18 / Ubuntu 24.04 (Wayland und X11). Eine Windows-Version gibt es als experimentelles portables Programm, eine Android-Version als APK.
 
 Die Oberfläche gibt es auf Deutsch und Englisch; ink-notes folgt der Systemsprache, umstellen lässt sie sich im ☰-Menü unter „Sprache / Language“.
 
@@ -87,7 +87,7 @@ Die Oberfläche gibt es auf Deutsch und Englisch; ink-notes folgt der Systemspra
 
 ## Installation
 
-Pakete gibt es unter [Releases](https://gitea.pansi.eu/harald/ink-notes/releases) als `.deb`, `.AppImage` und für Windows als `.exe` (x86_64). `<version>` steht für die Versionsnummer, z. B. `0.11.0`.
+Pakete gibt es unter [Releases](https://gitea.pansi.eu/harald/ink-notes/releases) als `.deb`, `.AppImage`, für Windows als `.exe` (x86_64) und für Android als `.apk` (arm64). `<version>` steht für die Versionsnummer, z. B. `0.11.0`.
 
 ```bash
 # Debian-Paket (Zorin OS 18 / Ubuntu 24.04)
@@ -103,6 +103,8 @@ Hinweise:
 - Meldet das AppImage einen Fehler zu `libfuse.so.2`, entweder `sudo apt install libfuse2t64` installieren oder mit `--appimage-extract-and-run` starten.
 
 **Windows (experimentell):** `ink-notes_<version>_x86_64.exe` ist ein portables Programm für Windows 10/11 – ohne Installation einfach starten (Windows SmartScreen fragt evtl. einmal nach, da das Programm nicht signiert ist). Stifteingabe mit Druck läuft über Windows Ink (noch nicht auf echter Hardware getestet). Notizbücher und Einstellungen liegen in `%APPDATA%\ink-notes`. Updates ersetzen die `.exe` an Ort und Stelle und gelten ab dem nächsten Start.
+
+**Android:** `ink-notes_<version>_arm64.apk` läuft ab Android 8 (64-Bit-ARM). Auf dem Gerät herunterladen und öffnen; Android fragt einmal, ob Browser oder Dateimanager Apps installieren dürfen. Der Stift wird von Fingern unterschieden (Stifttasten, Radierer-Ende, Handballen-Erkennung), Import und „Bild einfügen“ nutzen den System-Dateidialog, und Exporte landen in `Download/ink-notes` (ab Android 10). Notizbücher liegen im eigenen Speicher der App und werden beim Deinstallieren gelöscht – vorher exportieren, was bleiben soll. Ein Update in der App gibt es nicht: die neue APK über die alte installieren, die Notizbücher bleiben erhalten.
 
 ---
 
@@ -156,7 +158,7 @@ Die CI prüft zusätzlich `cargo fmt --check` und `cargo clippy --all-targets --
 
 Andere Systeme:
 - **Windows** wird unter Linux übersetzt: `scripts/package-windows.sh` (braucht `gcc-mingw-w64-x86-64`); die Tests laufen mit `wine` als Runner (`CARGO_TARGET_X86_64_PC_WINDOWS_GNU_RUNNER=wine cargo test --target x86_64-pc-windows-gnu`).
-- **Android** (experimentell, Issue #42): `scripts/package-android.sh` baut `target/ink-notes_<version>_arm64.apk` ohne Gradle. Nötig sind das Android-SDK (build-tools, Plattform 34; `ANDROID_HOME`, Standard `~/android-sdk`) und das NDK; der Signierschlüssel kommt aus `ANDROID_KEYSTORE`, `ANDROID_KEYSTORE_PASS` und `ANDROID_KEY_ALIAS`, sonst wird der Debug-Schlüssel verwendet. Ohne SDK auf dem Rechner baut `scripts/build-apk-container.sh` sie in einem Container (podman oder docker, `packaging/android/Containerfile`); `scripts/setup-android-sdk.sh` installiert die festen SDK-/NDK-Versionen. Die CI baut die APK als Workflow-Artefakt (noch nicht im Release); ein Release-Schlüssel gehört in die Secrets `ANDROID_KEYSTORE_B64` (`base64 -w0 release.keystore`), `ANDROID_KEYSTORE_PASS` und `ANDROID_KEY_ALIAS`. Installieren mit `adb install -r target/ink-notes_<version>_arm64.apk`, Log-Ausgaben mit `adb logcat -s ink-notes`. Der Stift wird von Fingern unterschieden (Stifttasten, Radierer-Ende, Handballen-Erkennung), Textfelder öffnen die Bildschirmtastatur, Import und „Bild einfügen“ nutzen den System-Dateidialog, und Exporte landen in `Download/ink-notes` (ab Android 10). Tastaturtext und Dateidialog kommen von der kleinen Java-Activity `packaging/android/java/…/InkActivity.java` (zum Bauen ist ein JDK nötig).
+- **Android** (Issue #42): `scripts/package-android.sh` baut `target/ink-notes_<version>_arm64.apk` ohne Gradle. Nötig sind das Android-SDK (build-tools, Plattform 34; `ANDROID_HOME`, Standard `~/android-sdk`) und das NDK; der Signierschlüssel kommt aus `ANDROID_KEYSTORE`, `ANDROID_KEYSTORE_PASS` und `ANDROID_KEY_ALIAS`, sonst wird der Debug-Schlüssel verwendet. Ohne SDK auf dem Rechner baut `scripts/build-apk-container.sh` sie in einem Container (podman oder docker, `packaging/android/Containerfile`); `scripts/setup-android-sdk.sh` installiert die festen SDK-/NDK-Versionen. Der CI-Job `android` baut die APK zu jedem Release und legt sie ins Release und in `SHA256SUMS.txt`; der Release-Schlüssel gehört in die Secrets `ANDROID_KEYSTORE_B64` (`base64 -w0 release.keystore`), `ANDROID_KEYSTORE_PASS` und `ANDROID_KEY_ALIAS`. Installieren mit `adb install -r target/ink-notes_<version>_arm64.apk`, Log-Ausgaben mit `adb logcat -s ink-notes`. Der Stift wird von Fingern unterschieden (Stifttasten, Radierer-Ende, Handballen-Erkennung), Textfelder öffnen die Bildschirmtastatur, Import und „Bild einfügen“ nutzen den System-Dateidialog, und Exporte landen in `Download/ink-notes` (ab Android 10). Tastaturtext und Dateidialog kommen von der kleinen Java-Activity `packaging/android/java/…/InkActivity.java` (zum Bauen ist ein JDK nötig).
 
 ### Projektstruktur
 

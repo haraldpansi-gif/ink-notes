@@ -13,9 +13,17 @@ jobs:
     # Standardmäßig 'ubuntu-latest'. Falls Ihr Runner unter einem anderen Label registriert ist
     # (z. B. 'linux', 'ubuntu-24.04' oder 'host'), passen Sie dieses Label an.
     runs-on: ubuntu-latest
+    # The APK from the android job goes into the release and its SHA256SUMS.txt
+    needs: android
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4.2.2
+
+      - name: Fetch Android APK
+        uses: actions/download-artifact@v4.3.0
+        with:
+          name: ink-notes-android-apk
+          path: target
 
       - name: Install System Packaging Tools
         run: |
@@ -63,13 +71,14 @@ jobs:
           cargo clippy --all-targets -- -D warnings
           cargo test
 
-      - name: Build Release Artifacts (.deb, .AppImage, .exe, SHA256SUMS.txt + .minisig)
+      - name: Build Release Artifacts (.deb, .AppImage, .exe, .apk, SHA256SUMS.txt + .minisig)
         run: |
           chmod +x scripts/*.sh
           ./scripts/build-release.sh
         env:
           MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
           INK_NOTES_REQUIRE_SIGNATURE: "1"
+          INK_NOTES_REQUIRE_APK: "1"
 
       - name: Publish Release to Gitea
         run: |
@@ -81,11 +90,9 @@ jobs:
           REPO_NAME: ${{ github.event.repository.name }}
 
   android:
-    # Experimental (Issue #45): builds the APK and keeps it as a workflow artifact. It is not
-    # part of the release yet, and a failure here does not stop the release above.
-    name: Android APK (experimental)
+    # Builds the signed APK (Issue #45) and hands it to the release job as a workflow artifact
+    name: Android APK
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4.2.2
@@ -131,7 +138,7 @@ jobs:
           ANDROID_KEYSTORE_PASS: ${{ secrets.ANDROID_KEYSTORE_PASS }}
           ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
 
-      - name: Keep APK as Artifact
+      - name: Hand APK to the Release Job
         uses: actions/upload-artifact@v4.6.2
         with:
           name: ink-notes-android-apk
