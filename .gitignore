@@ -1,3 +1,7 @@
 /target
 *.pdf
 export.pdf
+
+# Android release signing key, never commit it
+*.keystore
+*.jks
