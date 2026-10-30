@@ -2471,6 +2471,11 @@ pub fn run_with(
                     || is_stylus_drawing
                     || is_stylus_in_proximity
                     || fling.is_active()
+                    // While a finger is down: on Wayland, the lift can already sit in winit's
+                    // queue (read from the socket by the graphics driver) without waking the
+                    // loop, and then only arrives with the next touch, which stops the glide
+                    // right away (Issue #28)
+                    || !active_touches.is_empty()
                 {
                     target.set_control_flow(ControlFlow::wait_duration(Duration::from_millis(8)));
                 } else if let Some(at) = [
@@ -3710,6 +3715,9 @@ pub fn run_with(
                         match touch.phase {
                             TouchPhase::Started => {
                                 // Jede neue Berührung hält ein gleitendes Blatt an
+                                if debug_fling && fling.is_active() {
+                                    eprintln!("[Nachgleiten] Neuer Finger hält das Gleiten an");
+                                }
                                 fling.stop();
                                 // Event-Isolation für Touch-Eingaben
                                 let is_touch_in_ui = ui::is_screen_point_in_ui(
