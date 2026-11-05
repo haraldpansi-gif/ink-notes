@@ -1471,6 +1471,7 @@ pub fn run_with(
     ui_state.stylus_buttons = ui_settings.stylus_buttons.clone();
     ui_state.set_eraser_radius_mm(ui_settings.eraser_radius_mm);
     ui_state.math.set_enabled(ui_settings.math_assist);
+    ui_state.touch_draw_enabled = ui_settings.touch_draw;
     ui_state.select_pen(ui_settings.active_pen);
     ui_state.highlighter_colors = ui_settings.highlighter_colors;
     ui_state.select_highlighter_color(ui_settings.active_highlighter);
@@ -5350,6 +5351,14 @@ pub fn run_with(
                                 }
                                 UiAction::SetMathAssist(on) => {
                                     ui_settings.math_assist = on;
+                                    save_ui_settings(
+                                        &ui_settings,
+                                        ui_settings_path.as_deref(),
+                                        &mut ui_state,
+                                    );
+                                }
+                                UiAction::SetTouchDraw(on) => {
+                                    ui_settings.touch_draw = on;
                                     save_ui_settings(
                                         &ui_settings,
                                         ui_settings_path.as_deref(),

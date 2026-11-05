@@ -319,6 +319,8 @@ pub enum UiAction {
     SetSidebarSide(SidebarSide),
     /// Compute handwritten math after `=` on or off (Issue #46)
     SetMathAssist(bool),
+    /// One finger draws or moves the page (saved, Issue #50)
+    SetTouchDraw(bool),
     /// Sprache der Oberfläche; `None` = Sprache des Systems
     SetLanguage(Option<crate::i18n::Language>),
     /// Papierfarbe der Anzeige und Aufhellen dunkler Tinte (wird gespeichert)
@@ -4613,13 +4615,18 @@ pub fn render_ui(
                             });
 
                             section(ui, t!("EINGABE"));
-                            ui.checkbox(
-                                &mut state.touch_draw_enabled,
-                                t!("Mit dem Finger zeichnen"),
-                            )
-                            .on_hover_text(
-                                t!("Aus: ein Finger verschiebt, zwei Finger zoomen (empfohlen mit Stift).\nAn: ein Finger zeichnet."),
-                            );
+                            if ui
+                                .checkbox(
+                                    &mut state.touch_draw_enabled,
+                                    t!("Mit dem Finger zeichnen"),
+                                )
+                                .on_hover_text(
+                                    t!("Aus: ein Finger verschiebt, zwei Finger zoomen (empfohlen mit Stift).\nAn: ein Finger zeichnet."),
+                                )
+                                .changed()
+                            {
+                                actions.push(UiAction::SetTouchDraw(state.touch_draw_enabled));
+                            }
                             let mut math = state.math.enabled;
                             if ui
                                 .checkbox(&mut math, t!("Formeln nach „=“ ausrechnen"))

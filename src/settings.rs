@@ -234,6 +234,9 @@ pub struct UiSettings {
     pub storage_dir: Option<PathBuf>,
     /// Compute handwritten math after `=` (Issue #46)
     pub math_assist: bool,
+    /// One finger draws instead of moving the page. On by default on Android, where phones
+    /// usually have no pen (Issue #50)
+    pub touch_draw: bool,
 }
 
 impl Default for UiSettings {
@@ -256,6 +259,7 @@ impl Default for UiSettings {
             eraser_radius_mm: 3.0,
             storage_dir: None,
             math_assist: false,
+            touch_draw: cfg!(target_os = "android"),
         }
     }
 }
@@ -354,6 +358,7 @@ mod tests {
             eraser_radius_mm: 6.0,
             storage_dir: Some(PathBuf::from("/home/pia/Nextcloud/ink-notes")),
             math_assist: true,
+            touch_draw: true,
         };
         settings.save_to(&path).unwrap();
         assert_eq!(UiSettings::load_from(&path), settings);
