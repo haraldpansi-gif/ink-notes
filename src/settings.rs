@@ -348,7 +348,8 @@ impl UiSettings {
     }
 
     pub fn set_pens(&mut self, pens: [PenPreset; PEN_PRESET_COUNT]) {
-        self.pen_presets.copy_from_slice(&pens[..STORED_PEN_PRESETS]);
+        self.pen_presets
+            .copy_from_slice(&pens[..STORED_PEN_PRESETS]);
         self.more_pen_presets = pens[STORED_PEN_PRESETS..].to_vec();
     }
 
