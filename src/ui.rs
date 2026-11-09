@@ -2942,8 +2942,9 @@ fn file_picker_dialog(ctx: &egui::Context, state: &mut UiState, actions: &mut Ve
             ),
         ),
     };
+    let width = dialog_width(ctx, state, 460.0);
     dialog_window(title, state, false).show(ctx, |ui| {
-        ui.set_width(460.0);
+        ui.set_width(width);
         touch_friendly_spacing(ui);
         if dialog_header(ui, header, true) {
             close = true;
@@ -3112,6 +3113,17 @@ fn dialog_window(title: &'static str, state: &UiState, danger: bool) -> egui::Wi
         .resizable(false)
         .anchor(align, egui::vec2(shift, y))
         .frame(dialog_frame(danger))
+}
+
+/// Content width of a dialog: `wanted`, but at most what fits beside the toolbar, so that on a
+/// phone the dialog is neither hidden under the toolbar nor cut off at the edge (Issue #50).
+fn dialog_width(ctx: &egui::Context, state: &UiState, wanted: f32) -> f32 {
+    // Frame margins (20 each side) and a gap to the toolbar and the screen edge
+    let free = ctx.screen_rect().width()
+        - state.sidebar_reserved_width()
+        - 2.0 * 20.0
+        - 2.0 * UiState::SIDEBAR_MARGIN;
+    wanted.min(free).max(200.0)
 }
 
 /// Kopfzeile eines Dialogs mit Titel und optionalem Schließen-Knopf.
@@ -4937,9 +4949,10 @@ pub fn render_ui(
 
     // 3b. Dokumenten-Manager (Notizbücher wechseln, anlegen, umbenennen, löschen)
     if state.is_document_menu_open {
+        let width = dialog_width(ctx, state, 420.0);
         let doc_win = dialog_window(t!("Dokumenten-Manager"), state, false)
             .show(ctx, |ui| {
-                ui.set_width(420.0);
+                ui.set_width(width);
                 touch_friendly_spacing(ui);
                 if dialog_header(ui, t!("📚 Notizbücher"), true) {
                     state.is_document_menu_open = false;
@@ -4955,13 +4968,13 @@ pub fn render_ui(
                 folder_breadcrumbs(ui, state, &folder);
                 ui.add_space(6.0);
 
-                // Neues Notizbuch oder neuer Ordner hier
-                ui.horizontal(|ui| {
+                // Neues Notizbuch oder neuer Ordner hier (narrow screens: buttons below)
+                ui.horizontal_wrapped(|ui| {
                     let text_edit = ui.add(
                         egui::TextEdit::singleline(&mut state.new_notebook_title_input)
                             .hint_text(t!("Name …"))
                             .margin(egui::vec2(8.0, 8.0))
-                            .desired_width(190.0),
+                            .desired_width(190.0_f32.min(ui.available_width())),
                     );
                     let create_btn = ui
                         .button(egui::RichText::new(t!("➕ Notizbuch")).strong())
@@ -5039,7 +5052,7 @@ pub fn render_ui(
                                 let edit = ui.add(
                                     egui::TextEdit::singleline(&mut state.renaming_title_input)
                                         .margin(egui::vec2(8.0, 8.0))
-                                        .desired_width(260.0),
+                                        .desired_width(260.0_f32.min(ui.available_width() - 80.0)),
                                 );
                                 if ui.button("✔").clicked()
                                     || (edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)))
@@ -5204,9 +5217,10 @@ pub fn render_ui(
 
     // 3c. Release- & Update-Center (Gitea Releases)
     if state.is_update_dialog_open {
+        let width = dialog_width(ctx, state, 460.0);
         let win = dialog_window(t!("Release- & Update-Center"), state, false)
             .show(ctx, |ui| {
-                ui.set_width(460.0);
+                ui.set_width(width);
                 touch_friendly_spacing(ui);
                 if dialog_header(ui, t!("🚀 Updates & Versionen"), true) {
                     state.is_update_dialog_open = false;
@@ -5428,11 +5442,11 @@ pub fn render_ui(
                     .show(ui, |ui| {
                         ui.add_space(4.0);
                         ui.label(egui::RichText::new(t!("Gitea Server-URL:")).size(11.0));
-                        ui.add(egui::TextEdit::singleline(&mut state.updater_server_url_input).desired_width(380.0));
+                        ui.add(egui::TextEdit::singleline(&mut state.updater_server_url_input).desired_width(380.0_f32.min(ui.available_width())));
 
                         ui.add_space(4.0);
                         ui.label(egui::RichText::new(t!("Personal Access Token (optional für private Repos):")).size(11.0));
-                        ui.add(egui::TextEdit::singleline(&mut state.updater_token_input).password(true).desired_width(380.0));
+                        ui.add(egui::TextEdit::singleline(&mut state.updater_token_input).password(true).desired_width(380.0_f32.min(ui.available_width())));
 
                         ui.add_space(6.0);
                         if ui.button(egui::RichText::new(t!("💾 Einstellungen speichern")).size(11.5)).clicked() {
@@ -5504,9 +5518,10 @@ pub fn render_ui(
 
     // 5. Nicht-wegklickbare Warnung bei Ladefehlern / Quarantäne (Block 1)
     if let Some(warning) = notebook.load_warnings.get(&notebook.current_page().id) {
+        let width = dialog_width(ctx, state, 420.0);
         dialog_window(t!("⚠ Datenintegritäts-Warnung"), state, true)
             .show(ctx, |ui| {
-                ui.set_width(420.0);
+                ui.set_width(width);
                 touch_friendly_spacing(ui);
                 ui.horizontal(|ui| {
                     ui.colored_label(egui::Color32::from_rgb(255, 80, 80), "⚠");
@@ -5575,8 +5590,9 @@ pub fn render_ui(
     // Notfall-/Sicherheits-Dialog bei Fehlschlag des Speicherns vor dem Beenden
     if let Some(err) = &state.shutdown_error {
         let mut dismiss = false;
+        let width = dialog_width(ctx, state, 460.0);
         dialog_window(t!("⚠ Ungespeicherte Änderungen"), state, true).show(ctx, |ui| {
-            ui.set_width(460.0);
+            ui.set_width(width);
             touch_friendly_spacing(ui);
             ui.horizontal(|ui| {
                 ui.colored_label(egui::Color32::from_rgb(255, 80, 80), "⚠");
@@ -5756,6 +5772,30 @@ mod tests {
         assert_eq!(PEN_WIDTH_PRESETS[1].0, 0.5);
         assert_eq!(PEN_WIDTH_PRESETS[2].0, 0.8);
         assert_eq!(PEN_WIDTH_PRESETS[3].0, 1.2);
+    }
+
+    #[test]
+    fn test_notebook_dialog_fits_beside_the_toolbar_on_a_phone() {
+        // Phone in portrait (Issue #50): the dialog was wider than the screen
+        let mut state = UiState::new();
+        state.is_document_menu_open = true;
+        state.available_notebooks = vec![NotebookSummary {
+            id: "nb-1".to_string(),
+            title: "Default notebook".to_string(),
+            page_count: 1,
+            modified_at: 100,
+            status: crate::storage::NotebookStatus::Normal,
+            error: None,
+        }];
+        state.current_notebook_id = "nb-1".to_string();
+        let screen = egui::vec2(412.0, 900.0);
+        let ctx = render_frames_sized(&mut state, &Notebook::new(), 8, screen);
+        let dialog = ctx
+            .memory(|m| m.area_rect(egui::Id::new(t!("Dokumenten-Manager"))))
+            .unwrap();
+        let toolbar = state.toolbar_rect.unwrap();
+        assert!(dialog.left() >= toolbar.right(), "{dialog:?} {toolbar:?}");
+        assert!(dialog.right() <= screen.x, "{dialog:?}");
     }
 
     #[test]
