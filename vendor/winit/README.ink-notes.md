@@ -22,6 +22,10 @@ docs of the original crate were removed.
   the app (`AboutToWait`), also when the events belong to another queue on the same connection.
   octotablet's pen events live on such a queue and only `dispatch_pending` it, so before, pen
   strokes waited until something else woke the loop (Issue #53).
+- `src/platform_impl/linux/wayland/seat/touch/mod.rs`: a touch lift (`wl_touch.up`) is handed
+  on right away instead of waiting for the next `wl_touch.frame`. On a GNOME laptop the lift
+  of a swipe only arrived with the next touch, which fits a frame sent before the lift: the page did not glide after a
+  swipe (Issue #28), and a ruler moved with the finger followed the hovering pen (Issue #55).
 - `Cargo.toml`: `[lints.rust] warnings = "allow"`, because a path dependency is not built with
   capped lints like a crates.io dependency.
 

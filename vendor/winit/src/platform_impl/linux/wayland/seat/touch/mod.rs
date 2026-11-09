@@ -2,14 +2,15 @@
 
 use sctk::reexports::client::protocol::wl_seat::WlSeat;
 use sctk::reexports::client::protocol::wl_surface::WlSurface;
-use sctk::reexports::client::protocol::wl_touch::WlTouch;
-use sctk::reexports::client::{Connection, Proxy, QueueHandle};
+use sctk::reexports::client::protocol::wl_touch::{self, WlTouch};
+use sctk::reexports::client::{Connection, Dispatch, Proxy, QueueHandle};
 use sctk::reexports::csd_frame::FrameClick;
 
 use std::time::Duration;
 
 use sctk::compositor::SurfaceData;
 use sctk::seat::touch::{TouchData, TouchHandler};
+use sctk::seat::SeatState;
 
 use crate::dpi::LogicalPosition;
 use crate::event::{Touch, TouchPhase, WindowEvent};
@@ -286,4 +287,35 @@ impl TouchDataExt for WlTouch {
     }
 }
 
-sctk::delegate_touch!(WinitState);
+// ink-notes patch: sctk holds every touch event back until the compositor sends the
+// `wl_touch.frame` that closes its group. On a GNOME laptop the lift of a swipe only arrived
+// together with the next touch, which fits a frame sent before the matching `up`: the page could
+// not glide (Issue #28) and a ruler moved with the finger followed the hovering pen (Issue #55).
+// A lift is now handed on right away, after the events that came before it.
+impl Dispatch<WlTouch, TouchData> for WinitState {
+    fn event(
+        state: &mut Self,
+        touch: &WlTouch,
+        event: wl_touch::Event,
+        data: &TouchData,
+        conn: &Connection,
+        qh: &QueueHandle<Self>,
+    ) {
+        if let wl_touch::Event::Up { serial, time, id } = event {
+            // Hand on what sctk still holds, then the lift itself
+            <SeatState as Dispatch<WlTouch, TouchData, Self>>::event(
+                state,
+                touch,
+                wl_touch::Event::Frame,
+                data,
+                conn,
+                qh,
+            );
+            state.up(conn, qh, touch, serial, time, id);
+        } else {
+            <SeatState as Dispatch<WlTouch, TouchData, Self>>::event(
+                state, touch, event, data, conn, qh,
+            );
+        }
+    }
+}
