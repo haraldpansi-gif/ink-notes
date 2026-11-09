@@ -3,6 +3,10 @@
 Notebook app for pen, touch and mouse on Linux (tested on Zorin OS 18 / Ubuntu 24.04).
 
 ### Highlights:
+- **Seven pens**: The toolbar now has seven pens instead of four (new: violet, orange, gray). Each remembers its color and width; tap the selected pen again to change them. Older versions keep reading the first four pens (Issue #56)
+- **Momentum scrolling on GNOME, second try**: GNOME could deliver the lift of a swipe only together with the next touch, because the library under winit held it back until the next touch frame. Lifts are now handed on right away, so the page glides on after a quick swipe (Issue #28)
+- **Ruler stays put**: After moving the ruler with a finger, it could follow the hovering pen (same cause as above). In addition, a finger drag of the ruler now ends as soon as the pen comes near (Issue #55)
+- **Dialogs on phones**: The notebook manager and the other dialogs were wider than a phone screen, partly under the toolbar and cut off at the right edge. They now fit beside the toolbar (Issue #50)
 - **Pen without lag on Wayland**: Pen events reached the app only when something else woke it, so strokes trailed behind the pen or appeared only later. Every event from the compositor now wakes the app; it still uses no CPU while idle (Issue #53)
 - **Eraser removes text**: The whole-stroke and partial erasers now remove a text box – typed text or an inserted math result – as soon as they touch it. The highlighter eraser leaves text alone, images are never erased (Issue #54)
 - **Writing with the finger on Android**: "Draw with finger" (☰ → Input) is now remembered and starts switched on on Android, where phones usually have no pen. Before, it was off after every start, so after an update one finger only moved the page (Issue #50)
