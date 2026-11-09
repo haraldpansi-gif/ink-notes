@@ -275,7 +275,7 @@ pub enum EraserMode {
     /// Nur Textmarker – die Handschrift darunter bleibt erhalten
     HighlighterOnly,
     /// Nur den überstrichenen Teil eines Strichs entfernen; der Rest bleibt in Stücken
-    /// erhalten. Formen werden als Ganzes radiert.
+    /// erhalten. Formen und Textfelder werden als Ganzes radiert.
     Partial,
 }
 
@@ -576,6 +576,12 @@ impl Stroke {
             }
         }
         min_dist
+    }
+
+    /// A text box goes as a whole once the eraser touches it, like a typed or inserted math
+    /// result (Issue #54). Images are never erased.
+    fn erased_as_text(&self, eraser_pos: glam::Vec2, eraser_radius: f32) -> bool {
+        self.is_text() && self.distance_to_point(eraser_pos) <= eraser_radius
     }
 
     /// Prüft, ob dieser Strich von einem Radierer an Position `eraser_pos` mit Radius `eraser_radius` getroffen wird.
@@ -942,10 +948,15 @@ impl Page {
         let mut hit_indices = Vec::new();
 
         for (i, stroke) in self.strokes.iter().enumerate() {
-            if !stroke.is_object()
-                && mode.erases(stroke.tool)
-                && stroke.intersects_eraser(eraser_pos, eraser_radius, max_stroke_radius)
-            {
+            let hit = if stroke.is_text() {
+                mode != EraserMode::HighlighterOnly
+                    && stroke.erased_as_text(eraser_pos, eraser_radius)
+            } else {
+                !stroke.is_object()
+                    && mode.erases(stroke.tool)
+                    && stroke.intersects_eraser(eraser_pos, eraser_radius, max_stroke_radius)
+            };
+            if hit {
                 hit_indices.push(i);
             }
         }
@@ -970,7 +981,7 @@ impl Page {
 
     /// Teilradierer: entfernt den Teil aller Striche im Kreis um `eraser_pos`. Getroffene
     /// Striche werden durch ihre übrig gebliebenen Stücke ersetzt (neue IDs aus `next_id`),
-    /// Formen als Ganzes entfernt, Bilder und Textfelder nie. Aufeinanderfolgende Schnitte
+    /// Formen und Textfelder als Ganzes entfernt, Bilder nie. Aufeinanderfolgende Schnitte
     /// eines Radierzugs bilden einen gemeinsamen Undo-Schritt. Gibt `true` zurück, wenn sich etwas geändert hat.
     pub fn erase_partial_at(
         &mut self,
@@ -982,6 +993,14 @@ impl Page {
         let mut added = Vec::new();
         let mut result = Vec::with_capacity(self.strokes.len());
         for stroke in std::mem::take(&mut self.strokes) {
+            if stroke.is_text() {
+                if stroke.erased_as_text(eraser_pos, eraser_radius) {
+                    removed.push(stroke);
+                } else {
+                    result.push(stroke);
+                }
+                continue;
+            }
             let reach = eraser_radius + stroke.width / 2.0;
             if stroke.is_object() || !stroke.aabb.expanded(reach).contains_point(eraser_pos) {
                 result.push(stroke);
@@ -2175,6 +2194,57 @@ mod tests {
         let removed = page.erase_at(at, 10.0, 2.0, EraserMode::All);
         assert_eq!(removed.len(), 3);
         assert!(page.strokes.is_empty());
+    }
+
+    #[test]
+    fn test_eraser_removes_text_boxes_but_not_images() {
+        let corners = |x: f32| {
+            [
+                glam::Vec2::new(x, 100.0),
+                glam::Vec2::new(x + 100.0, 100.0),
+                glam::Vec2::new(x + 100.0, 150.0),
+                glam::Vec2::new(x, 150.0),
+            ]
+        };
+        let text = || {
+            Stroke::new_text(
+                1,
+                crate::text::TextBox::new("10".into(), 40.0, crate::text::TextFont::Sans, 100.0),
+                corners(100.0),
+                [0.0, 0.0, 0.0, 1.0],
+            )
+        };
+        for mode in [EraserMode::All, EraserMode::Partial] {
+            let mut page = Page::new(1, PageBackground::Grid5mm);
+            page.add_stroke(text());
+            page.add_stroke(Stroke::new_image(2, "a".into(), corners(300.0)));
+            let mut next_id = 10;
+            let mut erase = |page: &mut Page, at: glam::Vec2| match mode {
+                EraserMode::Partial => page.erase_partial_at(at, 10.0, &mut next_id),
+                _ => !page.erase_at(at, 10.0, 2.0, mode).is_empty(),
+            };
+            // Next to the box: nothing; touching its edge or inside: the whole box goes
+            assert!(!erase(&mut page, glam::Vec2::new(85.0, 120.0)));
+            assert!(!erase(&mut page, glam::Vec2::new(350.0, 120.0)));
+            assert!(erase(&mut page, glam::Vec2::new(95.0, 120.0)));
+            assert_eq!(
+                page.strokes.iter().map(|s| s.id).collect::<Vec<_>>(),
+                vec![2]
+            );
+            assert!(page.undo());
+            assert_eq!(page.strokes.len(), 2);
+        }
+        // The highlighter eraser leaves text alone
+        let mut page = Page::new(1, PageBackground::Grid5mm);
+        page.add_stroke(text());
+        assert!(page
+            .erase_at(
+                glam::Vec2::new(150.0, 120.0),
+                10.0,
+                2.0,
+                EraserMode::HighlighterOnly
+            )
+            .is_empty());
     }
 
     #[test]
