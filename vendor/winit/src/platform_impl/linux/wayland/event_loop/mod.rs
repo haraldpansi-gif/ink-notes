@@ -105,10 +105,11 @@ impl<T: 'static> EventLoop<T> {
         let wayland_dispatcher =
             calloop::Dispatcher::new(wayland_source, |_, queue, winit_state: &mut WinitState| {
                 let result = queue.dispatch_pending(winit_state);
-                if result.is_ok()
-                    && (!winit_state.events_sink.is_empty()
-                        || !winit_state.window_compositor_updates.is_empty())
-                {
+                // ink-notes patch: wake the app for every read from the socket, not only for
+                // winit's own events. Events for other queues on the same connection (pen
+                // input from octotablet's queue) would otherwise wait until something else
+                // wakes the loop, so pen strokes appeared late or not at all (Issue #53).
+                if result.is_ok() {
                     winit_state.dispatched_events = true;
                 }
                 result

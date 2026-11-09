@@ -18,6 +18,10 @@ docs of the original crate were removed.
   timestamp of each touch event (Started, Moved, Ended), so ink-notes measures the swipe speed
   for gliding with the real event times and not with the time it got around to handling them
   (Issue #28).
+- `src/platform_impl/linux/wayland/event_loop/mod.rs`: every read from the Wayland socket wakes
+  the app (`AboutToWait`), also when the events belong to another queue on the same connection.
+  octotablet's pen events live on such a queue and only `dispatch_pending` it, so before, pen
+  strokes waited until something else woke the loop (Issue #53).
 - `Cargo.toml`: `[lints.rust] warnings = "allow"`, because a path dependency is not built with
   capped lints like a crates.io dependency.
 
