@@ -1901,6 +1901,10 @@ pub fn run_with(
                             PenEvent::In => {
                                 is_stylus_in_proximity = true;
                                 stylus_tool_id = Some(tool);
+                                // A finger that moved the ruler is done once the pen comes near:
+                                // if its lift has not arrived yet, the ruler would follow the
+                                // hovering pen (Issue #55). The pen grabs the ruler only on touch.
+                                ui_state.ruler_drag = None;
                             }
                             PenEvent::Out => {
                                 if is_stylus_in_proximity {
