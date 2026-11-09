@@ -22,7 +22,7 @@ Die Oberfläche gibt es auf Deutsch und Englisch; ink-notes folgt der Systemspra
 ## Funktionen
 
 ### Schreiben und Zeichnen
-- **Vier Stifte** in der Werkzeugleiste, jeder mit eigener Farbe und Stärke (0,15–5 mm, mit Druckstärke). Ändert man Farbe oder Stärke, merkt sich der gewählte Stift das – auch über einen Neustart hinweg. **Textmarker** (halbtransparent, 4–8 mm) in vier Farben; innerhalb eines Strichs wird er nicht dunkler, erst ein neuer Strich deckt stärker.
+- **Sieben Stifte** in der Werkzeugleiste, jeder mit eigener Farbe und Stärke (0,15–5 mm, mit Druckstärke). Ändert man Farbe oder Stärke, merkt sich der gewählte Stift das – auch über einen Neustart hinweg. **Textmarker** (halbtransparent, 4–8 mm) in vier Farben; innerhalb eines Strichs wird er nicht dunkler, erst ein neuer Strich deckt stärker.
 - **Eigene Farben:** Jede Farbe in der Werkzeugleiste (Stifte, Textmarker, Text) lässt sich anpassen – gewählte Farbe erneut antippen, eine Vorgabe oder mit 🎨 einen freien Farbton wählen. Die Leiste merkt sich die Farben. Am Bildschirm erscheinen sie genauso wie im PDF- und Bildexport.
 - **Glättung in zwei Stufen:** Während des Schreibens glättet ein 1€-Filter das Zittern, die Linie erscheint sofort. Beim Absetzen wird der Strich nachbearbeitet: Ecken (Knicke über 65°) bleiben erhalten und werden rund verbunden, der Druckverlauf wird geglättet, überflüssige Punkte entfallen, die Enden werden rund.
 - **Druckkurve** im ☰-Menü an den eigenen Stift anpassen (weicher/härter, Schwelle gegen Grundrauschen).

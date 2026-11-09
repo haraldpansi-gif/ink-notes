@@ -1467,7 +1467,7 @@ pub fn run_with(
     ui_state.pattern_color = ui_settings.pattern_color;
     ui_state.pressure_curve = ui_settings.pressure_curve;
     ui_state.continuous_scroll = ui_settings.continuous_scroll;
-    ui_state.pen_presets = ui_settings.pen_presets;
+    ui_state.pen_presets = ui_settings.pens();
     ui_state.stylus_buttons = ui_settings.stylus_buttons.clone();
     ui_state.set_eraser_radius_mm(ui_settings.eraser_radius_mm);
     ui_state.math.set_enabled(ui_settings.math_assist);
@@ -5594,7 +5594,7 @@ pub fn run_with(
                         ui_state.sync_tool_colors();
                         if !egui_ctx.is_using_pointer() {
                             let mut updated = ui_settings.clone();
-                            updated.pen_presets = ui_state.pen_presets;
+                            updated.set_pens(ui_state.pen_presets);
                             updated.active_pen = ui_state.active_pen;
                             updated.highlighter_colors = ui_state.highlighter_colors;
                             updated.active_highlighter = ui_state.active_highlighter;

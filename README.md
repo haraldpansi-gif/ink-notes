@@ -22,7 +22,7 @@ The interface is available in English and German; ink-notes follows the system l
 ## Features
 
 ### Writing and drawing
-- **Four pens** in the toolbar, each with its own color and width (0.15–5 mm, pressure-sensitive). When you change a pen's color or width, it remembers that – also across restarts. **Highlighter** (semi-transparent, 4–8 mm) in four colors; it does not get darker within one stroke, only a new stroke covers more strongly.
+- **Seven pens** in the toolbar, each with its own color and width (0.15–5 mm, pressure-sensitive). When you change a pen's color or width, it remembers that – also across restarts. **Highlighter** (semi-transparent, 4–8 mm) in four colors; it does not get darker within one stroke, only a new stroke covers more strongly.
 - **Custom colors:** Every color in the toolbar (pens, highlighter, text) can be changed – tap the selected color again and pick a preset or any shade with 🎨. The toolbar remembers the colors. They look the same on screen as in PDF and image exports.
 - **Two-stage smoothing:** While you write, a 1€ filter removes jitter and the line appears immediately. When you lift the pen, the stroke is refined: corners (bends over 65°) are kept and drawn round, the pressure curve is smoothed, redundant points are dropped and the ends become round.
 - **Pressure curve** adjustable to your pen in the ☰ menu (softer/harder, threshold against base noise).

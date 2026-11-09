@@ -721,7 +721,7 @@ impl UiState {
     }
 
     /// Länge der längsten Farbpalette; so viel Platz hält die Leiste immer frei.
-    pub const MAX_PALETTE_LEN: usize = 5;
+    pub const MAX_PALETTE_LEN: usize = PEN_PRESET_COUNT;
     /// Vertical gap between toolbar buttons and the height of a divider line.
     pub const SIDEBAR_SPACING: f32 = 2.0;
     pub const SIDEBAR_DIVIDER: f32 = 3.0;

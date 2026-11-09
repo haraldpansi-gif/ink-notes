@@ -100,10 +100,16 @@ impl PenPreset {
     }
 }
 
-/// Anzahl der Stifte in der Werkzeugleiste.
-pub const PEN_PRESET_COUNT: usize = 4;
+/// Anzahl der Stifte in der Werkzeugleiste (Issue #56: seven).
+pub const PEN_PRESET_COUNT: usize = 7;
 
-/// Standardstifte: Schwarz, Blau und Rot fein, Grün etwas kräftiger.
+/// Pens stored in `pen_presets`. Versions before 0.44 expect exactly four there and would
+/// reset all settings for any other length, so the further pens go to `more_pen_presets` and a
+/// rollback keeps the first four.
+pub const STORED_PEN_PRESETS: usize = 4;
+
+/// Standardstifte: Schwarz, Blau und Rot fein, Grün etwas kräftiger, dazu Violett, Orange und
+/// Grau.
 pub const DEFAULT_PEN_PRESETS: [PenPreset; PEN_PRESET_COUNT] = [
     PenPreset {
         color: [0.12, 0.12, 0.14, 1.0],
@@ -120,6 +126,18 @@ pub const DEFAULT_PEN_PRESETS: [PenPreset; PEN_PRESET_COUNT] = [
     PenPreset {
         color: [0.18, 0.65, 0.35, 1.0],
         width_mm: 0.8,
+    },
+    PenPreset {
+        color: [0.55, 0.25, 0.75, 1.0],
+        width_mm: 0.5,
+    },
+    PenPreset {
+        color: [0.95, 0.55, 0.10, 1.0],
+        width_mm: 0.5,
+    },
+    PenPreset {
+        color: [0.45, 0.45, 0.48, 1.0],
+        width_mm: 0.5,
     },
 ];
 
@@ -215,8 +233,10 @@ pub struct UiSettings {
     /// Frühere globale Einstellung „Seiten durchgehend scrollen“: gilt nur noch für Notizbücher
     /// ohne eigene Anordnung im Manifest (vor 0.28 angelegt), wird nicht mehr geändert
     pub continuous_scroll: bool,
-    /// Stifte der Werkzeugleiste und der gewählte davon
-    pub pen_presets: [PenPreset; PEN_PRESET_COUNT],
+    /// Stifte der Werkzeugleiste und der gewählte davon: the first four here, the others in
+    /// `more_pen_presets` (see [`STORED_PEN_PRESETS`]); use [`Self::pens`]
+    pub pen_presets: [PenPreset; STORED_PEN_PRESETS],
+    pub more_pen_presets: Vec<PenPreset>,
     pub active_pen: usize,
     /// Eigene Farben von Textmarker und Text-Werkzeug und die gewählte davon
     pub highlighter_colors: [[f32; 4]; 4],
@@ -248,7 +268,13 @@ impl Default for UiSettings {
             pattern_color: PatternColor::default(),
             pressure_curve: PressureCurve::default(),
             continuous_scroll: true,
-            pen_presets: DEFAULT_PEN_PRESETS,
+            pen_presets: [
+                DEFAULT_PEN_PRESETS[0],
+                DEFAULT_PEN_PRESETS[1],
+                DEFAULT_PEN_PRESETS[2],
+                DEFAULT_PEN_PRESETS[3],
+            ],
+            more_pen_presets: DEFAULT_PEN_PRESETS[STORED_PEN_PRESETS..].to_vec(),
             active_pen: 0,
             highlighter_colors: DEFAULT_HIGHLIGHTER_COLORS,
             active_highlighter: 0,
@@ -283,9 +309,12 @@ impl UiSettings {
             Err(_) => Self::default(),
         };
         settings.pressure_curve = settings.pressure_curve.sanitized();
-        for (preset, fallback) in settings.pen_presets.iter_mut().zip(DEFAULT_PEN_PRESETS) {
-            *preset = preset.sanitized(fallback);
+        let pens = settings.pens();
+        let mut sanitized = DEFAULT_PEN_PRESETS;
+        for ((preset, pen), fallback) in sanitized.iter_mut().zip(pens).zip(DEFAULT_PEN_PRESETS) {
+            *preset = pen.sanitized(fallback);
         }
+        settings.set_pens(sanitized);
         settings.active_pen = settings.active_pen.min(PEN_PRESET_COUNT - 1);
         for (color, fallback) in settings
             .highlighter_colors
@@ -305,6 +334,22 @@ impl UiSettings {
             .min(settings.text_colors.len() - 1);
         settings.stylus_buttons.truncate(MAX_STYLUS_BUTTONS);
         settings
+    }
+
+    /// All pens of the toolbar; pens missing in the file (older versions had four) are the
+    /// default pens.
+    pub fn pens(&self) -> [PenPreset; PEN_PRESET_COUNT] {
+        let mut pens = DEFAULT_PEN_PRESETS;
+        let stored = self.pen_presets.iter().chain(&self.more_pen_presets);
+        for (pen, stored) in pens.iter_mut().zip(stored) {
+            *pen = *stored;
+        }
+        pens
+    }
+
+    pub fn set_pens(&mut self, pens: [PenPreset; PEN_PRESET_COUNT]) {
+        self.pen_presets.copy_from_slice(&pens[..STORED_PEN_PRESETS]);
+        self.more_pen_presets = pens[STORED_PEN_PRESETS..].to_vec();
     }
 
     /// Speichert die Einstellungen atomar.
@@ -338,7 +383,14 @@ mod tests {
             pen_presets: [PenPreset {
                 color: [0.5, 0.2, 0.7, 1.0],
                 width_mm: 1.5,
-            }; PEN_PRESET_COUNT],
+            }; STORED_PEN_PRESETS],
+            more_pen_presets: vec![
+                PenPreset {
+                    color: [0.1, 0.6, 0.7, 1.0],
+                    width_mm: 2.0,
+                };
+                PEN_PRESET_COUNT - STORED_PEN_PRESETS
+            ],
             active_pen: 2,
             highlighter_colors: [[0.9, 0.5, 0.1, 0.35]; 4],
             active_highlighter: 3,
@@ -373,6 +425,24 @@ mod tests {
     }
 
     #[test]
+    fn test_seven_pens_stay_readable_for_older_versions() {
+        // Versions before 0.44 read `pen_presets` as exactly four pens (Issue #56)
+        #[derive(Deserialize)]
+        struct OldSettings {
+            pen_presets: [PenPreset; 4],
+        }
+        let mut settings = UiSettings::default();
+        let mut pens = DEFAULT_PEN_PRESETS;
+        pens[6].color = [0.3, 0.3, 0.9, 1.0];
+        settings.set_pens(pens);
+        let json = serde_json::to_string(&settings).unwrap();
+        let old: OldSettings = serde_json::from_str(&json).unwrap();
+        assert_eq!(old.pen_presets[..], DEFAULT_PEN_PRESETS[..4]);
+        let back: UiSettings = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.pens(), pens);
+    }
+
+    #[test]
     fn test_old_settings_file_keeps_new_defaults() {
         // ui.json aus v0.3.x kennt nur die Seite der Werkzeugleiste
         let dir = tempfile::tempdir().unwrap();
@@ -397,7 +467,7 @@ mod tests {
         assert_eq!(curve.threshold, 0.0);
 
         // Ohne Stifte: die Standardstifte; unsinnige Stifte werden begrenzt
-        assert_eq!(settings.pen_presets, DEFAULT_PEN_PRESETS);
+        assert_eq!(settings.pens(), DEFAULT_PEN_PRESETS);
         assert_eq!(settings.active_pen, 0);
         std::fs::write(
             &path,
@@ -414,6 +484,8 @@ mod tests {
         assert_eq!(settings.pen_presets[0].color, [1.0, 0.0, 0.5, 1.0]);
         assert_eq!(settings.pen_presets[0].width_mm, 5.0);
         assert_eq!(settings.pen_presets[1].width_mm, 0.15);
+        // Files from before 0.44 have four pens: the others are the default pens
+        assert_eq!(settings.pens()[4..], DEFAULT_PEN_PRESETS[4..]);
 
         // Eigene Farben: Textmarker bleibt halbtransparent, Text deckend
         std::fs::write(
