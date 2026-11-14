@@ -84,6 +84,11 @@
   </branding>
   <content_rating type="oars-1.1" />
   <releases>
+    <release version="0.45.0" date="2026-11-14">
+      <description>
+        <p>Own colors can be saved under the presets of the color menus, and copy and paste in text fields works with other apps.</p>
+      </description>
+    </release>
     <release version="0.44.0" date="2026-11-09">
       <description>
         <p>Seven pens in the toolbar, dialogs that fit on phones, and touch lifts that arrive right away on GNOME, so the page glides after a swipe and the ruler no longer follows the hovering pen.</p>

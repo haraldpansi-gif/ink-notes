@@ -3,6 +3,8 @@
 Notebook app for pen, touch and mouse on Linux (tested on Zorin OS 18 / Ubuntu 24.04).
 
 ### Highlights:
+- **My colors**: Under the presets of the color menus (pen, highlighter, text), "➕ Save color" keeps the current shade in a row of your own colors – up to 12, shared by all three tools and kept across restarts; 🗑 removes the selected one (Issue #56)
+- **Copy and paste in text fields**: Ctrl+C, Ctrl+X and Ctrl+V in a text field now use the system clipboard, so text moves between ink-notes and other apps. Before, they only worked within the app (Issue #57)
 - **Seven pens**: The toolbar now has seven pens instead of four (new: violet, orange, gray). Each remembers its color and width; tap the selected pen again to change them. Older versions keep reading the first four pens (Issue #56)
 - **Momentum scrolling on GNOME, second try**: GNOME could deliver the lift of a swipe only together with the next touch, because the library under winit held it back until the next touch frame. Lifts are now handed on right away, so the page glides on after a quick swipe (Issue #28)
 - **Ruler stays put**: After moving the ruler with a finger, it could follow the hovering pen (same cause as above). In addition, a finger drag of the ruler now ends as soon as the pen comes near (Issue #55)
