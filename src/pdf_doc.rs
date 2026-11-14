@@ -40,8 +40,12 @@ pub const MAX_IMPORT_PAGES: usize = 2000;
 /// Öffnet ein PDF und liefert die angezeigte Größe jeder Seite in Punkt (Drehung
 /// berücksichtigt).
 pub fn page_sizes(bytes: Vec<u8>) -> Result<Vec<(f32, f32)>, String> {
-    let pdf = open(bytes)?;
-    let sizes: Vec<(f32, f32)> = pdf.pages().iter().map(|p| p.render_dimensions()).collect();
+    // Runs on the main thread during import: a panic in the PDF library must not take the
+    // app down
+    let sizes: Vec<(f32, f32)> = guarded(|| {
+        let pdf = open(bytes)?;
+        Ok(pdf.pages().iter().map(|p| p.render_dimensions()).collect())
+    })?;
     if sizes.is_empty() {
         return Err(t!("Das PDF enthält keine Seiten").into());
     }
@@ -53,6 +57,13 @@ pub fn page_sizes(bytes: Vec<u8>) -> Result<Vec<(f32, f32)>, String> {
         ));
     }
     Ok(sizes)
+}
+
+/// Runs PDF code and turns a panic of the PDF library (malformed files) into an error.
+fn guarded<T>(work: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(work)).unwrap_or_else(|_| {
+        Err(t!("Das PDF kann nicht verarbeitet werden (interner Fehler)").to_string())
+    })
 }
 
 fn open(bytes: Vec<u8>) -> Result<Pdf, String> {
@@ -209,21 +220,31 @@ impl PdfRenderService {
                             queue = ready.wait(queue).unwrap_or_else(|e| e.into_inner());
                         }
                     };
+                    // A panic here would end the thread and with it every PDF page until
+                    // the next start, so it only fails the page at hand
                     if open_pdf.as_ref().map(|(p, _)| p) != Some(&request.path) {
-                        open_pdf = std::fs::read(&request.path)
-                            .map_err(|e| e.to_string())
-                            .and_then(open)
-                            .map_err(|e| eprintln!("[PDF] '{}': {e}", request.path.display()))
-                            .ok()
-                            .map(|pdf| (request.path.clone(), pdf));
+                        open_pdf = guarded(|| {
+                            std::fs::read(&request.path)
+                                .map_err(|e| e.to_string())
+                                .and_then(open)
+                        })
+                        .map_err(|e| eprintln!("[PDF] '{}': {e}", request.path.display()))
+                        .ok()
+                        .map(|pdf| (request.path.clone(), pdf));
                     }
                     let result = match &open_pdf {
                         // Mipmaps hier statt im Haupt-Thread: sonst stockt das Scrollen bei
                         // jeder neu gerenderten Seite (Issue #28)
-                        Some((_, pdf)) => render_page(pdf, request.page, request.max_pixels)
-                            .map(crate::image_layer::mip_chain),
+                        Some((_, pdf)) => guarded(|| {
+                            render_page(pdf, request.page, request.max_pixels)
+                                .map(crate::image_layer::mip_chain)
+                        }),
                         None => Err(t!("PDF kann nicht geöffnet werden").into()),
                     };
+                    if result.is_err() {
+                        // The document may be in a broken state after a panic
+                        open_pdf = None;
+                    }
                     if res_tx.send((request.key, result)).is_err() {
                         return;
                     }
@@ -355,6 +376,13 @@ impl Drop for PdfRenderService {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    #[test]
+    fn test_panic_in_pdf_code_becomes_an_error() {
+        let result: Result<(), String> = guarded(|| panic!("simulated panic in the PDF library"));
+        assert!(result.is_err());
+        assert_eq!(guarded(|| Ok(7)), Ok(7));
+    }
 
     /// Minimales gültiges PDF mit Seiten der angegebenen Größen (Punkt); jede Seite zeigt ein
     /// rotes Rechteck in der linken oberen Ecke. Optional mit `/Rotate`.

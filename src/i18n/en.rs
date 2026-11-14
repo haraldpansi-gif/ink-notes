@@ -133,6 +133,10 @@ pub const EN: &[(&str, &str)] = &[
     ("Fehler beim Schreiben auf die Festplatte: {e}", "Error writing to disk: {e}"),
     ("Fehler beim Umbenennen: {err}", "Error while renaming: {err}"),
     ("Fehler beim Wiederherstellen: {err}", "Error while restoring: {err}"),
+    (
+        "Das PDF kann nicht verarbeitet werden (interner Fehler)",
+        "The PDF cannot be processed (internal error)",
+    ),
     ("Fehler beim Öffnen: {err}", "Error while opening: {err}"),
     ("Fehler: {err}", "Error: {err}"),
     ("Fehlermeldung: {message}", "Error message: {message}"),

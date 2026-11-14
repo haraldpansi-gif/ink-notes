@@ -555,8 +555,12 @@ pub fn atomic_write_file(path: &Path, content: &[u8]) -> Result<(), io::Error> {
             use std::os::unix::fs::PermissionsExt;
             let _ = fs::set_permissions(&temp_path, fs::Permissions::from_mode(0o600));
         }
-        file.write_all(content)?;
-        file.sync_all()?;
+        // On a full disk every retry would otherwise leave another partial file behind
+        if let Err(e) = file.write_all(content).and_then(|_| file.sync_all()) {
+            drop(file);
+            let _ = fs::remove_file(&temp_path);
+            return Err(e);
+        }
     }
 
     // Atomares Rename

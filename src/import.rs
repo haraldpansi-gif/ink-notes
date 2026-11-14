@@ -125,11 +125,24 @@ pub fn page(
 /// we draw a diameter of `width · (0.5 + p)`, so the widest point gets p = 1 and thinner
 /// ones less (down to a third of the widest).
 pub fn fit_widths(widths: &[f32]) -> (f32, Vec<f32>) {
-    let widest = widths.iter().copied().fold(0.0, f32::max).max(0.01);
+    let widest = widths
+        .iter()
+        .copied()
+        .filter(|w| w.is_finite())
+        .fold(0.0, f32::max)
+        .max(0.01);
     let width = widest / 1.5;
     let pressures = widths
         .iter()
-        .map(|w| (w / width - 0.5).clamp(0.0, 1.0))
+        .map(|w| {
+            let p = w / width - 0.5;
+            // NaN survives `clamp`, is stored as `null` and makes the page unreadable
+            if p.is_finite() {
+                p.clamp(0.0, 1.0)
+            } else {
+                0.5
+            }
+        })
         .collect();
     (width, pressures)
 }
@@ -153,17 +166,29 @@ pub fn ink_stroke(
         color[3] = 1.0;
         StrokeTool::Pen
     };
+    // Broken files may carry NaN or infinite numbers. They would be written as `null` and
+    // the page could not be read again, so such points are left out.
     let samples = points
         .iter()
         .zip(pressures)
+        .filter(|(p, _)| p.is_finite())
         .enumerate()
         .map(|(i, (p, &pressure))| SampleData {
             x: p.x,
             y: p.y,
-            p: pressure,
+            p: if pressure.is_finite() {
+                pressure.clamp(0.0, 1.0)
+            } else {
+                0.5
+            },
             t: i as f64 * 0.005,
         })
         .collect();
+    let width = if width.is_finite() && width > 0.0 {
+        width
+    } else {
+        5.0
+    };
     StrokeData {
         id,
         color,
@@ -246,7 +271,12 @@ pub fn unpremultiply(pixels: &mut [u8]) {
 /// Rasterizes an SVG for a box of `size` page units (about 250 dpi).
 pub fn rasterize_svg(svg: &str, size: glam::Vec2) -> Option<(u32, u32, Vec<u8>)> {
     use resvg::{tiny_skia, usvg};
-    let tree = usvg::Tree::from_str(svg, &usvg::Options::default()).ok()?;
+    // By default usvg loads `<image href="/some/local/file">` from disk. An imported note
+    // must not be able to pull files of this device into the notebook; embedded data URLs
+    // still work.
+    let mut options = usvg::Options::default();
+    options.image_href_resolver.resolve_string = Box::new(|_, _| None);
+    let tree = usvg::Tree::from_str(svg, &options).ok()?;
     let max = crate::assets::MAX_IMPORT_DIMENSION as f32;
     let px_per_unit = 250.0 / 254.0;
     let width = (size.x * px_per_unit).round().clamp(1.0, max) as u32;
@@ -287,5 +317,45 @@ mod tests {
         assert!((drawn[2] - 10.0).abs() < 1e-3);
         // Thinner than a third of the widest point is not possible
         assert!((drawn[3] - 10.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn test_broken_numbers_never_reach_the_page_file() {
+        let (width, pressures) = fit_widths(&[f32::NAN, 10.0, f32::INFINITY]);
+        assert!(width.is_finite() && pressures.iter().all(|p| p.is_finite()));
+
+        let points = [
+            glam::Vec2::new(10.0, 10.0),
+            glam::Vec2::new(f32::NAN, 20.0),
+            glam::Vec2::new(30.0, 30.0),
+        ];
+        let stroke = ink_stroke(
+            1,
+            [0.0, 0.0, 0.0, 1.0],
+            false,
+            &points,
+            f32::NAN,
+            &[f32::NAN, 0.5, 2.0],
+        );
+        assert_eq!(stroke.samples.len(), 2);
+        assert!(stroke.width.is_finite());
+        let json = serde_json::to_string(&stroke).unwrap();
+        assert!(!json.contains("null"), "{json}");
+        assert!(serde_json::from_str::<StrokeData>(&json).is_ok());
+    }
+
+    #[test]
+    fn test_svg_cannot_embed_local_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let secret = dir.path().join("secret.png");
+        image::RgbaImage::from_pixel(8, 8, image::Rgba([255, 0, 0, 255]))
+            .save(&secret)
+            .unwrap();
+        let svg = format!(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="8" height="8"><image width="8" height="8" xlink:href="{}"/></svg>"#,
+            secret.display()
+        );
+        let (_, _, pixels) = rasterize_svg(&svg, glam::Vec2::new(80.0, 80.0)).unwrap();
+        assert!(pixels.iter().all(|&b| b == 0), "the local image was drawn");
     }
 }

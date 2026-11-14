@@ -228,6 +228,8 @@ pub struct AutosaveController {
     pending_pages: HashMap<u64, PageData>,
     pending_manifest: Option<NotebookManifest>,
     retries: HashMap<u64, PageRetry>,
+    /// Backoff of the manifest after a failed write
+    manifest_retry: Option<PageRetry>,
     last_errors: Vec<String>,
     status: AutosaveStatus,
     in_flight_count: usize,
@@ -281,6 +283,7 @@ impl AutosaveController {
             pending_pages: HashMap::new(),
             pending_manifest: None,
             retries: HashMap::new(),
+            manifest_retry: None,
             last_errors: Vec::new(),
             status: AutosaveStatus::Saved,
             in_flight_count: 0,
@@ -428,16 +431,25 @@ impl AutosaveController {
                         retry.backoff = (retry.backoff * 2).min(Duration::from_secs(30));
                     }
                 },
-                AutosaveResponse::ManifestSaved { result } => {
-                    if let Err((err_msg, failed_manifest)) = result {
+                AutosaveResponse::ManifestSaved { result } => match result {
+                    Ok(()) => self.manifest_retry = None,
+                    Err((err_msg, failed_manifest)) => {
                         eprintln!("[Autosave-Fehler] Manifest fehlgeschlagen: {err_msg}");
                         self.status = AutosaveStatus::Error;
                         self.last_errors.push(t!("Manifest: {msg}", msg = err_msg));
                         if self.pending_manifest.is_none() {
                             self.pending_manifest = Some(*failed_manifest);
                         }
+                        // Dispatching reset the debounce timers, so without a retry time of
+                        // its own the manifest would wait for the next edit
+                        let retry = self.manifest_retry.get_or_insert(PageRetry {
+                            next_retry: now,
+                            backoff: Duration::from_secs(1),
+                        });
+                        retry.next_retry = now + retry.backoff;
+                        retry.backoff = (retry.backoff * 2).min(Duration::from_secs(30));
                     }
-                }
+                },
             }
 
             if self.in_flight_count == 0
@@ -468,7 +480,12 @@ impl AutosaveController {
                         .get(id)
                         .map(|r| now >= r.next_retry)
                         .unwrap_or(false)
-                });
+                })
+                || (self.pending_manifest.is_some()
+                    && self
+                        .manifest_retry
+                        .as_ref()
+                        .is_some_and(|r| now >= r.next_retry));
 
             if max_wait_hit || debounce_hit || retry_ready {
                 self.dispatch_pending();
@@ -515,7 +532,11 @@ impl AutosaveController {
             }
         }
 
-        if let Some(manifest) = self.pending_manifest.take() {
+        let manifest_ready = self
+            .manifest_retry
+            .as_ref()
+            .is_none_or(|r| now >= r.next_retry);
+        if let Some(manifest) = self.pending_manifest.take_if(|_| manifest_ready) {
             let cmd = AutosaveCommand::SaveManifest {
                 notebook_dir: self.notebook_dir.clone(),
                 manifest: manifest.clone(),
@@ -546,6 +567,7 @@ impl AutosaveController {
         }
         // Backoff für den Flush ignorieren, damit sofort geschrieben wird
         self.retries.clear();
+        self.manifest_retry = None;
 
         if !self.pending_pages.is_empty() || self.pending_manifest.is_some() {
             self.dispatch_pending();
@@ -650,6 +672,7 @@ impl AutosaveController {
         self.pending_pages.clear();
         self.pending_manifest = None;
         self.retries.clear();
+        self.manifest_retry = None;
         self.last_errors.clear();
         self.first_change_time = None;
         self.last_change_time = None;
@@ -772,6 +795,7 @@ pub mod tests {
     /// Fake-PageStore zum Simulieren von I/O-Fehlern und Panics.
     pub struct FakePageStore {
         pub fail_page_writes: Mutex<usize>,
+        pub fail_manifest_writes: Mutex<usize>,
         pub panic_on_page: Mutex<bool>,
         pub page_writes: Arc<AtomicUsize>,
         pub manifest_writes: Arc<AtomicUsize>,
@@ -781,6 +805,7 @@ pub mod tests {
         pub fn new() -> Self {
             Self {
                 fail_page_writes: Mutex::new(0),
+                fail_manifest_writes: Mutex::new(0),
                 panic_on_page: Mutex::new(false),
                 page_writes: Arc::new(AtomicUsize::new(0)),
                 manifest_writes: Arc::new(AtomicUsize::new(0)),
@@ -815,6 +840,13 @@ pub mod tests {
             _dir: &Path,
             _manifest: &NotebookManifest,
         ) -> Result<(), StorageError> {
+            let mut fails = self.fail_manifest_writes.lock().unwrap();
+            if *fails > 0 {
+                *fails -= 1;
+                return Err(StorageError::InvalidManifest(
+                    "Simulierter Store-Fehler".to_string(),
+                ));
+            }
             self.manifest_writes.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
@@ -850,6 +882,40 @@ pub mod tests {
             manifests_before
         );
         assert_eq!(controller.status(), AutosaveStatus::Saved);
+    }
+
+    #[test]
+    fn test_failed_manifest_is_retried_without_another_edit() {
+        let clock = Arc::new(MockClock::new(Instant::now()));
+        let store = Arc::new(FakePageStore::new());
+        *store.fail_manifest_writes.lock().unwrap() = 1;
+        let mut controller = AutosaveController::with_options(
+            PathBuf::from("/tmp/manifest_retry"),
+            Duration::from_millis(100),
+            Duration::from_secs(10),
+            Arc::clone(&store) as Arc<dyn PageStore>,
+            Arc::clone(&clock) as Arc<dyn Clock>,
+        );
+        let manifest = NotebookManifest::new("nb", "Retry");
+        controller.mark_manifest_dirty(&manifest);
+
+        clock.advance(Duration::from_millis(200));
+        controller.update();
+        controller.sync_worker();
+        assert_eq!(controller.update(), AutosaveStatus::Error);
+        assert_eq!(store.manifest_writes.load(Ordering::SeqCst), 0);
+
+        // Not before the backoff has passed
+        controller.update();
+        controller.sync_worker();
+        controller.update();
+        assert_eq!(store.manifest_writes.load(Ordering::SeqCst), 0);
+
+        clock.advance(Duration::from_secs(2));
+        controller.update();
+        controller.sync_worker();
+        assert_eq!(controller.update(), AutosaveStatus::Saved);
+        assert_eq!(store.manifest_writes.load(Ordering::SeqCst), 1);
     }
 
     #[test]

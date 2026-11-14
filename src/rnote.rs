@@ -561,7 +561,8 @@ fn convert(doc: &RnoteDocument, notebook_dir: &Path) -> Imported {
         let scale = scale_pt * (72.0 / doc.dpi) as f32;
         // Rnote grows documents page by page; tolerate rounding in the stored size
         let count = |length: f64, page: f64| ((length / page - 0.01).ceil() as usize).max(1);
-        let columns = count(doc.size.x, doc.format.x);
+        // A broken document size must not ask for millions of pages
+        let columns = count(doc.size.x, doc.format.x).min(MAX_PAGES);
         let rows = count(doc.size.y, doc.format.y);
         let rows = rows.min((MAX_PAGES / columns).max(1));
         let targets = (0..rows * columns)
@@ -887,6 +888,22 @@ mod tests {
         assert!((rect.points[0].position.x - 661.5).abs() < 0.5);
         assert!((rect.points[0].position.y - 416.7).abs() < 0.5);
         assert!(second.strokes[1].is_image());
+    }
+
+    #[test]
+    fn test_broken_document_size_is_capped() {
+        let dir = tempfile::tempdir().unwrap();
+        let doc = RnoteDocument {
+            format: DVec2::new(800.0, 1100.0),
+            dpi: 96.0,
+            origin: DVec2::ZERO,
+            size: DVec2::new(1e18, 1e18),
+            endless: false,
+            background: PageBackground::Blank,
+            items: Vec::new(),
+        };
+        let imported = convert(&doc, dir.path());
+        assert!(imported.pages.len() <= MAX_PAGES);
     }
 
     #[test]
