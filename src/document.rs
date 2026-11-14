@@ -1542,6 +1542,11 @@ pub struct AddedPage {
 pub struct SpaceShift {
     pub moves: Vec<StrokeMove>,
     pub added_pages: Vec<AddedPage>,
+    /// Undo histories of the other pages (by page id) as they were before the shift, set
+    /// aside while it is applied. Their steps describe strokes at their old place and page:
+    /// redoing "stroke drawn" there would put a second copy of a stroke that now sits on
+    /// another page. They come back when the shift is undone.
+    pub set_aside: Vec<(u64, HistoryStack)>,
 }
 
 impl Notebook {
@@ -1705,8 +1710,13 @@ impl Notebook {
                 after,
             });
         }
-        let shift = SpaceShift { moves, added_pages };
+        let mut shift = SpaceShift {
+            moves,
+            added_pages,
+            set_aside: Vec::new(),
+        };
         let changed = self.apply_space_moves(&shift, false);
+        shift.set_aside = self.set_histories_aside(&changed, self.pages[page_index].id);
         self.pages[page_index]
             .history
             .push(HistoryAction::SpaceShift(Box::new(shift)));
@@ -1748,16 +1758,37 @@ impl Notebook {
         changed
     }
 
+    /// Takes the histories of the pages a shift changed, except the page that owns the
+    /// step (see [`SpaceShift::set_aside`]).
+    fn set_histories_aside(&mut self, changed: &[u64], owner: u64) -> Vec<(u64, HistoryStack)> {
+        self.pages
+            .iter_mut()
+            .filter(|p| p.id != owner && changed.contains(&p.id))
+            .filter(|p| p.history.can_undo() || p.history.can_redo())
+            .map(|p| (p.id, std::mem::take(&mut p.history)))
+            .collect()
+    }
+
     /// Macht die letzte Aktion der aktuellen Seite rückgängig; ein Platzschaffen-Schritt
     /// betrifft dabei alle beteiligten Seiten. Gibt die geänderten Seiten zurück.
     pub fn undo(&mut self) -> Option<Vec<u64>> {
         let index = self.current_page_index;
         if let Some(HistoryAction::SpaceShift(_)) = self.pages[index].history.undo_stack.last() {
-            let Some(HistoryAction::SpaceShift(shift)) = self.pages[index].history.undo_stack.pop()
+            let Some(HistoryAction::SpaceShift(mut shift)) =
+                self.pages[index].history.undo_stack.pop()
             else {
                 unreachable!()
             };
             let mut changed = self.apply_space_moves(&shift, true);
+            // The pages are as before the shift again, and so their histories apply again.
+            // A page that got steps of its own in the meantime keeps those instead.
+            for (id, history) in shift.set_aside.drain(..) {
+                if let Some(page) = self.pages.iter_mut().find(|p| p.id == id) {
+                    if !page.history.can_undo() && !page.history.can_redo() {
+                        page.history = history;
+                    }
+                }
+            }
             // Dafür angelegte Seiten wieder entfernen, sofern sie leer geblieben sind
             for added in shift.added_pages.iter().rev() {
                 if let Some(i) = self.pages.iter().position(|p| p.id == added.id) {
@@ -1786,7 +1817,8 @@ impl Notebook {
     pub fn redo(&mut self) -> Option<Vec<u64>> {
         let index = self.current_page_index;
         if let Some(HistoryAction::SpaceShift(_)) = self.pages[index].history.redo_stack.last() {
-            let Some(HistoryAction::SpaceShift(shift)) = self.pages[index].history.redo_stack.pop()
+            let Some(HistoryAction::SpaceShift(mut shift)) =
+                self.pages[index].history.redo_stack.pop()
             else {
                 unreachable!()
             };
@@ -1810,6 +1842,7 @@ impl Notebook {
             }
             let changed = self.apply_space_moves(&shift, false);
             let owner = self.current_page_index;
+            shift.set_aside = self.set_histories_aside(&changed, self.pages[owner].id);
             self.pages[owner]
                 .history
                 .undo_stack
@@ -2692,6 +2725,60 @@ mod tests {
             Some(500.0),
             "hinter der PDF-Seite bleibt alles"
         );
+    }
+
+    #[test]
+    fn test_undo_on_a_following_page_after_make_space_does_not_duplicate() {
+        let a4 = A4_SIZE.y;
+        let count = |nb: &Notebook, id: u64| {
+            nb.pages
+                .iter()
+                .flat_map(|p| &p.strokes)
+                .filter(|s| s.id == id)
+                .count()
+        };
+        let mut nb = Notebook::new();
+        nb.add_page(PageBackground::Blank);
+        nb.pages[0].strokes = vec![block(1, 1000.0, 100.0)];
+        // Drawn on the second page, so it is in that page's history
+        nb.pages[1].add_stroke(block(3, a4 - 150.0, 100.0));
+
+        // Pushes stroke 3 over the end of its page onto a new third page
+        nb.make_space(0, 900.0, 300.0).unwrap();
+        assert_eq!(nb.pages.len(), 3);
+        assert!(top_of(&nb, 2, 3).is_some());
+
+        // The step that drew it belongs to the state before the shift: not available now
+        nb.current_page_index = 1;
+        assert!(nb.undo().is_none());
+        assert!(nb.redo().is_none());
+        assert_eq!(count(&nb, 3), 1);
+
+        // With the shift undone it is back and works as before
+        nb.current_page_index = 0;
+        assert!(nb.undo().is_some());
+        assert_eq!(top_of(&nb, 1, 3), Some(a4 - 150.0));
+        nb.current_page_index = 1;
+        assert!(nb.undo().is_some());
+        assert_eq!(count(&nb, 3), 0);
+        assert!(nb.redo().is_some());
+        assert_eq!(count(&nb, 3), 1);
+
+        // Shifted again and something new drawn on the page: that step can be undone, and
+        // undoing the shift then leaves the page's newer history alone
+        nb.current_page_index = 0;
+        assert!(nb.redo().is_some());
+        assert!(top_of(&nb, 2, 3).is_some());
+        nb.pages[1].add_stroke(block(4, 200.0, 100.0));
+        assert!(nb.undo().is_some());
+        nb.current_page_index = 1;
+        assert!(nb.undo().is_some());
+        assert_eq!(count(&nb, 4), 0);
+        assert!(
+            nb.undo().is_none(),
+            "the older history is not restored on top"
+        );
+        assert_eq!(count(&nb, 3), 1);
     }
 
     #[test]
