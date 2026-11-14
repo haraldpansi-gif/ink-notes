@@ -494,6 +494,14 @@ pub const EN: &[(&str, &str)] = &[
     ("🚀 Updates & Versionen", "🚀 Updates & versions"),
     (", PDF-Hintergrund nicht gefunden: {file}", ", PDF background not found: {file}"),
     (", {count} Elemente übersprungen", ", {count} elements skipped"),
+    (
+        "Platz schaffen nicht möglich: Eine der Seiten konnte nicht geladen werden",
+        "Cannot make space: one of the pages could not be loaded",
+    ),
+    (
+        "Nicht gewechselt, Speichern fehlgeschlagen: {err}",
+        "Not switched, saving failed: {err}",
+    ),
     ("Nicht importiert: {err}", "Not imported: {err}"),
     ("Importieren", "Import"),
     ("📄 Importieren", "📄 Import"),

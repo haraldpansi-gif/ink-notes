@@ -125,8 +125,15 @@ fn space_release(
         return;
     };
     if let Some(run) = notebook.space_run(drag.page_index) {
-        for index in run {
+        for index in run.clone() {
             let _ = storage::ensure_page_loaded(storage_dir, notebook, index);
+        }
+        if notebook.pages[run].iter().any(|p| p.is_readonly()) {
+            ui_state.set_export_message(
+                t!("Platz schaffen nicht möglich: Eine der Seiten konnte nicht geladen werden")
+                    .to_string(),
+            );
+            return;
         }
     }
     let dy = drag.clamped_dy();
@@ -1015,6 +1022,32 @@ fn finish_text_edit(
         }
     }
     canvas.sync_page(notebook.current_page_mut());
+}
+
+/// Before another notebook takes the place of the open one: finishes a running text edit
+/// (it belongs to this notebook, page ids repeat in every notebook) and saves everything.
+/// Returns `false` and tells the user when saving failed; the notebook then has to stay open,
+/// otherwise the unsaved changes would be lost.
+fn save_before_switch(
+    canvas: &mut CanvasState,
+    notebook: &mut Notebook,
+    manifest: &mut NotebookManifest,
+    autosave: &mut AutosaveController,
+    ui_state: &mut UiState,
+) -> bool {
+    finish_text_edit(canvas, notebook, manifest, autosave, ui_state);
+    match autosave.flush() {
+        Ok(()) => true,
+        Err(err) => {
+            let msg = err.messages.join(", ");
+            eprintln!("[Autosave] Notebook not switched, saving failed: {msg}");
+            ui_state.set_export_message(t!(
+                "Nicht gewechselt, Speichern fehlgeschlagen: {err}",
+                err = msg
+            ));
+            false
+        }
+    }
 }
 
 /// Text-Werkzeug: Tippen auf das Blatt beendet eine laufende Bearbeitung und öffnet das
@@ -4853,11 +4886,18 @@ pub fn run_with(
                                     if id == manifest.id {
                                         ui_state.is_document_menu_open = false;
                                         window.request_redraw();
+                                    } else if !save_before_switch(
+                                        &mut canvas,
+                                        &mut notebook,
+                                        &mut manifest,
+                                        &mut autosave,
+                                        &mut ui_state,
+                                    ) {
+                                        window.request_redraw();
                                     } else {
                                         let new_notebook_dir = storage_base_dir.join(&id);
                                         match storage::load_notebook(&new_notebook_dir) {
                                             Ok((loaded_nb, loaded_manifest)) => {
-                                                let _ = autosave.flush();
                                                 match storage::NotebookLock::acquire(
                                                     &new_notebook_dir,
                                                 ) {
@@ -4920,71 +4960,78 @@ pub fn run_with(
                                     }
                                 }
                                 UiAction::ImportFile(path) => {
-                                    // Neben das gerade geöffnete Notizbuch
-                                    let folder =
-                                        ui_state.library.folder_of(&manifest.id).to_string();
-                                    let title = path
-                                        .file_stem()
-                                        .map(|s| s.to_string_lossy().into_owned())
-                                        .unwrap_or_else(|| "Import".to_string());
-                                    match crate::import::import_file(
-                                        &storage_base_dir,
-                                        &title,
-                                        &path,
+                                    if save_before_switch(
+                                        &mut canvas,
+                                        &mut notebook,
+                                        &mut manifest,
+                                        &mut autosave,
+                                        &mut ui_state,
                                     ) {
-                                        Ok((new_nb, new_manifest, new_dir, report)) => {
-                                            let id = new_manifest.id.clone();
-                                            change_library(
-                                                &storage_base_dir,
-                                                &mut ui_state,
-                                                |library| library.move_notebook(&id, &folder),
-                                            );
-                                            let _ = autosave.flush();
-                                            _notebook_lock =
-                                                storage::NotebookLock::acquire(&new_dir).ok();
-                                            autosave.set_read_only(_notebook_lock.is_none());
-                                            autosave.switch_notebook_dir(new_dir.clone());
-                                            notebook = new_nb;
-                                            manifest = new_manifest;
-                                            storage_dir = new_dir;
-                                            selection_state.clear();
-                                            ui_state.current_notebook_id = manifest.id.clone();
-                                            ui_state.document_title = manifest.title.clone();
-                                            refresh_notebooks(&storage_base_dir, &mut ui_state);
-                                            canvas.reset_view();
-                                            canvas.sync_page(notebook.current_page_mut());
-                                            update_window_title(
-                                                &window,
-                                                &notebook,
-                                                &manifest,
-                                                ui_state.active_tool,
-                                                autosave.status(),
-                                            );
-                                            let mut message = t!(
-                                                "'{title}' importiert ({count} Seiten)",
-                                                title = manifest.title,
-                                                count = notebook.pages.len()
-                                            );
-                                            if let Some(pdf) = &report.missing_pdf {
-                                                message.push_str(&t!(
-                                                    ", PDF-Hintergrund nicht gefunden: {file}",
-                                                    file = pdf
+                                        // Neben das gerade geöffnete Notizbuch
+                                        let folder =
+                                            ui_state.library.folder_of(&manifest.id).to_string();
+                                        let title = path
+                                            .file_stem()
+                                            .map(|s| s.to_string_lossy().into_owned())
+                                            .unwrap_or_else(|| "Import".to_string());
+                                        match crate::import::import_file(
+                                            &storage_base_dir,
+                                            &title,
+                                            &path,
+                                        ) {
+                                            Ok((new_nb, new_manifest, new_dir, report)) => {
+                                                let id = new_manifest.id.clone();
+                                                change_library(
+                                                    &storage_base_dir,
+                                                    &mut ui_state,
+                                                    |library| library.move_notebook(&id, &folder),
+                                                );
+                                                _notebook_lock =
+                                                    storage::NotebookLock::acquire(&new_dir).ok();
+                                                autosave.set_read_only(_notebook_lock.is_none());
+                                                autosave.switch_notebook_dir(new_dir.clone());
+                                                notebook = new_nb;
+                                                manifest = new_manifest;
+                                                storage_dir = new_dir;
+                                                selection_state.clear();
+                                                ui_state.current_notebook_id = manifest.id.clone();
+                                                ui_state.document_title = manifest.title.clone();
+                                                refresh_notebooks(&storage_base_dir, &mut ui_state);
+                                                canvas.reset_view();
+                                                canvas.sync_page(notebook.current_page_mut());
+                                                update_window_title(
+                                                    &window,
+                                                    &notebook,
+                                                    &manifest,
+                                                    ui_state.active_tool,
+                                                    autosave.status(),
+                                                );
+                                                let mut message = t!(
+                                                    "'{title}' importiert ({count} Seiten)",
+                                                    title = manifest.title,
+                                                    count = notebook.pages.len()
+                                                );
+                                                if let Some(pdf) = &report.missing_pdf {
+                                                    message.push_str(&t!(
+                                                        ", PDF-Hintergrund nicht gefunden: {file}",
+                                                        file = pdf
+                                                    ));
+                                                }
+                                                if report.skipped > 0 {
+                                                    message.push_str(&t!(
+                                                        ", {count} Elemente übersprungen",
+                                                        count = report.skipped
+                                                    ));
+                                                }
+                                                ui_state.set_export_message(message);
+                                            }
+                                            Err(err) => {
+                                                eprintln!("[Import] '{}': {err}", path.display());
+                                                ui_state.set_export_message(t!(
+                                                    "Nicht importiert: {err}",
+                                                    err = err
                                                 ));
                                             }
-                                            if report.skipped > 0 {
-                                                message.push_str(&t!(
-                                                    ", {count} Elemente übersprungen",
-                                                    count = report.skipped
-                                                ));
-                                            }
-                                            ui_state.set_export_message(message);
-                                        }
-                                        Err(err) => {
-                                            eprintln!("[Import] '{}': {err}", path.display());
-                                            ui_state.set_export_message(t!(
-                                                "Nicht importiert: {err}",
-                                                err = err
-                                            ));
                                         }
                                     }
                                     window.request_redraw();
@@ -4994,54 +5041,66 @@ pub fn run_with(
                                     folder,
                                     layout,
                                 } => {
-                                    let _ = autosave.flush();
-                                    match storage::create_new_notebook(&storage_base_dir, &title) {
-                                        Ok((mut new_nb, mut new_manifest, new_dir)) => {
-                                            let id = new_manifest.id.clone();
-                                            new_manifest.layout = Some(layout);
-                                            if layout == NotebookLayout::Endless {
-                                                new_nb.make_endless();
+                                    if save_before_switch(
+                                        &mut canvas,
+                                        &mut notebook,
+                                        &mut manifest,
+                                        &mut autosave,
+                                        &mut ui_state,
+                                    ) {
+                                        match storage::create_new_notebook(
+                                            &storage_base_dir,
+                                            &title,
+                                        ) {
+                                            Ok((mut new_nb, mut new_manifest, new_dir)) => {
+                                                let id = new_manifest.id.clone();
+                                                new_manifest.layout = Some(layout);
+                                                if layout == NotebookLayout::Endless {
+                                                    new_nb.make_endless();
+                                                }
+                                                change_library(
+                                                    &storage_base_dir,
+                                                    &mut ui_state,
+                                                    |library| library.move_notebook(&id, &folder),
+                                                );
+                                                _notebook_lock =
+                                                    storage::NotebookLock::acquire(&new_dir).ok();
+                                                autosave.set_read_only(_notebook_lock.is_none());
+                                                autosave.switch_notebook_dir(new_dir.clone());
+                                                notebook = new_nb;
+                                                manifest = new_manifest;
+                                                storage_dir = new_dir;
+                                                autosave.mark_dirty(&notebook, &mut manifest);
+                                                canvas.reset_view();
+                                                selection_state.clear();
+                                                ui_state.current_notebook_id = manifest.id.clone();
+                                                ui_state.document_title = manifest.title.clone();
+                                                refresh_notebooks(&storage_base_dir, &mut ui_state);
+                                                ui_state.is_document_menu_open = false;
+                                                canvas.sync_page(notebook.current_page_mut());
+                                                update_window_title(
+                                                    &window,
+                                                    &notebook,
+                                                    &manifest,
+                                                    ui_state.active_tool,
+                                                    autosave.status(),
+                                                );
+                                                ui_state.set_export_message(t!(
+                                                    "Dokument '{title}' erstellt",
+                                                    title = manifest.title
+                                                ));
+                                                window.request_redraw();
                                             }
-                                            change_library(
-                                                &storage_base_dir,
-                                                &mut ui_state,
-                                                |library| library.move_notebook(&id, &folder),
-                                            );
-                                            _notebook_lock =
-                                                storage::NotebookLock::acquire(&new_dir).ok();
-                                            autosave.set_read_only(_notebook_lock.is_none());
-                                            autosave.switch_notebook_dir(new_dir.clone());
-                                            notebook = new_nb;
-                                            manifest = new_manifest;
-                                            storage_dir = new_dir;
-                                            autosave.mark_dirty(&notebook, &mut manifest);
-                                            canvas.reset_view();
-                                            selection_state.clear();
-                                            ui_state.current_notebook_id = manifest.id.clone();
-                                            ui_state.document_title = manifest.title.clone();
-                                            refresh_notebooks(&storage_base_dir, &mut ui_state);
-                                            ui_state.is_document_menu_open = false;
-                                            canvas.sync_page(notebook.current_page_mut());
-                                            update_window_title(
-                                                &window,
-                                                &notebook,
-                                                &manifest,
-                                                ui_state.active_tool,
-                                                autosave.status(),
-                                            );
-                                            ui_state.set_export_message(t!(
-                                                "Dokument '{title}' erstellt",
-                                                title = manifest.title
-                                            ));
-                                            window.request_redraw();
+                                            Err(err) => {
+                                                eprintln!("[Dokument-Fehler] Konnte Dokument '{title}' nicht erstellen: {err}");
+                                                ui_state.set_export_message(t!(
+                                                    "Fehler beim Erstellen: {err}",
+                                                    err = err
+                                                ));
+                                            }
                                         }
-                                        Err(err) => {
-                                            eprintln!("[Dokument-Fehler] Konnte Dokument '{title}' nicht erstellen: {err}");
-                                            ui_state.set_export_message(t!(
-                                                "Fehler beim Erstellen: {err}",
-                                                err = err
-                                            ));
-                                        }
+                                    } else {
+                                        window.request_redraw();
                                     }
                                 }
                                 UiAction::RenameNotebook { id, new_title } => {
@@ -5111,7 +5170,21 @@ pub fn run_with(
                                         .unwrap_or_else(|| id.clone());
 
                                     if is_current {
-                                        let _ = autosave.flush();
+                                        finish_text_edit(
+                                            &mut canvas,
+                                            &mut notebook,
+                                            &mut manifest,
+                                            &mut autosave,
+                                            &mut ui_state,
+                                        );
+                                        if let Err(err) = autosave.flush() {
+                                            eprintln!(
+                                                "[Autosave] Not saved before deleting: {}",
+                                                err.messages.join(", ")
+                                            );
+                                        }
+                                        // Nothing may be written into the folder once it is in the trash
+                                        autosave.abandon_pending();
                                         drop(_notebook_lock.take());
                                     }
 
@@ -5423,8 +5496,13 @@ pub fn run_with(
                                         ui_state.set_export_message(
                                             t!("Die Notizbücher liegen bereits dort").to_string(),
                                         );
-                                    } else {
-                                        let _ = autosave.flush();
+                                    } else if save_before_switch(
+                                        &mut canvas,
+                                        &mut notebook,
+                                        &mut manifest,
+                                        &mut autosave,
+                                        &mut ui_state,
+                                    ) {
                                         match storage::copy_storage(&storage_base_dir, &new_base) {
                                             Ok(copied) => {
                                                 // Release lock and open marker in the old location

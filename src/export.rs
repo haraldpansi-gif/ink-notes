@@ -553,7 +553,7 @@ fn render_ink_layer(
             ));
         }
         if let Some(ref shape) = stroke.shape {
-            render_recognized_shape(layer, shape, stroke.color);
+            render_recognized_shape(layer, shape, stroke.color, stroke.width);
         } else {
             match strategy {
                 ExportStrategy::FilledPolygon => {
@@ -831,20 +831,31 @@ fn render_pdf_raster(
     draw_image_xobject(layer, xobject, &pdf.corners(page.size));
 }
 
+/// Line width of a shape in PDF points, as wide as its mesh on screen
+/// (`geometry::shape_to_mesh`: the stroke width in page units, at least 2). Shapes without a
+/// stored width get the former fixed 1.5 pt (about 0.5 mm).
+fn shape_outline_pt(width_units: f32) -> f32 {
+    if width_units <= 0.0 || !width_units.is_finite() {
+        return 1.5;
+    }
+    width_units.max(2.0) * (A4_WIDTH_MM / PAGE_WIDTH) * (72.0 / 25.4)
+}
+
 /// Rendert eine mathematisch bereinigte Form (Gerade, Kreis, Rechteck, Koordinatensystem)
 /// als verlustfreien Vektorpfad im PDF.
 fn render_recognized_shape(
     layer: &crate::pdf_writer::PdfLayerReference,
     shape: &crate::geometry::RecognizedShape,
     color: [f32; 4],
+    width_units: f32,
 ) {
     use crate::geometry::RecognizedShape;
 
     let stroke_color = Color::Rgb(Rgb::new(color[0], color[1], color[2], None));
     layer.set_outline_color(stroke_color);
-    layer.set_outline_thickness(1.5); // ca. 0.5 mm Standard-Liniendicke
-                                      // Wie auf dem Bildschirm: spitze Ecken und stumpfe Enden (der Grafikzustand kann noch
-                                      // runde Verbindungen von einem vorherigen Freihandstrich enthalten)
+    layer.set_outline_thickness(shape_outline_pt(width_units));
+    // Wie auf dem Bildschirm: spitze Ecken und stumpfe Enden (der Grafikzustand kann noch
+    // runde Verbindungen von einem vorherigen Freihandstrich enthalten)
     layer.set_line_cap_style(crate::pdf_writer::LineCapStyle::Butt);
     layer.set_line_join_style(crate::pdf_writer::LineJoinStyle::Miter);
 
@@ -1586,6 +1597,18 @@ mod tests {
         let bytes = bytes_res.unwrap();
         assert!(bytes.len() > 1024);
         assert!(bytes.starts_with(b"%PDF-1."));
+    }
+
+    #[test]
+    fn test_shape_outline_follows_stroke_width() {
+        let mm = |pt: f32| pt * 25.4 / 72.0;
+        // 5 page units are 0.5 mm, a 100 unit highlighter line is 10 mm wide
+        assert!((mm(shape_outline_pt(5.0)) - 0.5).abs() < 1e-3);
+        assert!((mm(shape_outline_pt(100.0)) - 10.0).abs() < 1e-3);
+        // The mesh is never thinner than 2 units
+        assert!((mm(shape_outline_pt(0.5)) - 0.2).abs() < 1e-3);
+        assert_eq!(shape_outline_pt(0.0), 1.5);
+        assert_eq!(shape_outline_pt(f32::NAN), 1.5);
     }
 
     #[test]

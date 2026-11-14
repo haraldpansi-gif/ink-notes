@@ -618,9 +618,42 @@ impl AutosaveController {
     }
 
     /// Wechselt das Zielverzeichnis für zukünftige Speicheroperationen (z. B. beim Dokumentenwechsel).
+    ///
+    /// Whatever the flush could not write belongs to the old notebook and must never be
+    /// written into the new folder, see `abandon_pending`.
     pub fn switch_notebook_dir(&mut self, new_notebook_dir: PathBuf) {
-        let _ = self.flush();
+        if let Err(err) = self.flush() {
+            eprintln!(
+                "[Autosave] Unsaved changes of '{}' dropped on notebook switch: {}",
+                self.notebook_dir.display(),
+                err.messages.join(", ")
+            );
+        }
+        self.abandon_pending();
         self.notebook_dir = new_notebook_dir;
+    }
+
+    /// Gives up on everything still waiting to be written: it goes into the recovery folder
+    /// and leaves the queue. For the moment the notebook folder stops being the target
+    /// (switch to another notebook, notebook moved to the trash).
+    pub fn abandon_pending(&mut self) {
+        if !self.pending_pages.is_empty() {
+            match self.export_recovery(None) {
+                Ok(files) => {
+                    for file in files {
+                        eprintln!("[Autosave] Recovery copy: {}", file.display());
+                    }
+                }
+                Err(e) => eprintln!("[Autosave] Recovery copy failed: {e}"),
+            }
+        }
+        self.pending_pages.clear();
+        self.pending_manifest = None;
+        self.retries.clear();
+        self.last_errors.clear();
+        self.first_change_time = None;
+        self.last_change_time = None;
+        self.status = AutosaveStatus::Saved;
     }
 
     /// Beendet den Hintergrund-Worker ordnungsgemäß nach einem Flush.
@@ -785,6 +818,38 @@ pub mod tests {
             self.manifest_writes.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
+    }
+
+    #[test]
+    fn test_switch_drops_pages_the_flush_could_not_write() {
+        let clock = Arc::new(MockClock::new(Instant::now()));
+        let store = Arc::new(FakePageStore::new());
+        *store.fail_page_writes.lock().unwrap() = 1;
+        let recovery = tempfile::tempdir().unwrap();
+        std::env::set_var("XDG_DATA_HOME", recovery.path());
+
+        let mut controller = AutosaveController::with_options(
+            PathBuf::from("/tmp/old_nb"),
+            Duration::from_millis(100),
+            Duration::from_secs(10),
+            Arc::clone(&store) as Arc<dyn PageStore>,
+            Arc::clone(&clock) as Arc<dyn Clock>,
+        );
+        let page = Page::new(7, PageBackground::Grid5mm);
+        let manifest = NotebookManifest::new("old_nb", "Old");
+        controller.mark_page_dirty(&page, &manifest);
+
+        controller.switch_notebook_dir(PathBuf::from("/tmp/new_nb"));
+        let manifests_before = store.manifest_writes.load(Ordering::SeqCst);
+
+        // Nothing of the old notebook may reach the new folder
+        assert!(controller.flush().is_ok());
+        assert_eq!(store.page_writes.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            store.manifest_writes.load(Ordering::SeqCst),
+            manifests_before
+        );
+        assert_eq!(controller.status(), AutosaveStatus::Saved);
     }
 
     #[test]

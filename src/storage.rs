@@ -630,8 +630,29 @@ fn load_manifest_from_file(path: &Path) -> Result<NotebookManifest, StorageError
 }
 
 /// Lädt das Manifest aus `manifest.json`.
-/// Fällt bei Fehlern/Beschädigung automatisch auf `manifest.json.bak` zurück.
+/// Fällt bei Beschädigung automatisch auf `manifest.json.bak` zurück.
+///
+/// The folder name is the identity of a notebook: everything opens, renames and deletes
+/// `<base>/<id>`. A copied or renamed folder still carries the id of the original in its
+/// manifest, so the id is always taken from the folder.
 pub fn load_manifest(notebook_dir: &Path) -> Result<NotebookManifest, StorageError> {
+    let mut manifest = load_manifest_or_backup(notebook_dir)?;
+    // Canonical, so that a path like `.` still yields the folder name
+    let dir = notebook_dir.canonicalize();
+    let name = dir
+        .as_deref()
+        .unwrap_or(notebook_dir)
+        .file_name()
+        .and_then(|n| n.to_str());
+    if let Some(name) = name {
+        if manifest.id != name {
+            manifest.id = name.to_string();
+        }
+    }
+    Ok(manifest)
+}
+
+fn load_manifest_or_backup(notebook_dir: &Path) -> Result<NotebookManifest, StorageError> {
     let path = notebook_dir.join("manifest.json");
     if !path.exists() {
         let bak_path = notebook_dir.join("manifest.json.bak");
@@ -647,6 +668,13 @@ pub fn load_manifest(notebook_dir: &Path) -> Result<NotebookManifest, StorageErr
 
     match load_manifest_from_file(&path) {
         Ok(manifest) => Ok(manifest),
+        // The backup only stands in for a damaged file. A manifest of a newer app version or
+        // one that cannot be read right now is intact: opening the older backup instead would
+        // let the next save overwrite it with stale content.
+        Err(e @ StorageError::UnsupportedVersion { .. }) => Err(e),
+        Err(StorageError::Io(e)) if e.kind() != io::ErrorKind::InvalidData => {
+            Err(StorageError::Io(e))
+        }
         Err(e) => {
             let bak_path = notebook_dir.join("manifest.json.bak");
             if bak_path.exists() {
@@ -817,8 +845,22 @@ pub fn load_notebook(notebook_dir: &Path) -> Result<(Notebook, NotebookManifest)
             page.persist = PersistState::ReadOnlyAfterLoadError;
             page
         }
+        // Listed but never saved (still empty): an empty page, as with lazy loading. Nothing
+        // can be overwritten, there is no file.
+        Err(StorageError::PageNotFound(_)) => {
+            Page::new(first_id, first_bg).with_size(manifest.size_for_page(first_id))
+        }
         Err(e) => {
             eprintln!("[Storage] Konnte erste Seite {first_id} nicht laden: {e}. Erstelle leere Ersatzseite.");
+            // Without the warning the page looks writable while nothing on it is saved
+            load_warnings.insert(
+                first_id,
+                PageLoadWarning {
+                    page_id: first_id,
+                    message: e.to_string(),
+                    quarantine_path: None,
+                },
+            );
             let mut page =
                 Page::new(first_id, first_bg).with_size(manifest.size_for_page(first_id));
             page.persist = PersistState::ReadOnlyAfterLoadError;
@@ -931,6 +973,14 @@ pub fn ensure_page_loaded(
         }
         Err(e) => {
             eprintln!("[Storage] Fehler beim Lazy Loading von Seite {page_id}: {e}");
+            notebook.load_warnings.insert(
+                page_id,
+                PageLoadWarning {
+                    page_id,
+                    message: e.to_string(),
+                    quarantine_path: None,
+                },
+            );
             notebook.pages[page_idx].is_loaded = true;
             notebook.pages[page_idx].persist = PersistState::ReadOnlyAfterLoadError;
             notebook.pages[page_idx].rebuild_cache_if_dirty();
@@ -1502,7 +1552,23 @@ pub fn restore_manifest_from_backup(notebook_dir: &Path) -> Result<(), StorageEr
     }
 }
 
+/// Time an entry was moved into `.trash`, read from the `_<unix seconds>` suffix of its name
+/// (`<id>_<ts>`, `sync_<ts>`).
+fn trashed_at(name: &str) -> Option<std::time::SystemTime> {
+    let (_, ts) = name.rsplit_once('_')?;
+    if ts.is_empty() || !ts.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let secs = ts.parse::<u64>().ok()?;
+    std::time::UNIX_EPOCH.checked_add(std::time::Duration::from_secs(secs))
+}
+
 /// Entfernt Einträge aus `.trash`, die älter als `max_age` sind.
+///
+/// The age counts from the moment of deletion, which is the timestamp in the entry name.
+/// The modification time of a folder survives the move into `.trash`, so it would purge a
+/// notebook that had not been edited for a while right after it was deleted. It is only the
+/// fallback for entries without a timestamp in the name.
 pub fn cleanup_trash(base_dir: &Path, max_age: std::time::Duration) -> io::Result<usize> {
     let trash_dir = base_dir.join(".trash");
     if !trash_dir.exists() {
@@ -1513,20 +1579,25 @@ pub fn cleanup_trash(base_dir: &Path, max_age: std::time::Duration) -> io::Resul
     if let Ok(entries) = fs::read_dir(&trash_dir) {
         for entry in entries.flatten() {
             let path = entry.path();
-            if let Ok(metadata) = entry.metadata() {
-                if let Ok(modified) = metadata.modified() {
-                    if let Ok(age) = now.duration_since(modified) {
-                        if age >= max_age {
-                            if path.is_dir() {
-                                if fs::remove_dir_all(&path).is_ok() {
-                                    removed += 1;
-                                }
-                            } else if fs::remove_file(&path).is_ok() {
-                                removed += 1;
-                            }
-                        }
-                    }
-                }
+            let since = entry
+                .file_name()
+                .to_str()
+                .and_then(trashed_at)
+                .or_else(|| entry.metadata().ok()?.modified().ok());
+            let expired = since
+                .and_then(|t| now.duration_since(t).ok())
+                .is_some_and(|age| age >= max_age);
+            if !expired {
+                continue;
+            }
+            let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+            let gone = if is_dir {
+                fs::remove_dir_all(&path)
+            } else {
+                fs::remove_file(&path)
+            };
+            if gone.is_ok() {
+                removed += 1;
             }
         }
     }
@@ -1565,6 +1636,77 @@ mod tests {
     use crate::autosave::AutosaveController;
     use std::sync::Arc;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn test_scaled_stroke_keeps_its_width_after_reload() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let color = [0.0, 0.0, 0.0, 1.0];
+        let samples: Vec<StylusSample> = (0..20)
+            .map(|i| StylusSample {
+                position: glam::Vec2::new(200.0 + 10.0 * i as f32, 500.0),
+                pressure: 0.5,
+                timestamp: i as f64 * 0.01,
+            })
+            .collect();
+        let tool = crate::document::StrokeTool::default();
+        let vertices = reconstruct_stroke_vertices(&samples, color, 5.0, tool, true);
+        let mut stroke = Stroke::new(1, samples, vertices, color);
+        stroke.width = 5.0;
+        stroke.finalized = true;
+        let thickness = |s: &Stroke| {
+            let ys = s.vertices.iter().map(|v| v.position[1]);
+            ys.clone().fold(f32::MIN, f32::max) - ys.fold(f32::MAX, f32::min)
+        };
+        let before = thickness(&stroke);
+
+        stroke.scale(glam::Vec2::new(200.0, 500.0), glam::Vec2::splat(3.0));
+        assert!((stroke.width - 15.0).abs() < 1e-4);
+        let scaled = thickness(&stroke);
+        assert!((scaled - 3.0 * before).abs() < 0.01);
+
+        let mut page = Page::new(1, PageBackground::Blank);
+        page.add_stroke(stroke);
+        save_page(temp_dir.path(), &PageData::from(&page)).unwrap();
+        let loaded = load_page(temp_dir.path(), 1).unwrap().to_page();
+        assert!((loaded.strokes[0].width - 15.0).abs() < 1e-4);
+        let reloaded = thickness(&loaded.strokes[0]);
+        assert!(
+            (reloaded - scaled).abs() < 0.05 * scaled,
+            "scaled {scaled}, after reload {reloaded}"
+        );
+    }
+
+    #[test]
+    fn test_cleanup_trash_counts_from_deletion_not_from_last_edit() {
+        let base = tempfile::tempdir().unwrap();
+        let trash = base.path().join(".trash");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let day = 24 * 3600;
+        let long_ago = std::time::SystemTime::now() - Duration::from_secs(90 * day);
+
+        // Deleted just now, last edited 90 days ago: stays
+        let fresh = trash.join(format!("nb_a_{now}"));
+        // Deleted 40 days ago: goes
+        let expired = trash.join(format!("nb_b_{}", now - 40 * day));
+        // No timestamp in the name: the modification time decides
+        let unnamed = trash.join("stray");
+        for dir in [&fresh, &expired, &unnamed] {
+            fs::create_dir_all(dir).unwrap();
+            fs::write(dir.join("manifest.json"), "{}").unwrap();
+        }
+        for dir in [&fresh, &unnamed] {
+            fs::File::open(dir).unwrap().set_modified(long_ago).unwrap();
+        }
+
+        let removed = cleanup_trash(base.path(), Duration::from_secs(30 * day)).unwrap();
+        assert_eq!(removed, 2);
+        assert!(fresh.exists());
+        assert!(!expired.exists());
+        assert!(!unnamed.exists());
+    }
 
     #[test]
     fn test_atomic_save_and_reload() {
@@ -2111,8 +2253,71 @@ mod tests {
         fs::write(&broken_manifest_path, b"{ broken json ... ").unwrap();
 
         let loaded = load_manifest(nb_dir).expect("Muss aus .bak geladen werden");
-        assert_eq!(loaded.id, "nb_test");
         assert_eq!(loaded.title, "Backup Test");
+    }
+
+    #[test]
+    fn test_first_page_that_fails_to_load_warns_and_a_missing_one_is_empty() {
+        let base = tempfile::tempdir().unwrap();
+        let (_, _, dir) = create_new_notebook(base.path(), "First page").unwrap();
+        let first = load_manifest(&dir).unwrap().page_ids()[0];
+        let file = dir.join(format!("page_{first}.json"));
+
+        // Never saved: an ordinary empty page
+        let _ = fs::remove_file(&file);
+        let (nb, _) = load_notebook(&dir).unwrap();
+        assert!(!nb.pages[0].is_readonly());
+        assert!(nb.load_warnings.is_empty());
+
+        // Written by a newer version: read-only, and the user is told
+        let mut data = PageData::from(&Page::new(first, PageBackground::Blank));
+        data.format_version = CURRENT_FORMAT_VERSION + 1;
+        fs::write(&file, serde_json::to_vec(&data).unwrap()).unwrap();
+        let (nb, _) = load_notebook(&dir).unwrap();
+        assert!(nb.pages[0].is_readonly());
+        assert!(nb.load_warnings.contains_key(&first));
+    }
+
+    #[test]
+    fn test_newer_manifest_is_not_replaced_by_its_backup() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let nb_dir = temp_dir.path();
+        let old = NotebookManifest::new("nb", "Old state");
+        atomic_write_json(&nb_dir.join("manifest.json.bak"), &old).unwrap();
+        let mut newer = NotebookManifest::new("nb", "New state");
+        newer.format_version = CURRENT_FORMAT_VERSION + 1;
+        atomic_write_json(&nb_dir.join("manifest.json"), &newer).unwrap();
+
+        assert!(matches!(
+            load_manifest(nb_dir),
+            Err(StorageError::UnsupportedVersion { .. })
+        ));
+    }
+
+    #[test]
+    fn test_copied_notebook_folder_is_a_notebook_of_its_own() {
+        let base = tempfile::tempdir().unwrap();
+        let (_, manifest, dir) = create_new_notebook(base.path(), "Original").unwrap();
+        let copy = base.path().join("copy_of_it");
+        fs::create_dir(&copy).unwrap();
+        fs::copy(dir.join("manifest.json"), copy.join("manifest.json")).unwrap();
+
+        let mut ids: Vec<String> = list_notebooks(base.path())
+            .into_iter()
+            .map(|s| s.id)
+            .collect();
+        ids.sort();
+        let mut expected = vec!["copy_of_it".to_string(), manifest.id.clone()];
+        expected.sort();
+        assert_eq!(ids, expected);
+
+        // Opened by its folder name, and the id stays that way once saved
+        let (_, mut loaded) = load_notebook(&copy).unwrap();
+        assert_eq!(loaded.id, "copy_of_it");
+        loaded.title = "Copy".to_string();
+        save_manifest(&copy, &loaded).unwrap();
+        assert_eq!(load_manifest(&dir).unwrap().title, "Original");
+        assert_eq!(load_manifest(&copy).unwrap().title, "Copy");
     }
 
     #[test]

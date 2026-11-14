@@ -691,6 +691,15 @@ impl Stroke {
         if let Some(ref mut shape) = self.shape {
             shape.scale(origin, factors);
         }
+        // The line width grows with the stroke. It is stored and the mesh is rebuilt from it
+        // on load; without this a scaled stroke would be back at its old width after a restart.
+        // Images and text fields have no line width.
+        if !self.is_object() {
+            let factor = (factors.x * factors.y).abs().sqrt();
+            if factor.is_finite() && factor > 0.0 {
+                self.width *= factor;
+            }
+        }
         self.recompute_aabb();
     }
 
@@ -1574,7 +1583,12 @@ impl Notebook {
     /// der Seite und gibt die Kennungen der geänderten Seiten zurück (`None`: nichts zu tun).
     pub fn make_space(&mut self, page_index: usize, y: f32, dy: f32) -> Option<Vec<u64>> {
         let run = self.space_run(page_index)?;
-        if self.pages[run.clone()].iter().any(|p| !p.is_loaded) {
+        // A page that could not be loaded is never saved: strokes pushed onto it would be gone
+        // after a restart, and its own content is unknown
+        if self.pages[run.clone()]
+            .iter()
+            .any(|p| !p.is_loaded || p.is_readonly())
+        {
             return None;
         }
         let dy = if dy < 0.0 {
@@ -2678,6 +2692,18 @@ mod tests {
             Some(500.0),
             "hinter der PDF-Seite bleibt alles"
         );
+    }
+
+    #[test]
+    fn test_make_space_refuses_pages_that_failed_to_load() {
+        let mut nb = Notebook::new();
+        nb.add_page(PageBackground::Blank);
+        nb.pages[0].strokes = vec![block(1, 1000.0, 100.0)];
+        nb.pages[1].persist = PersistState::ReadOnlyAfterLoadError;
+        assert!(nb.make_space(0, 900.0, 300.0).is_none());
+        assert_eq!(top_of(&nb, 0, 1), Some(1000.0));
+        nb.pages[1].persist = PersistState::Normal;
+        assert!(nb.make_space(0, 900.0, 300.0).is_some());
     }
 
     #[test]
