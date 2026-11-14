@@ -461,6 +461,102 @@ mod tests {
         assert!(outcome.is_empty(), "{outcome:?}");
     }
 
+    /// Writes the page file the way a sync client does: behind the back of `storage`.
+    fn write_from_another_device(dir: &Path, page: &Page) {
+        let bytes = serde_json::to_vec(&PageData::from(page)).unwrap();
+        fs::write(dir.join(format!("page_{}.json", page.id)), bytes).unwrap();
+    }
+
+    fn conflict_copies(dir: &Path) -> Vec<String> {
+        fs::read_dir(dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| conflict_copy_of(n).is_some())
+            .collect()
+    }
+
+    #[test]
+    fn test_saving_over_a_change_from_another_device_keeps_both() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut notebook, mut manifest) = saved_notebook(dir.path());
+        let now = Instant::now();
+        let mut watch = DiskWatch::new(dir.path().to_path_buf(), now);
+
+        // Their stroke arrives while a stroke is being drawn here, so the check has to wait
+        let mut theirs = notebook.current_page().clone();
+        theirs.add_stroke(stroke(5, 300.0));
+        write_from_another_device(dir.path(), &theirs);
+
+        // The stroke is finished and saved before the check ran
+        notebook.current_page_mut().add_stroke(stroke(2, 200.0));
+        notebook.next_stroke_id = 3;
+        storage::save_page(dir.path(), &PageData::from(notebook.current_page())).unwrap();
+
+        // Ours is in the page file, theirs next to it
+        let saved = storage::load_page(dir.path(), 1).unwrap();
+        let ids: Vec<u64> = saved.strokes.iter().map(|s| s.id).collect();
+        assert_eq!(ids, vec![1, 2]);
+        assert_eq!(conflict_copies(dir.path()).len(), 1);
+
+        // The check turns their version into a page of its own
+        let outcome = watch.check(&mut notebook, &mut manifest, now);
+        assert_eq!(outcome.conflict_pages.len(), 1);
+        assert_eq!(notebook.pages.len(), 2);
+        assert_eq!(notebook.pages[0].strokes.len(), 2);
+        assert_eq!(notebook.pages[1].strokes.len(), 2);
+        assert!(conflict_copies(dir.path()).is_empty());
+
+        // Saving again is an ordinary save
+        notebook.pages[0].add_stroke(stroke(9, 500.0));
+        storage::save_page(dir.path(), &PageData::from(&notebook.pages[0])).unwrap();
+        assert!(conflict_copies(dir.path()).is_empty());
+    }
+
+    #[test]
+    fn test_saving_an_unchanged_page_keeps_the_change_from_another_device() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut notebook, mut manifest) = saved_notebook(dir.path());
+        let now = Instant::now();
+        let mut watch = DiskWatch::new(dir.path().to_path_buf(), now);
+
+        let mut theirs = notebook.current_page().clone();
+        theirs.add_stroke(stroke(5, 300.0));
+        write_from_another_device(dir.path(), &theirs);
+
+        // E.g. turning pages marks the page for saving although nothing changed on it
+        storage::save_page(dir.path(), &PageData::from(notebook.current_page())).unwrap();
+        assert!(conflict_copies(dir.path()).is_empty());
+
+        let outcome = watch.check(&mut notebook, &mut manifest, now);
+        assert_eq!(outcome.reloaded_pages, 1);
+        assert_eq!(notebook.pages.len(), 1);
+        assert_eq!(notebook.pages[0].strokes.len(), 2);
+    }
+
+    #[test]
+    fn test_saving_a_new_page_over_one_from_another_device_keeps_both() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut notebook, _) = saved_notebook(dir.path());
+
+        // Both devices add a second page; it gets the same id on both
+        let index = notebook.add_page(PageBackground::Blank);
+        let mut theirs = notebook.pages[index].clone();
+        theirs.add_stroke(stroke(7, 300.0));
+        write_from_another_device(dir.path(), &theirs);
+
+        notebook.pages[index].add_stroke(stroke(8, 400.0));
+        storage::save_page(dir.path(), &PageData::from(&notebook.pages[index])).unwrap();
+        assert_eq!(conflict_copies(dir.path()).len(), 1);
+
+        // A file never read here but with the content to be saved is no conflict
+        let index = notebook.add_page(PageBackground::Blank);
+        notebook.pages[index].add_stroke(stroke(9, 300.0));
+        write_from_another_device(dir.path(), &notebook.pages[index]);
+        storage::save_page(dir.path(), &PageData::from(&notebook.pages[index])).unwrap();
+        assert_eq!(conflict_copies(dir.path()).len(), 1);
+    }
+
     #[test]
     fn test_page_still_being_synced_is_tried_again() {
         let dir = tempfile::tempdir().unwrap();

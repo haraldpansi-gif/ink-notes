@@ -177,6 +177,7 @@ Liegen die Notizbücher in einem Ordner, den Nextcloud, Google Drive, Syncthing 
 - `.opened_by.json` (`{"device": "<Rechnername>", "since": <Unix-Zeit>}`) wird beim Öffnen eines Notizbuchs geschrieben und beim Schließen entfernt. Eine Markierung eines anderen Geräts führt zu einer Warnung; die Sperrdatei `.lock` schützt nur vor einer zweiten Instanz auf demselben Rechner.
 - Solange alle lokalen Änderungen gespeichert sind, prüft die App den Ordner alle 3 Sekunden (und wenn das Fenster den Fokus bekommt). Geänderte Seitendateien werden neu geladen, ein geändertes `manifest.json` bringt neue, entfernte oder umsortierte Seiten und Titel mit.
 - Konfliktkopien der Sync-Clients (`page_<id> (….json`, `page_<id>_….json`, `page_<id>.sync-conflict-….json`) werden als neue Seiten hinter dem Original eingefügt und in `<name>.imported` umbenannt.
+- Bevor die App eine Seitendatei überschreibt, die sich seit ihrem letzten Lesen oder Schreiben geändert hat, sichert sie den vorgefundenen Inhalt als `page_<id> (conflict <Unix-Zeit>).json` – außer sie hat selbst nichts geändert (dann bleibt die Datei, wie sie ist).
 
 ### Neuere Versionen
 Dateien mit einer höheren `format_version` als der unterstützten werden nicht geöffnet – so kann eine ältere App-Version keine Inhalte verlieren, die sie nicht kennt.

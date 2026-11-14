@@ -721,21 +721,96 @@ pub fn quarantine_corrupted_page(notebook_dir: &Path, page_id: u64) -> Result<Pa
 }
 
 /// Speichert eine Seite atomar in `page_<id>.json`.
+///
+/// The file may have been changed behind our back since this process last read or wrote it:
+/// by the built-in sync or a sync client that brought a change from another device, before
+/// `disk_watch` got to take it over (it waits while something is being drawn or is unsaved).
+/// Overwriting it would silently drop that change. So, as the sync does for a page changed on
+/// both sides, their version is kept as a conflict copy next to the page (`disk_watch` turns
+/// it into a page of its own); if we have nothing new ourselves, their version simply stays.
 pub fn save_page(notebook_dir: &Path, page: &PageData) -> Result<(), StorageError> {
     let path = notebook_dir.join(format!("page_{}.json", page.id));
-    if path.exists() {
-        let bak_path = notebook_dir.join(format!("page_{}.json.v0.bak", page.id));
-        if !bak_path.exists() {
-            if let Ok(content) = fs::read_to_string(&path) {
-                if let Ok(old_p) = serde_json::from_str::<PageData>(&content) {
-                    if old_p.format_version == 0 {
-                        let _ = fs::copy(&path, &bak_path);
-                    }
-                }
+    let bytes = serde_json::to_vec(page)?;
+    let ours = file_hash(&bytes);
+    let key = seen_key(&path);
+
+    if let Ok(theirs) = fs::read(&path) {
+        let seen = seen_files().get(&key).copied();
+        let their_page = serde_json::from_slice::<PageData>(&theirs).ok();
+        if seen != Some(file_hash(&theirs)) && theirs != bytes {
+            if seen == Some(ours) {
+                // Nothing changed here since we last read or wrote the page
+                return Ok(());
+            }
+            let differs = their_page.as_ref().is_some_and(|their_page| {
+                let mut their_page = their_page.clone();
+                their_page.format_version = page.format_version;
+                their_page != *page
+            });
+            if differs {
+                // Fails rather than overwrites: the caller tries again
+                write_conflict_copy(notebook_dir, page.id, &theirs)?;
             }
         }
+        let bak_path = notebook_dir.join(format!("page_{}.json.v0.bak", page.id));
+        if !bak_path.exists() && their_page.is_some_and(|p| p.format_version == 0) {
+            let _ = fs::copy(&path, &bak_path);
+        }
     }
-    atomic_write_json(&path, page)
+    atomic_write_file(&path, &bytes)?;
+    seen_files().insert(key, ours);
+    Ok(())
+}
+
+type FileHash = [u8; 32];
+
+fn file_hash(bytes: &[u8]) -> FileHash {
+    use sha2::Digest;
+    sha2::Sha256::digest(bytes).into()
+}
+
+/// Content of the page files as this process last read or wrote them (see [`save_page`]).
+fn seen_files() -> std::sync::MutexGuard<'static, std::collections::HashMap<PathBuf, FileHash>> {
+    static SEEN: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<PathBuf, FileHash>>,
+    > = std::sync::OnceLock::new();
+    SEEN.get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
+
+/// The same file must get the same key however its folder is spelled.
+fn seen_key(path: &Path) -> PathBuf {
+    match (path.parent().map(Path::canonicalize), path.file_name()) {
+        (Some(Ok(dir)), Some(name)) => dir.join(name),
+        _ => path.to_path_buf(),
+    }
+}
+
+/// Keeps `content` as `page_<id> (conflict <unix time>).json`, the name the sync uses too.
+fn write_conflict_copy(notebook_dir: &Path, page_id: u64, content: &[u8]) -> io::Result<PathBuf> {
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let mut n = 0;
+    let path = loop {
+        let name = match n {
+            0 => format!("page_{page_id} (conflict {ts}).json"),
+            n => format!("page_{page_id} (conflict {ts}-{n}).json"),
+        };
+        let path = notebook_dir.join(name);
+        if !path.exists() {
+            break path;
+        }
+        n += 1;
+    };
+    atomic_write_file(&path, content)?;
+    eprintln!(
+        "[Storage] Seite {page_id} wurde außerhalb geändert, Konfliktkopie: {}",
+        path.display()
+    );
+    Ok(path)
 }
 
 /// Lädt eine Seite aus `page_<id>.json`.
@@ -767,6 +842,7 @@ pub fn load_page(notebook_dir: &Path, page_id: u64) -> Result<PageData, StorageE
         });
     }
 
+    seen_files().insert(seen_key(&path), file_hash(json_str.as_bytes()));
     Ok(page_data)
 }
 
