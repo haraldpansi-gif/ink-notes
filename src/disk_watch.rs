@@ -166,12 +166,16 @@ impl DiskWatch {
         // Page order, titles, new and removed pages
         let mut fresh_pages: HashSet<u64> = HashSet::new();
         if changed("manifest.json") {
-            match storage::load_manifest(&self.dir) {
-                Ok(theirs) => match self.apply_manifest(notebook, manifest, theirs) {
+            match storage::load_manifest_as_base(&self.dir) {
+                Ok((theirs, base)) => match self.apply_manifest(notebook, manifest, theirs) {
+                    // Taken over: from now on our saves build on this manifest
                     Ok(Some(new_ids)) => {
+                        base.adopt();
                         fresh_pages = new_ids;
                         outcome.structure_changed = true;
                     }
+                    // Nothing to take over for the pages. Whatever else differs is merged
+                    // at the next save, so the base stays as it is.
                     Ok(None) => {}
                     Err(()) => {
                         retry.insert("manifest.json".to_string());
@@ -555,6 +559,107 @@ mod tests {
         write_from_another_device(dir.path(), &notebook.pages[index]);
         storage::save_page(dir.path(), &PageData::from(&notebook.pages[index])).unwrap();
         assert_eq!(conflict_copies(dir.path()).len(), 1);
+    }
+
+    /// Writes the manifest the way a sync client does: behind the back of `storage`.
+    fn write_manifest_from_another_device(dir: &Path, manifest: &NotebookManifest) {
+        fs::write(
+            dir.join("manifest.json"),
+            serde_json::to_vec(manifest).unwrap(),
+        )
+        .unwrap();
+    }
+
+    fn page_ids_on_disk(dir: &Path) -> Vec<u64> {
+        let bytes = fs::read(dir.join("manifest.json")).unwrap();
+        let manifest: NotebookManifest = serde_json::from_slice(&bytes).unwrap();
+        manifest.pages.iter().map(|p| p.id).collect()
+    }
+
+    #[test]
+    fn test_saving_the_manifest_keeps_a_page_added_on_another_device() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut notebook, mut manifest) = saved_notebook(dir.path());
+        let now = Instant::now();
+        let mut watch = DiskWatch::new(dir.path().to_path_buf(), now);
+
+        // The other device adds a second page
+        let mut theirs = notebook.clone();
+        let mut their_manifest = manifest.clone();
+        let index = theirs.add_page(PageBackground::Lined);
+        theirs.pages[index].add_stroke(stroke(6, 400.0));
+        theirs.next_stroke_id = 7;
+        their_manifest.sync_from_notebook(&theirs);
+        write_from_another_device(dir.path(), &theirs.pages[index]);
+        write_manifest_from_another_device(dir.path(), &their_manifest);
+        let their_page = theirs.pages[index].id;
+
+        // Before the check ran, a stroke is drawn and saved here, twice
+        for id in [2, 3] {
+            notebook.current_page_mut().add_stroke(stroke(id, 200.0));
+            notebook.next_stroke_id = id + 1;
+            manifest.sync_from_notebook(&notebook);
+            storage::save_page(dir.path(), &PageData::from(notebook.current_page())).unwrap();
+            storage::save_manifest(dir.path(), &manifest).unwrap();
+            assert_eq!(page_ids_on_disk(dir.path()), vec![1, their_page]);
+        }
+
+        // The check takes their page over, and saving stays an ordinary save afterwards
+        let outcome = watch.check(&mut notebook, &mut manifest, now);
+        assert!(outcome.structure_changed);
+        assert_eq!(notebook.pages.len(), 2);
+        assert_eq!(notebook.pages[0].strokes.len(), 3);
+        assert!(notebook.next_stroke_id >= 7);
+        manifest.sync_from_notebook(&notebook);
+        storage::save_manifest(dir.path(), &manifest).unwrap();
+        assert_eq!(page_ids_on_disk(dir.path()), vec![1, their_page]);
+
+        // A page removed here afterwards is really gone
+        notebook.pages.pop();
+        notebook.current_page_index = 0;
+        manifest.sync_from_notebook(&notebook);
+        storage::save_manifest(dir.path(), &manifest).unwrap();
+        assert_eq!(page_ids_on_disk(dir.path()), vec![1]);
+    }
+
+    #[test]
+    fn test_saving_an_unchanged_manifest_keeps_the_one_from_another_device() {
+        let dir = tempfile::tempdir().unwrap();
+        let (notebook, manifest) = saved_notebook(dir.path());
+
+        let mut their_manifest = manifest.clone();
+        their_manifest.title = "Physik".to_string();
+        write_manifest_from_another_device(dir.path(), &their_manifest);
+
+        storage::save_manifest(dir.path(), &manifest).unwrap();
+        let bytes = fs::read(dir.path().join("manifest.json")).unwrap();
+        let on_disk: NotebookManifest = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(on_disk.title, "Physik");
+        drop(notebook);
+    }
+
+    #[test]
+    fn test_manifest_changed_on_both_sides_is_merged() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut notebook, mut manifest) = saved_notebook(dir.path());
+        let ours_new = notebook.add_page(PageBackground::Blank);
+        let ours_new = notebook.pages[ours_new].id;
+        manifest.sync_from_notebook(&notebook);
+        storage::save_manifest(dir.path(), &manifest).unwrap();
+
+        // They rename the notebook; we remove our new page again
+        let mut their_manifest = manifest.clone();
+        their_manifest.title = "Physik".to_string();
+        write_manifest_from_another_device(dir.path(), &their_manifest);
+        notebook.pages.pop();
+        notebook.current_page_index = 0;
+        manifest.sync_from_notebook(&notebook);
+        storage::save_manifest(dir.path(), &manifest).unwrap();
+
+        let bytes = fs::read(dir.path().join("manifest.json")).unwrap();
+        let on_disk: NotebookManifest = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(on_disk.title, "Physik");
+        assert!(!on_disk.pages.iter().any(|p| p.id == ours_new));
     }
 
     #[test]

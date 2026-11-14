@@ -590,16 +590,32 @@ pub fn atomic_write_json<T: Serialize>(path: &Path, value: &T) -> Result<(), Sto
 
 /// Speichert das Manifest atomar in `manifest.json`.
 /// Sichert das bisherige Manifest als `manifest.json.bak` vor dem Überschreiben.
+///
+/// Like a page (see [`save_page`]), the manifest may have been changed behind our back by a
+/// sync before `disk_watch` took the change over, e.g. the other device added a page.
+/// Overwriting it would drop that page from the list. The manifest on disk is therefore
+/// merged with ours, with the manifest the notebook in memory is based on as common ancestor
+/// ([`ManifestBase`]); if we have nothing new ourselves, theirs simply stays.
 pub fn save_manifest(notebook_dir: &Path, manifest: &NotebookManifest) -> Result<(), StorageError> {
     let path = notebook_dir.join("manifest.json");
-    if path.exists() {
+    let ours = serde_json::to_vec(manifest)?;
+    let key = seen_key(&path);
+    let mut merged = None;
+    if let Ok(theirs) = fs::read(&path) {
+        let base = manifest_bases().get(&key).cloned();
+        if base.as_ref() != Some(&theirs) && theirs != ours {
+            if base.as_ref() == Some(&ours) {
+                // Nothing changed here since the notebook was loaded or last saved
+                return Ok(());
+            }
+            // Theirs unreadable (e.g. half written): ours replaces it
+            merged = merge_manifests(base.as_deref(), &ours, &theirs);
+        }
         let bak_path = notebook_dir.join("manifest.json.v0.bak");
         if !bak_path.exists() {
-            if let Ok(content) = fs::read_to_string(&path) {
-                if let Ok(old_m) = serde_json::from_str::<NotebookManifest>(&content) {
-                    if old_m.format_version == 0 {
-                        let _ = fs::copy(&path, &bak_path);
-                    }
+            if let Ok(old_m) = serde_json::from_slice::<NotebookManifest>(&theirs) {
+                if old_m.format_version == 0 {
+                    let _ = fs::copy(&path, &bak_path);
                 }
             }
         }
@@ -607,10 +623,51 @@ pub fn save_manifest(notebook_dir: &Path, manifest: &NotebookManifest) -> Result
         let rolling_bak = notebook_dir.join("manifest.json.bak");
         let _ = fs::copy(&path, &rolling_bak);
     }
-    atomic_write_json(&path, manifest)
+    atomic_write_file(&path, merged.as_ref().unwrap_or(&ours))?;
+    // Ours, not the merged file: the notebook in memory does not contain their part until
+    // `disk_watch` has taken it over, so the next save has to merge it in again
+    manifest_bases().insert(key, ours);
+    Ok(())
 }
 
-fn load_manifest_from_file(path: &Path) -> Result<NotebookManifest, StorageError> {
+/// Three-way merge of manifests as JSON (page lists by page id, see
+/// `cloud_sync::merge_json`); `None` if one of them can't be read or the result is no
+/// valid manifest.
+fn merge_manifests(base: Option<&[u8]>, ours: &[u8], theirs: &[u8]) -> Option<Vec<u8>> {
+    let ours: serde_json::Value = serde_json::from_slice(ours).ok()?;
+    let theirs: serde_json::Value = serde_json::from_slice(theirs).ok()?;
+    let base: Option<serde_json::Value> = base.and_then(|b| serde_json::from_slice(b).ok());
+    let merged = crate::cloud_sync::merge_json(base.as_ref(), &ours, &theirs);
+    serde_json::from_value::<NotebookManifest>(merged.clone()).ok()?;
+    serde_json::to_vec(&merged).ok()
+}
+
+/// Content of `manifest.json` that the notebooks in memory are based on, by file.
+fn manifest_bases() -> std::sync::MutexGuard<'static, std::collections::HashMap<PathBuf, Vec<u8>>> {
+    static BASES: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<PathBuf, Vec<u8>>>,
+    > = std::sync::OnceLock::new();
+    BASES
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
+
+/// A manifest as read from disk, to be declared the state the notebook in memory is based on
+/// once it has been taken over (see [`save_manifest`]). Reading a manifest alone, e.g. for
+/// the list of notebooks, must not do that.
+pub struct ManifestBase {
+    key: PathBuf,
+    bytes: Vec<u8>,
+}
+
+impl ManifestBase {
+    pub fn adopt(self) {
+        manifest_bases().insert(self.key, self.bytes);
+    }
+}
+
+fn load_manifest_from_file(path: &Path) -> Result<(NotebookManifest, Vec<u8>), StorageError> {
     let mut file = File::open(path)?;
     let mut json_str = String::new();
     file.read_to_string(&mut json_str)?;
@@ -630,7 +687,7 @@ fn load_manifest_from_file(path: &Path) -> Result<NotebookManifest, StorageError
             .map(|&id| PageMeta::new(id, None))
             .collect();
     }
-    Ok(manifest)
+    Ok((manifest, json_str.into_bytes()))
 }
 
 /// Lädt das Manifest aus `manifest.json`.
@@ -640,7 +697,15 @@ fn load_manifest_from_file(path: &Path) -> Result<NotebookManifest, StorageError
 /// `<base>/<id>`. A copied or renamed folder still carries the id of the original in its
 /// manifest, so the id is always taken from the folder.
 pub fn load_manifest(notebook_dir: &Path) -> Result<NotebookManifest, StorageError> {
-    let mut manifest = load_manifest_or_backup(notebook_dir)?;
+    load_manifest_as_base(notebook_dir).map(|(manifest, _)| manifest)
+}
+
+/// Like [`load_manifest`], for a manifest that is taken over into the open notebook: call
+/// [`ManifestBase::adopt`] once that has happened.
+pub fn load_manifest_as_base(
+    notebook_dir: &Path,
+) -> Result<(NotebookManifest, ManifestBase), StorageError> {
+    let (mut manifest, bytes) = load_manifest_or_backup(notebook_dir)?;
     // Canonical, so that a path like `.` still yields the folder name
     let dir = notebook_dir.canonicalize();
     let name = dir
@@ -653,10 +718,16 @@ pub fn load_manifest(notebook_dir: &Path) -> Result<NotebookManifest, StorageErr
             manifest.id = name.to_string();
         }
     }
-    Ok(manifest)
+    let base = ManifestBase {
+        key: seen_key(&notebook_dir.join("manifest.json")),
+        bytes,
+    };
+    Ok((manifest, base))
 }
 
-fn load_manifest_or_backup(notebook_dir: &Path) -> Result<NotebookManifest, StorageError> {
+fn load_manifest_or_backup(
+    notebook_dir: &Path,
+) -> Result<(NotebookManifest, Vec<u8>), StorageError> {
     let path = notebook_dir.join("manifest.json");
     if !path.exists() {
         let bak_path = notebook_dir.join("manifest.json.bak");
@@ -871,7 +942,8 @@ pub fn save_notebook(
 /// Lädt ein Notizbuch aus einem Ordner (erste Seite sofort, Folgeseiten als Platzhalter für Lazy Loading).
 pub fn load_notebook(notebook_dir: &Path) -> Result<(Notebook, NotebookManifest), StorageError> {
     let _ = cleanup_orphaned_temp_files(notebook_dir, std::time::Duration::from_secs(3600));
-    let manifest = load_manifest(notebook_dir)?;
+    let (manifest, base) = load_manifest_as_base(notebook_dir)?;
+    base.adopt();
     let page_ids = manifest.page_ids();
     if page_ids.is_empty() {
         let nb = Notebook::new();

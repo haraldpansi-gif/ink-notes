@@ -178,6 +178,7 @@ If the notebooks are kept in a folder synced by Nextcloud, Google Drive, Syncthi
 - While all local changes are saved, the app checks the folder every 3 seconds (and when the window gets the focus). Changed page files are reloaded, a changed `manifest.json` brings in new, removed or reordered pages and titles.
 - Conflict copies of sync clients (`page_<id> (….json`, `page_<id>_….json`, `page_<id>.sync-conflict-….json`) are added as new pages after the original and renamed to `<name>.imported`.
 - Before the app overwrites a page file that changed since it last read or wrote it, it keeps the content found there as `page_<id> (conflict <unix time>).json`, unless it has no changes of its own (then the file is left as it is).
+- The same goes for `manifest.json`, except that the two versions are merged instead of copied: pages added or removed on either side, titles and counters are combined, with the manifest the app last read or wrote as common ancestor.
 
 ### Newer versions
 Files with a higher `format_version` than supported are not opened – this way an older app version cannot lose content it does not know.
