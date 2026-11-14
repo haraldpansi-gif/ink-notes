@@ -84,6 +84,11 @@
   </branding>
   <content_rating type="oars-1.1" />
   <releases>
+    <release version="0.45.5" date="2026-11-14">
+      <description>
+        <p>Extremely full pages, for example on an endless notebook, no longer end the app when they are opened.</p>
+      </description>
+    </release>
     <release version="0.45.4" date="2026-11-14">
       <description>
         <p>A page added on another device is no longer dropped from the notebook when a change is saved here at the same moment.</p>

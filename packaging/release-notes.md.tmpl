@@ -3,6 +3,7 @@
 Notebook app for pen, touch and mouse on Linux (tested on Zorin OS 18 / Ubuntu 24.04).
 
 ### Highlights:
+- **Extremely full pages**: A page with so many strokes that they no longer fit into one graphics buffer (possible on an endless notebook) ended the app when it was opened. Such pages are now drawn from several buffers
 - **Sync while writing, page list**: If another device added a page just while you were writing, saving here could drop that page from the notebook's page list. The two page lists are now merged: pages added or removed on either device, titles and counters are combined
 - **Undo after "make space"**: Making space moves the content of the following pages, sometimes onto the next page. Undoing and redoing an older step on such a page could then add a stroke a second time. The older steps of the following pages are now set aside while the space is there and come back when making space is undone
 - **Sync while writing**: If a change from another device reached a page just while you were writing on it, saving your stroke overwrote that change. Now your version is saved and theirs is kept as a page of its own ("Conflict copy: …"), as for other sync conflicts; if you changed nothing on the page, their version is simply taken over
