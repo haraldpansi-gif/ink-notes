@@ -1485,6 +1485,7 @@ pub fn run_with(
     ui_state.set_eraser_radius_mm(ui_settings.eraser_radius_mm);
     ui_state.math.set_enabled(ui_settings.math_assist);
     ui_state.touch_draw_enabled = ui_settings.touch_draw;
+    ui_state.saved_colors = ui_settings.saved_colors.clone();
     ui_state.select_pen(ui_settings.active_pen);
     ui_state.highlighter_colors = ui_settings.highlighter_colors;
     ui_state.select_highlighter_color(ui_settings.active_highlighter);
@@ -5636,6 +5637,7 @@ pub fn run_with(
                             updated.text_colors = ui_state.text_colors;
                             updated.active_text_color = ui_state.active_text_color;
                             updated.eraser_radius_mm = ui_state.eraser_radius_mm;
+                            updated.saved_colors.clone_from(&ui_state.saved_colors);
                             if updated != ui_settings {
                                 ui_settings = updated;
                                 save_ui_settings(

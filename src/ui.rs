@@ -20,7 +20,7 @@ use crate::file_picker::{FilePicker, PickerKind};
 use crate::ruler::{Ruler, RulerHit};
 use crate::settings::{
     PenPreset, PressureCurve, SidebarSide, DEFAULT_HIGHLIGHTER_COLORS, DEFAULT_PEN_PRESETS,
-    DEFAULT_TEXT_COLORS, PEN_PRESET_COUNT,
+    DEFAULT_TEXT_COLORS, MAX_SAVED_COLORS, PEN_PRESET_COUNT,
 };
 use crate::storage::{NotebookLayout, NotebookSummary};
 use crate::text::{TextEditing, TextFont, TEXT_SIZES_PT};
@@ -446,6 +446,8 @@ pub struct UiState {
     pub is_text_color_menu_open: bool,
     /// Farbwähler in den Farb-Popovern aufgeklappt
     pub show_color_picker: bool,
+    /// „Meine Farben“ in the color popovers (Issue #56)
+    pub saved_colors: Vec<[f32; 3]>,
     /// Kontextmenü nach langem Drücken (Einfügen an dieser Stelle)
     pub context_menu: Option<ContextMenu>,
     /// Laufendes Platzschaffen (Vorschau)
@@ -575,6 +577,7 @@ impl Default for UiState {
             active_text_color: 0,
             is_text_color_menu_open: false,
             show_color_picker: false,
+            saved_colors: Vec::new(),
             context_menu: None,
             space_drag: None,
             stylus_buttons: Vec::new(),
@@ -1304,17 +1307,21 @@ fn autosave_status_style(status: AutosaveStatus) -> (egui::Color32, &'static str
 fn color_editor(
     ui: &mut egui::Ui,
     presets: &[ColorPreset],
+    saved: &mut Vec<[f32; 3]>,
     color: &mut [f32; 4],
     picker_open: &mut bool,
 ) -> bool {
+    let same_rgb = |a: &[f32], b: &[f32]| {
+        a[..3]
+            .iter()
+            .zip(&b[..3])
+            .all(|(a, b)| (a - b).abs() < 0.01)
+    };
     let mut changed = false;
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing = egui::vec2(8.0, 0.0);
         for &(preset, label) in presets {
-            let is_sel = preset[..3]
-                .iter()
-                .zip(&color[..3])
-                .all(|(a, b)| (a - b).abs() < 0.01);
+            let is_sel = same_rgb(&preset, color);
             if color_circle_swatch(ui, preset, is_sel, crate::i18n::tr(label), 30.0).clicked() {
                 *color = [preset[0], preset[1], preset[2], color[3]];
                 changed = true;
@@ -1329,6 +1336,46 @@ fn color_editor(
             .clicked()
         {
             *picker_open = !*picker_open;
+        }
+    });
+
+    // My colors (Issue #56): kept for pen, highlighter and text alike
+    ui.add_space(6.0);
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = egui::vec2(8.0, 6.0);
+        let mut remove = None;
+        for (i, rgb) in saved.iter().enumerate() {
+            let swatch = [rgb[0], rgb[1], rgb[2], 1.0];
+            let is_sel = same_rgb(rgb, color);
+            if color_circle_swatch(ui, swatch, is_sel, t!("Meine Farbe"), 30.0).clicked() {
+                *color = [rgb[0], rgb[1], rgb[2], color[3]];
+                changed = true;
+            }
+            if is_sel {
+                remove = Some(i);
+            }
+        }
+        if let Some(i) = remove {
+            if ui
+                .button(egui::RichText::new("🗑").size(16.0))
+                .on_hover_text(t!("Diese Farbe aus „Meine Farben“ entfernen"))
+                .clicked()
+            {
+                saved.remove(i);
+            }
+        } else if saved.len() < MAX_SAVED_COLORS {
+            let label = if saved.is_empty() {
+                t!("➕ Farbe merken")
+            } else {
+                "➕"
+            };
+            if ui
+                .button(label)
+                .on_hover_text(t!("Die aktuelle Farbe zu „Meine Farben“ hinzufügen"))
+                .clicked()
+            {
+                saved.push([color[0], color[1], color[2]]);
+            }
         }
     });
     if *picker_open {
@@ -4093,6 +4140,7 @@ pub fn render_ui(
                         if color_editor(
                             ui,
                             &PEN_COLOR_PRESETS,
+                            &mut state.saved_colors,
                             &mut state.pen_color,
                             &mut state.show_color_picker,
                         ) {
@@ -4274,6 +4322,7 @@ pub fn render_ui(
                         if color_editor(
                             ui,
                             &HIGHLIGHTER_COLOR_PRESETS,
+                            &mut state.saved_colors,
                             &mut state.highlighter_color,
                             &mut state.show_color_picker,
                         ) {
@@ -4380,6 +4429,7 @@ pub fn render_ui(
                         if color_editor(
                             ui,
                             &PEN_COLOR_PRESETS,
+                            &mut state.saved_colors,
                             &mut color,
                             &mut state.show_color_picker,
                         ) {

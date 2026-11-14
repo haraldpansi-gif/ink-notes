@@ -217,6 +217,9 @@ pub struct StylusButton {
 /// Höchstens so viele Stifttasten werden gemerkt.
 pub const MAX_STYLUS_BUTTONS: usize = 4;
 
+/// How many own colors fit under the presets of the color popovers (two rows)
+pub const MAX_SAVED_COLORS: usize = 12;
+
 /// Benutzereinstellungen der Oberfläche.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -257,6 +260,8 @@ pub struct UiSettings {
     /// One finger draws instead of moving the page. On by default on Android, where phones
     /// usually have no pen (Issue #50)
     pub touch_draw: bool,
+    /// Own colors under the presets of the color popovers (Issue #56)
+    pub saved_colors: Vec<[f32; 3]>,
 }
 
 impl Default for UiSettings {
@@ -286,6 +291,7 @@ impl Default for UiSettings {
             storage_dir: None,
             math_assist: false,
             touch_draw: cfg!(target_os = "android"),
+            saved_colors: Vec::new(),
         }
     }
 }
@@ -333,6 +339,11 @@ impl UiSettings {
             .active_text_color
             .min(settings.text_colors.len() - 1);
         settings.stylus_buttons.truncate(MAX_STYLUS_BUTTONS);
+        settings.saved_colors.truncate(MAX_SAVED_COLORS);
+        for rgb in &mut settings.saved_colors {
+            let [r, g, b, _] = sanitized_color([rgb[0], rgb[1], rgb[2], 1.0], [0.0, 0.0, 0.0, 1.0]);
+            *rgb = [r, g, b];
+        }
         settings
     }
 
@@ -412,6 +423,7 @@ mod tests {
             storage_dir: Some(PathBuf::from("/home/pia/Nextcloud/ink-notes")),
             math_assist: true,
             touch_draw: true,
+            saved_colors: vec![[0.2, 0.4, 0.6], [1.0, 0.5, 0.0]],
         };
         settings.save_to(&path).unwrap();
         assert_eq!(UiSettings::load_from(&path), settings);
