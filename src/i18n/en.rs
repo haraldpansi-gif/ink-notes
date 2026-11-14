@@ -179,6 +179,10 @@ pub const EN: &[(&str, &str)] = &[
     ("Kariert", "Grid"),
     ("KAROS, LINIEN UND PUNKTE", "GRID, LINES AND DOTS"),
     ("kein Asset-Ordner", "no asset folder"),
+    (
+        "'{asset_name}' ist keine neuere Version und wird nicht installiert.",
+        "'{asset_name}' is not a newer version and will not be installed.",
+    ),
     ("Kein Eintrag für '{asset_name}' in SHA256SUMS.txt gefunden. Heruntergeladene Datei wurde gelöscht.", "No entry for '{asset_name}' found in SHA256SUMS.txt. The downloaded file was deleted."),
     ("Kein Release ausgewählt. Download abgelehnt.", "No release selected. Download refused."),
     ("Keine manifest.json vorhanden", "No manifest.json present"),

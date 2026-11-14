@@ -302,15 +302,35 @@ impl UiSettings {
         crate::paths::config_dir().map(|d| d.join("ui.json"))
     }
 
-    /// Lädt die Einstellungen; bei fehlender oder beschädigter Datei gelten Standardwerte.
+    /// Keeps every setting of a partly invalid file that can still be read; only the
+    /// unreadable ones get their default. One bad value must not reset everything, least of
+    /// all the storage location.
+    fn salvage(content: &str) -> Self {
+        let Ok(serde_json::Value::Object(file)) = serde_json::from_str(content) else {
+            return Self::default();
+        };
+        let mut good = serde_json::Map::new();
+        for (key, value) in file {
+            good.insert(key.clone(), value);
+            let candidate = serde_json::Value::Object(good.clone());
+            if serde_json::from_value::<Self>(candidate).is_err() {
+                eprintln!("[Einstellungen] '{key}' ist ungültig, verwende Standardwert.");
+                good.remove(&key);
+            }
+        }
+        serde_json::from_value(serde_json::Value::Object(good)).unwrap_or_default()
+    }
+
+    /// Lädt die Einstellungen; bei fehlender Datei gelten Standardwerte, bei einer teilweise
+    /// ungültigen Datei nur für die unlesbaren Werte.
     pub fn load_from(path: &Path) -> Self {
         let mut settings: Self = match std::fs::read_to_string(path) {
             Ok(content) => serde_json::from_str(&content).unwrap_or_else(|e| {
                 eprintln!(
-                    "[Einstellungen] '{}' ist ungültig ({e}), verwende Standardwerte.",
+                    "[Einstellungen] '{}' ist ungültig ({e}), unlesbare Werte werden ersetzt.",
                     path.display()
                 );
-                Self::default()
+                Self::salvage(&content)
             }),
             Err(_) => Self::default(),
         };
@@ -435,6 +455,27 @@ mod tests {
         // Unbekannte / fehlende Felder werden toleriert
         std::fs::write(&path, br#"{"zukunft": 1}"#).unwrap();
         assert_eq!(UiSettings::load_from(&path), UiSettings::default());
+    }
+
+    #[test]
+    fn test_one_invalid_value_does_not_reset_the_other_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ui.json");
+        std::fs::write(
+            &path,
+            br#"{"storage_dir": "/home/pia/Nextcloud/ink-notes", "eraser_radius_mm": "big", "math_assist": true}"#,
+        )
+        .unwrap();
+        let loaded = UiSettings::load_from(&path);
+        assert_eq!(
+            loaded.storage_dir,
+            Some(PathBuf::from("/home/pia/Nextcloud/ink-notes"))
+        );
+        assert!(loaded.math_assist);
+        assert_eq!(
+            loaded.eraser_radius_mm,
+            UiSettings::default().eraser_radius_mm
+        );
     }
 
     #[test]

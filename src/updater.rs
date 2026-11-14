@@ -272,6 +272,22 @@ pub fn is_newer_version(remote_tag: &str, current_tag: &str, include_prereleases
     }
 }
 
+/// Version in a release file name (`ink-notes_<version>_<arch>.<ext>`).
+pub fn asset_version(asset_name: &str) -> Option<&str> {
+    let rest = asset_name.strip_prefix("ink-notes_")?;
+    let (version, _) = rest.split_once('_')?;
+    parse_semver(version).map(|_| version)
+}
+
+/// Is the package named `asset_name` newer than the running version `current`?
+///
+/// The signature only covers file names and hashes, not the release they are offered in. A
+/// server could therefore present an old, correctly signed package under a new version
+/// number. The version in the signed file name closes that gap.
+pub fn asset_is_upgrade(asset_name: &str, current: &str) -> bool {
+    asset_version(asset_name).is_some_and(|version| is_newer_version(version, current, true))
+}
+
 /// Berechnet den hex-kodierten SHA-256 Hash einer Datei.
 pub fn compute_sha256(path: &Path) -> Result<String, String> {
     let mut file = std::fs::File::open(path).map_err(|e| {
@@ -712,6 +728,14 @@ impl UpdaterController {
             }
         };
 
+        if !asset_is_upgrade(&safe_asset_name, env!("CARGO_PKG_VERSION")) {
+            self.status = UpdaterStatus::Error(t!(
+                "'{asset_name}' ist keine neuere Version und wird nicht installiert.",
+                asset_name = safe_asset_name
+            ));
+            return;
+        }
+
         self.status = UpdaterStatus::Downloading {
             asset_name: safe_asset_name.clone(),
             percent: 0.0,
@@ -1034,6 +1058,23 @@ mod tests {
         // Prerelease-Filterung
         assert!(!is_newer_version("1.0.0-rc1", "0.9.0", false));
         assert!(is_newer_version("1.0.0-rc1", "0.9.0", true));
+    }
+
+    #[test]
+    fn test_only_packages_named_as_newer_are_upgrades() {
+        assert_eq!(asset_version("ink-notes_0.46.0_amd64.deb"), Some("0.46.0"));
+        assert_eq!(
+            asset_version("ink-notes_0.46.0_x86_64.AppImage"),
+            Some("0.46.0")
+        );
+        assert_eq!(asset_version("SHA256SUMS.txt"), None);
+        assert_eq!(asset_version("ink-notes_latest_amd64.deb"), None);
+
+        assert!(asset_is_upgrade("ink-notes_0.46.0_arm64.apk", "0.45.0"));
+        // An old release offered again under a new tag
+        assert!(!asset_is_upgrade("ink-notes_0.30.0_amd64.deb", "0.45.0"));
+        assert!(!asset_is_upgrade("ink-notes_0.45.0_x86_64.exe", "0.45.0"));
+        assert!(!asset_is_upgrade("something_else.deb", "0.45.0"));
     }
 
     #[test]

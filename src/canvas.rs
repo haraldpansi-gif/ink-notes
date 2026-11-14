@@ -1021,8 +1021,13 @@ impl CanvasState {
         }
 
         if page.vertex_cache.len() > self.committed_vertex_capacity {
-            self.committed_vertex_capacity =
-                (page.vertex_cache.len() * 2).max(Self::INITIAL_COMMITTED_CAPACITY);
+            let vertex_size = std::mem::size_of::<InkVertex>() as u64;
+            let max_vertices = (self.device.limits().max_buffer_size / vertex_size) as usize;
+            self.committed_vertex_capacity = grown_vertex_capacity(
+                page.vertex_cache.len(),
+                Self::INITIAL_COMMITTED_CAPACITY,
+                max_vertices,
+            );
             self.committed_vertex_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("Committed Strokes Vertex Buffer (Reallocated)"),
                 size: (self.committed_vertex_capacity * std::mem::size_of::<InkVertex>()) as u64,
@@ -1735,9 +1740,31 @@ fn text_resolution(screen_px_per_unit: f32) -> f32 {
     2.0_f32.powf(steps / 4.0).clamp(0.125, 8.0)
 }
 
+/// Capacity for a vertex buffer that has to hold `needed` vertices: twice as much, so that
+/// it is not reallocated with every stroke, but no more than the device allows. Doubling
+/// alone asked for a buffer beyond the limit as soon as a very full page used half of it,
+/// which ends in a validation panic.
+fn grown_vertex_capacity(needed: usize, initial: usize, max_vertices: usize) -> usize {
+    needed
+        .saturating_mul(2)
+        .max(initial)
+        .min(max_vertices)
+        .max(needed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_vertex_capacity_doubles_up_to_the_device_limit() {
+        assert_eq!(grown_vertex_capacity(10, 1000, 1_000_000), 1000);
+        assert_eq!(grown_vertex_capacity(5000, 1000, 1_000_000), 10_000);
+        // More than half the limit: the limit, not twice the need
+        assert_eq!(grown_vertex_capacity(600_000, 1000, 1_000_000), 1_000_000);
+        // Never less than what is needed
+        assert_eq!(grown_vertex_capacity(2_000_000, 1000, 1_000_000), 2_000_000);
+    }
 
     #[test]
     fn test_text_resolution_is_quantized_and_never_below_screen() {

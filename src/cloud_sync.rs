@@ -953,6 +953,16 @@ struct Shared {
     /// Finished sign-in, to be stored by the app
     signed_in: Option<Account>,
     stop: bool,
+    /// Counts the started workers. A worker whose pass was still running when the next one
+    /// was started must end afterwards, although `stop` is `false` again by then.
+    generation: u64,
+}
+
+impl Shared {
+    /// Is the worker of `generation` to end?
+    fn retired(&self, generation: u64) -> bool {
+        self.stop || self.generation != generation
+    }
 }
 
 type SharedState = Arc<(Mutex<Shared>, Condvar)>;
@@ -986,6 +996,7 @@ impl CloudSync {
                     changed: false,
                     signed_in: None,
                     stop: false,
+                    generation: 0,
                 }),
                 Condvar::new(),
             )),
@@ -1009,15 +1020,19 @@ impl CloudSync {
 
     fn start(&mut self, account: Account) {
         self.stop_worker();
-        {
+        let generation = {
             let mut shared = lock(&self.shared);
             shared.stop = false;
+            shared.generation += 1;
             shared.status = Status::Idle { last: None };
             shared.next_pass = Instant::now();
-        }
+            shared.generation
+        };
         let shared = self.shared.clone();
         let worker_account = account.clone();
-        self.worker = Some(std::thread::spawn(move || worker(shared, worker_account)));
+        self.worker = Some(std::thread::spawn(move || {
+            worker(shared, worker_account, generation)
+        }));
         self.account = Some(account);
     }
 
@@ -1211,7 +1226,7 @@ fn sign_in(
     }
 }
 
-fn worker(shared: SharedState, account: Account) {
+fn worker(shared: SharedState, account: Account, generation: u64) {
     let Some(state_path) = SyncState::file_path() else {
         set_status(&shared, Status::Failed(t!("Kein Datenordner").to_string()));
         return;
@@ -1228,7 +1243,7 @@ fn worker(shared: SharedState, account: Account) {
         let (dir, ctx) = {
             let mut guard = lock(&shared);
             loop {
-                if guard.stop {
+                if guard.retired(generation) {
                     return;
                 }
                 let now = Instant::now();
@@ -1252,7 +1267,7 @@ fn worker(shared: SharedState, account: Account) {
             eprintln!("[Nextcloud] Sync-Stand nicht gespeichert: {err}");
         }
         let mut guard = lock(&shared);
-        if guard.stop {
+        if guard.retired(generation) {
             return;
         }
         guard.status = match result {
@@ -1281,6 +1296,27 @@ fn worker(shared: SharedState, account: Account) {
 mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    #[test]
+    fn worker_of_an_earlier_start_is_retired() {
+        let mut shared = Shared {
+            status: Status::Off,
+            local_dir: PathBuf::new(),
+            ctx: Context::default(),
+            next_pass: Instant::now(),
+            changed: false,
+            signed_in: None,
+            stop: false,
+            generation: 1,
+        };
+        assert!(!shared.retired(1));
+        // Stopped and started again while the pass of worker 1 was still running
+        shared.generation = 2;
+        assert!(shared.retired(1));
+        assert!(!shared.retired(2));
+        shared.stop = true;
+        assert!(shared.retired(2));
+    }
 
     /// Server folder in memory; folder ETags change with anything inside, like Nextcloud's.
     #[derive(Default)]
