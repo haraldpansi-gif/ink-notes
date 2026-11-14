@@ -400,6 +400,10 @@ pub mod clipboard {
             pub fn set_image(&mut self, _image: ImageData) -> Result<(), &'static str> {
                 Err("not available on Android")
             }
+
+            pub fn set_text(&mut self, _text: String) -> Result<(), &'static str> {
+                Err("not available on Android")
+            }
         }
     }
 }

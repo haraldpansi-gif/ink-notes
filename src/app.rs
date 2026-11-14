@@ -573,6 +573,19 @@ impl ClipboardBridge {
         (!text.trim().is_empty()).then_some(text)
     }
 
+    /// Text copied or cut in a text field goes to the system clipboard, so it can be pasted
+    /// into other apps (Issue #57).
+    fn set_system_text(&mut self, text: String) {
+        if self.system.is_none() {
+            self.system = platform::clipboard::Clipboard::new().ok();
+        }
+        if let Some(system) = self.system.as_mut() {
+            if let Err(err) = system.set_text(text) {
+                eprintln!("[Zwischenablage] Text nicht gesetzt: {err}");
+            }
+        }
+    }
+
     /// Merkt sich beim internen Kopieren das aktuelle Systembild, den Text und das
     /// Quell-Notizbuch.
     fn note_internal_copy(&mut self, storage_dir: &Path) {
@@ -2531,6 +2544,28 @@ pub fn run_with(
                         consumed: false,
                     }
                 } else {
+                    // Ctrl+V in a text field: egui-winit is built without its own clipboard
+                    // access and would only paste what was copied inside the app, so it gets the
+                    // text of the system clipboard first (Issue #57)
+                    if let WindowEvent::KeyboardInput {
+                        event:
+                            KeyEvent {
+                                logical_key: Key::Character(c),
+                                state: ElementState::Pressed,
+                                ..
+                            },
+                        ..
+                    } = &event
+                    {
+                        if c.eq_ignore_ascii_case("v")
+                            && egui_winit_state.egui_input().modifiers.command
+                            && egui_ctx.wants_keyboard_input()
+                        {
+                            if let Some(text) = clipboard.system_text() {
+                                egui_winit_state.set_clipboard_text(text);
+                            }
+                        }
+                    }
                     egui_winit_state.on_window_event(&window, &event)
                 };
                 // egui-winit asks for a repaint after every RedrawRequested as well; following
@@ -5638,6 +5673,10 @@ pub fn run_with(
                         // 4. egui Frame beenden & Primitives tessellieren
                         let full_output = egui_ctx.end_frame();
                         let ime_active = full_output.platform_output.ime.is_some();
+                        if !full_output.platform_output.copied_text.is_empty() {
+                            clipboard
+                                .set_system_text(full_output.platform_output.copied_text.clone());
+                        }
                         egui_winit_state
                             .handle_platform_output(&window, full_output.platform_output);
                         if let Some(requester) = keyboard_requester.as_mut() {
