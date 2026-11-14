@@ -84,6 +84,11 @@
   </branding>
   <content_rating type="oars-1.1" />
   <releases>
+    <release version="0.45.2" date="2026-11-14">
+      <description>
+        <p>A change from another device that arrives while you are writing on the same page is no longer overwritten; it is kept as a conflict copy.</p>
+      </description>
+    </release>
     <release version="0.45.1" date="2026-11-14">
       <description>
         <p>Fixes from a review of the whole project, mainly for the safety of your notes: switching notebooks, the trash, copied notebook folders, scaled strokes and imports of broken files.</p>
