@@ -84,6 +84,11 @@
   </branding>
   <content_rating type="oars-1.1" />
   <releases>
+    <release version="0.45.1" date="2026-11-14">
+      <description>
+        <p>Fixes from a review of the whole project, mainly for the safety of your notes: switching notebooks, the trash, copied notebook folders, scaled strokes and imports of broken files.</p>
+      </description>
+    </release>
     <release version="0.45.0" date="2026-11-14">
       <description>
         <p>Own colors can be saved under the presets of the color menus, and copy and paste in text fields works with other apps.</p>
