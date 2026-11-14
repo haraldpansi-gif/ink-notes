@@ -84,6 +84,11 @@
   </branding>
   <content_rating type="oars-1.1" />
   <releases>
+    <release version="0.45.3" date="2026-11-14">
+      <description>
+        <p>Undo on a following page after "make space" no longer adds a stroke a second time.</p>
+      </description>
+    </release>
     <release version="0.45.2" date="2026-11-14">
       <description>
         <p>A change from another device that arrives while you are writing on the same page is no longer overwritten; it is kept as a conflict copy.</p>
