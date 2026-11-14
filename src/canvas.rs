@@ -160,8 +160,120 @@ struct NeighborPage {
     /// Papier (Dreiecke) und Muster (Rechteck für `fs_pattern`)
     paper_buffer: wgpu::Buffer,
     pattern_buffer: Option<wgpu::Buffer>,
-    vertex_buffer: Option<wgpu::Buffer>,
-    stroke_ranges: Vec<Range<u32>>,
+    strokes: StrokeBuffers,
+}
+
+/// Part of a page's stroke vertices that goes into one GPU buffer.
+#[derive(Debug, Clone, PartialEq)]
+struct ChunkPlan {
+    /// Position in the page's vertex cache
+    vertices: Range<usize>,
+    /// The strokes in it, relative to the start of the chunk
+    strokes: Vec<Range<u32>>,
+}
+
+/// Splits the strokes of a page (ranges in its vertex cache) into runs of at most
+/// `max_vertices`, without cutting a stroke. Nearly every page is a single run; only a huge
+/// one, in practice an endless page, needs more than one buffer. A single stroke larger than
+/// a buffer cannot be drawn and is left out.
+fn plan_stroke_chunks(stroke_ranges: &[Range<u32>], max_vertices: usize) -> Vec<ChunkPlan> {
+    let mut chunks: Vec<ChunkPlan> = Vec::new();
+    for range in stroke_ranges {
+        let (start, end) = (range.start as usize, range.end as usize);
+        if end <= start || end - start > max_vertices {
+            continue;
+        }
+        let fits = chunks
+            .last()
+            .is_some_and(|c| c.vertices.end == start && end - c.vertices.start <= max_vertices);
+        if !fits {
+            chunks.push(ChunkPlan {
+                vertices: start..start,
+                strokes: Vec::new(),
+            });
+        }
+        if let Some(chunk) = chunks.last_mut() {
+            let offset = (start - chunk.vertices.start) as u32;
+            chunk.strokes.push(offset..offset + (end - start) as u32);
+            chunk.vertices.end = end;
+        }
+    }
+    chunks
+}
+
+struct StrokeChunk {
+    buffer: wgpu::Buffer,
+    /// In vertices
+    capacity: usize,
+    strokes: Vec<Range<u32>>,
+}
+
+/// The finished strokes of a page on the GPU, in as many vertex buffers as the size limit
+/// of the device requires (one buffer beyond the limit is a validation error that ends the
+/// app).
+#[derive(Default)]
+struct StrokeBuffers {
+    chunks: Vec<StrokeChunk>,
+    /// Chunks holding the current content; further ones are kept for their capacity
+    used: usize,
+}
+
+impl StrokeBuffers {
+    /// Uploads the vertex cache of a page. `spare` leaves room for more strokes (at least
+    /// that many vertices and twice the need), so drawing does not reallocate every time.
+    fn upload(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        vertices: &[InkVertex],
+        stroke_ranges: &[Range<u32>],
+        spare: Option<usize>,
+    ) {
+        let vertex_size = std::mem::size_of::<InkVertex>();
+        let max_vertices = (device.limits().max_buffer_size / vertex_size as u64) as usize;
+        let mut used = 0;
+        for part in plan_stroke_chunks(stroke_ranges, max_vertices) {
+            let Some(data) = vertices.get(part.vertices.clone()) else {
+                continue;
+            };
+            if self
+                .chunks
+                .get(used)
+                .is_none_or(|c| c.capacity < data.len())
+            {
+                let capacity = match spare {
+                    Some(initial) => grown_vertex_capacity(data.len(), initial, max_vertices),
+                    None => data.len(),
+                };
+                let chunk = StrokeChunk {
+                    buffer: device.create_buffer(&wgpu::BufferDescriptor {
+                        label: Some("Strokes Vertex Buffer"),
+                        size: (capacity * vertex_size) as u64,
+                        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                        mapped_at_creation: false,
+                    }),
+                    capacity,
+                    strokes: Vec::new(),
+                };
+                if used < self.chunks.len() {
+                    self.chunks[used] = chunk;
+                } else {
+                    self.chunks.push(chunk);
+                }
+            }
+            let chunk = &mut self.chunks[used];
+            queue.write_buffer(&chunk.buffer, 0, bytemuck::cast_slice(data));
+            chunk.strokes = part.strokes;
+            used += 1;
+        }
+        self.used = used;
+        // Keep the first buffer for the next page, give the memory of the others back
+        self.chunks.truncate(used.max(1));
+    }
+
+    fn in_use(&self) -> &[StrokeChunk] {
+        &self.chunks[..self.used.min(self.chunks.len())]
+    }
 }
 
 pub struct CanvasState {
@@ -238,10 +350,7 @@ pub struct CanvasState {
     pub spline_config: SplineConfig,
 
     // Pipeline-Trennung: Abgeschlossene Striche der aktuellen Seite
-    pub committed_vertex_buffer: wgpu::Buffer,
-    pub committed_vertex_capacity: usize,
-    pub committed_vertex_count: u32,
-    pub committed_strokes: Vec<Range<u32>>,
+    committed: StrokeBuffers,
 
     // Eingefügte Bilder der aktuellen Seite
     image_layer: crate::image_layer::ImageLayer,
@@ -575,13 +684,6 @@ impl CanvasState {
             mapped_at_creation: false,
         });
 
-        let committed_vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Committed Strokes Vertex Buffer"),
-            size: (Self::INITIAL_COMMITTED_CAPACITY * std::mem::size_of::<InkVertex>()) as u64,
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
         let image_layer = crate::image_layer::ImageLayer::new(
             &device,
             &shader,
@@ -641,10 +743,7 @@ impl CanvasState {
                 max_radius: 3.75, // 0.375 mm bei vollem Druck
                 samples_per_segment: 16,
             },
-            committed_vertex_buffer,
-            committed_vertex_capacity: Self::INITIAL_COMMITTED_CAPACITY,
-            committed_vertex_count: 0,
-            committed_strokes: Vec::with_capacity(128),
+            committed: StrokeBuffers::default(),
             image_layer,
             neighbors: Vec::new(),
             camera_layout: bind_group_layout,
@@ -1013,33 +1112,12 @@ impl CanvasState {
         let quads = self.page_image_quads(page, self.hidden_text);
         self.image_layer.set_quads(quads);
 
-        self.committed_vertex_count = page.vertex_cache.len() as u32;
-        self.committed_strokes = page.stroke_ranges.clone();
-
-        if page.vertex_cache.is_empty() {
-            return;
-        }
-
-        if page.vertex_cache.len() > self.committed_vertex_capacity {
-            let vertex_size = std::mem::size_of::<InkVertex>() as u64;
-            let max_vertices = (self.device.limits().max_buffer_size / vertex_size) as usize;
-            self.committed_vertex_capacity = grown_vertex_capacity(
-                page.vertex_cache.len(),
-                Self::INITIAL_COMMITTED_CAPACITY,
-                max_vertices,
-            );
-            self.committed_vertex_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("Committed Strokes Vertex Buffer (Reallocated)"),
-                size: (self.committed_vertex_capacity * std::mem::size_of::<InkVertex>()) as u64,
-                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
-        }
-
-        self.queue.write_buffer(
-            &self.committed_vertex_buffer,
-            0,
-            bytemuck::cast_slice(&page.vertex_cache),
+        self.committed.upload(
+            &self.device,
+            &self.queue,
+            &page.vertex_cache,
+            &page.stroke_ranges,
+            Some(Self::INITIAL_COMMITTED_CAPACITY),
         );
     }
 
@@ -1084,19 +1162,14 @@ impl CanvasState {
                 resource: camera_buffer.as_entire_binding(),
             }],
         });
-        let vertex_buffer_with = |label: &str, vertices: &[InkVertex]| {
-            (!vertices.is_empty()).then(|| {
-                let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
-                    label: Some(label),
-                    size: std::mem::size_of_val(vertices) as u64,
-                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-                    mapped_at_creation: false,
-                });
-                self.queue
-                    .write_buffer(&buffer, 0, bytemuck::cast_slice(vertices));
-                buffer
-            })
-        };
+        let mut strokes = StrokeBuffers::default();
+        strokes.upload(
+            &self.device,
+            &self.queue,
+            &page.vertex_cache,
+            &page.stroke_ranges,
+            None,
+        );
         // Eigenes Papier und Muster (Nachbarseiten können anders groß sein)
         let paper = generate_paper_quad(self.paper_theme.paper_color(), page.size);
         let pattern = generate_pattern_quad(
@@ -1130,8 +1203,7 @@ impl CanvasState {
             camera_bind_group,
             paper_buffer,
             pattern_buffer,
-            vertex_buffer: vertex_buffer_with("Neighbor Strokes Buffer", &page.vertex_cache),
-            stroke_ranges: page.stroke_ranges.clone(),
+            strokes,
         }
     }
 
@@ -1492,14 +1564,12 @@ impl CanvasState {
                     render_pass.draw(0..6, 0..1);
                 }
                 self.image_layer.draw(&mut render_pass, i + 1);
-                if let Some(buffer) = &neighbor.vertex_buffer {
-                    render_pass.set_pipeline(&self.strip_pipeline);
-                    render_pass.set_vertex_buffer(0, buffer.slice(..));
-                    for range in &neighbor.stroke_ranges {
-                        if range.end > range.start {
-                            self.next_stroke_stencil(&mut render_pass, &mut stencil_ref);
-                            render_pass.draw(range.clone(), 0..1);
-                        }
+                render_pass.set_pipeline(&self.strip_pipeline);
+                for chunk in neighbor.strokes.in_use() {
+                    render_pass.set_vertex_buffer(0, chunk.buffer.slice(..));
+                    for range in &chunk.strokes {
+                        self.next_stroke_stencil(&mut render_pass, &mut stencil_ref);
+                        render_pass.draw(range.clone(), 0..1);
                     }
                 }
             }
@@ -1525,13 +1595,11 @@ impl CanvasState {
             // 4. Abgeschlossene Striche der aktiven Seite rendern (TriangleStrip mit Vertex-Farben)
             render_pass.set_pipeline(&self.strip_pipeline);
 
-            if self.committed_vertex_count > 0 {
-                render_pass.set_vertex_buffer(0, self.committed_vertex_buffer.slice(..));
-                for range in &self.committed_strokes {
-                    if range.end > range.start {
-                        self.next_stroke_stencil(&mut render_pass, &mut stencil_ref);
-                        render_pass.draw(range.clone(), 0..1);
-                    }
+            for chunk in self.committed.in_use() {
+                render_pass.set_vertex_buffer(0, chunk.buffer.slice(..));
+                for range in &chunk.strokes {
+                    self.next_stroke_stencil(&mut render_pass, &mut stencil_ref);
+                    render_pass.draw(range.clone(), 0..1);
                 }
             }
 
@@ -1741,9 +1809,7 @@ fn text_resolution(screen_px_per_unit: f32) -> f32 {
 }
 
 /// Capacity for a vertex buffer that has to hold `needed` vertices: twice as much, so that
-/// it is not reallocated with every stroke, but no more than the device allows. Doubling
-/// alone asked for a buffer beyond the limit as soon as a very full page used half of it,
-/// which ends in a validation panic.
+/// it is not reallocated with every stroke, but no more than the device allows.
 fn grown_vertex_capacity(needed: usize, initial: usize, max_vertices: usize) -> usize {
     needed
         .saturating_mul(2)
@@ -1755,6 +1821,193 @@ fn grown_vertex_capacity(needed: usize, initial: usize, max_vertices: usize) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[allow(clippy::single_range_in_vec_init)]
+    fn test_strokes_are_split_into_buffers_within_the_limit() {
+        // The usual case: one buffer, ranges as in the vertex cache
+        let ranges = vec![0..10, 10..10, 10..25, 25..40];
+        let plan = plan_stroke_chunks(&ranges, 1000);
+        assert_eq!(
+            plan,
+            vec![ChunkPlan {
+                vertices: 0..40,
+                strokes: vec![0..10, 10..25, 25..40],
+            }]
+        );
+
+        // More than fits: several buffers, no stroke cut, ranges relative to their buffer
+        let plan = plan_stroke_chunks(&ranges, 30);
+        assert_eq!(
+            plan,
+            vec![
+                ChunkPlan {
+                    vertices: 0..25,
+                    strokes: vec![0..10, 10..25],
+                },
+                ChunkPlan {
+                    vertices: 25..40,
+                    strokes: vec![0..15],
+                },
+            ]
+        );
+        assert!(plan.iter().all(|c| c.vertices.len() <= 30));
+
+        // A stroke larger than a buffer is left out, the others are still drawn
+        let plan = plan_stroke_chunks(&[0..10, 10..60, 60..70], 30);
+        assert_eq!(
+            plan,
+            vec![
+                ChunkPlan {
+                    vertices: 0..10,
+                    strokes: vec![0..10],
+                },
+                ChunkPlan {
+                    vertices: 60..70,
+                    strokes: vec![0..10],
+                },
+            ]
+        );
+        assert!(plan_stroke_chunks(&[], 30).is_empty());
+    }
+
+    /// Uploads and draws a page whose strokes exceed the buffer limit of a real device (the
+    /// limit is set very low for the test). Skipped where no graphics adapter is available.
+    #[test]
+    fn test_page_beyond_the_buffer_limit_is_drawn_from_several_buffers() {
+        let vertex_size = std::mem::size_of::<InkVertex>() as u64;
+        // 40 vertices per buffer
+        let limits = wgpu::Limits {
+            max_buffer_size: 40 * vertex_size,
+            ..wgpu::Limits::default()
+        };
+        let instance = wgpu::Instance::default();
+        let mut found = None;
+        for force_fallback_adapter in [false, true] {
+            let options = wgpu::RequestAdapterOptions {
+                force_fallback_adapter,
+                ..Default::default()
+            };
+            if let Some(adapter) = pollster::block_on(instance.request_adapter(&options)) {
+                let descriptor = wgpu::DeviceDescriptor {
+                    label: None,
+                    required_features: wgpu::Features::empty(),
+                    required_limits: limits.clone(),
+                };
+                if let Ok(pair) = pollster::block_on(adapter.request_device(&descriptor, None)) {
+                    found = Some(pair);
+                    break;
+                }
+            }
+        }
+        let Some((device, queue)) = found else {
+            eprintln!("no graphics adapter, test skipped");
+            return;
+        };
+
+        // 10 strokes of 12 vertices: 120 vertices, three times the limit
+        let vertices = vec![InkVertex::new(0.0, 0.0, [0.0, 0.0, 0.0, 1.0]); 120];
+        let ranges: Vec<Range<u32>> = (0..10).map(|i| i * 12..(i + 1) * 12).collect();
+
+        // The limit is real: one buffer for everything is refused
+        device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let _ = device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size: vertices.len() as u64 * vertex_size,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        assert!(pollster::block_on(device.pop_error_scope()).is_some());
+
+        device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let mut strokes = StrokeBuffers::default();
+        strokes.upload(&device, &queue, &vertices, &ranges, Some(16));
+        assert_eq!(strokes.in_use().len(), 4);
+        let drawn: usize = strokes.in_use().iter().map(|c| c.strokes.len()).sum();
+        assert_eq!(drawn, 10);
+
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: None,
+            source: wgpu::ShaderSource::Wgsl(
+                "@vertex fn vs(@location(0) p: vec2<f32>, @location(1) c: vec4<f32>)
+                     -> @builtin(position) vec4<f32> { return vec4<f32>(p, 0.0, 1.0) + c * 0.0; }
+                 @fragment fn fs() -> @location(0) vec4<f32> { return vec4<f32>(1.0); }"
+                    .into(),
+            ),
+        });
+        let format = wgpu::TextureFormat::Rgba8Unorm;
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: None,
+            layout: None,
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: "vs",
+                buffers: &[InkVertex::desc()],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: "fs",
+                targets: &[Some(format.into())],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+        });
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: None,
+            size: wgpu::Extent3d {
+                width: 16,
+                height: 16,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let mut encoder = device.create_command_encoder(&Default::default());
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: None,
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            pass.set_pipeline(&pipeline);
+            for chunk in strokes.in_use() {
+                pass.set_vertex_buffer(0, chunk.buffer.slice(..));
+                for range in &chunk.strokes {
+                    pass.draw(range.clone(), 0..1);
+                }
+            }
+        }
+        queue.submit(std::iter::once(encoder.finish()));
+        device.poll(wgpu::Maintain::Wait);
+        let error = pollster::block_on(device.pop_error_scope());
+        assert!(error.is_none(), "{error:?}");
+
+        // A smaller page afterwards uses one buffer again and frees the others
+        strokes.upload(&device, &queue, &vertices[..24], &ranges[..2], Some(16));
+        assert_eq!(strokes.in_use().len(), 1);
+        assert_eq!(strokes.chunks.len(), 1);
+        strokes.upload(&device, &queue, &[], &[], Some(16));
+        assert!(strokes.in_use().is_empty());
+    }
 
     #[test]
     fn test_vertex_capacity_doubles_up_to_the_device_limit() {
