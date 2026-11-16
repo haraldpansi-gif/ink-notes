@@ -101,7 +101,7 @@ All coordinates refer to the **current page**. `PageStack` (`viewport.rs`) place
 
 After scrolling, the page in the middle of the window becomes the current page; the camera is shifted so that the picture does not move. There is no switch during a stroke, a selection, while dragging the ruler or while typing text. Starting to draw on a visible neighboring page switches to that page first.
 
-A quick finger swipe keeps gliding (`Fling` in `viewport.rs`): the speed is measured over the last 100 ms before the finger lifts and then decays exponentially. The scrollbar on the edge opposite the toolbar jumps directly to a position in the notebook.
+A quick finger swipe keeps gliding (`Fling` in `viewport.rs`): the speed is measured over the last 100 ms before the finger lifts and then decays exponentially. The scrollbar beside the toolbar (on its inner side, away from the writing hand) jumps directly to a position in the notebook.
 
 ---
 

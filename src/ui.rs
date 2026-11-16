@@ -2667,16 +2667,18 @@ fn page_separators(ctx: &egui::Context, state: &UiState, notebook: &Notebook) {
 fn scrollbar_layout(
     screen: egui::Rect,
     side: SidebarSide,
+    reserved: f32,
     (top, bottom): (f32, f32),
     center: f32,
     visible: f32,
 ) -> (egui::Rect, egui::Rect) {
     const WIDTH: f32 = 28.0;
     const MARGIN: f32 = 12.0;
-    // Gegenüber der Werkzeugleiste
+    // Next to the toolbar, on its inner side: the writing hand rests on the opposite
+    // half of the screen and no longer touches the bar by accident (issue #58)
     let x = match side {
-        SidebarSide::Left => screen.right() - WIDTH,
-        SidebarSide::Right => screen.left(),
+        SidebarSide::Left => (screen.left() + reserved).min(screen.right() - WIDTH),
+        SidebarSide::Right => (screen.right() - reserved - WIDTH).max(screen.left()),
     };
     let track = egui::Rect::from_min_size(
         egui::pos2(x, screen.top() + MARGIN),
@@ -2696,7 +2698,7 @@ fn scrollbar_layout(
     (track, thumb)
 }
 
-/// Durchgehende Ansicht: Bildlaufleiste am Fensterrand gegenüber der Werkzeugleiste. Den
+/// Durchgehende Ansicht: Bildlaufleiste neben der Werkzeugleiste (zur Seite hin). Den
 /// Griff ziehen (oder auf die Leiste tippen) springt schnell durch lange Notizbücher und
 /// PDFs (Issue #28); beim Ziehen steht die Seitenzahl daneben.
 fn page_scrollbar(
@@ -2718,8 +2720,14 @@ fn page_scrollbar(
     let screen = ctx.screen_rect();
     let center = view.to_page(screen.center()).y;
     let visible = screen.height() / view.scale.max(1e-6);
-    let (track, thumb) =
-        scrollbar_layout(screen, state.sidebar_side, (min.y, max.y), center, visible);
+    let (track, thumb) = scrollbar_layout(
+        screen,
+        state.sidebar_side,
+        state.sidebar_reserved_width(),
+        (min.y, max.y),
+        center,
+        visible,
+    );
 
     let dark = state.paper_theme.is_dark();
     let response = egui::Area::new(egui::Id::new("page_scrollbar"))
@@ -2771,12 +2779,12 @@ fn page_scrollbar(
     }
     if let Some(page) = stack.page_at(target) {
         let label_x = match state.sidebar_side {
-            SidebarSide::Left => track.left() - 8.0,
-            SidebarSide::Right => track.right() + 8.0,
+            SidebarSide::Left => track.right() + 8.0,
+            SidebarSide::Right => track.left() - 8.0,
         };
         let anchor = match state.sidebar_side {
-            SidebarSide::Left => egui::Align2::RIGHT_CENTER,
-            SidebarSide::Right => egui::Align2::LEFT_CENTER,
+            SidebarSide::Left => egui::Align2::LEFT_CENTER,
+            SidebarSide::Right => egui::Align2::RIGHT_CENTER,
         };
         let painter = ctx.layer_painter(egui::LayerId::new(
             egui::Order::Foreground,
@@ -5939,18 +5947,38 @@ mod tests {
 
     #[test]
     fn test_page_scrollbar_jumps_through_the_notebook() {
-        // Layout: Griff oben am Anfang, unten am Ende, gegenüber der Werkzeugleiste
+        // Layout: thumb at the top at the start, at the bottom at the end, beside the
+        // toolbar and never on the opposite edge where the writing hand rests (issue #58)
         let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 850.0));
-        let (track, top) =
-            scrollbar_layout(screen, SidebarSide::Left, (0.0, 80_000.0), 0.0, 1000.0);
-        assert_eq!(track.right(), screen.right());
+        let (track, top) = scrollbar_layout(
+            screen,
+            SidebarSide::Left,
+            64.0,
+            (0.0, 80_000.0),
+            0.0,
+            1000.0,
+        );
+        assert_eq!(track.left(), 64.0);
         assert_eq!(top.top(), track.top());
         assert!(top.height() >= 48.0);
-        let (_, end) =
-            scrollbar_layout(screen, SidebarSide::Left, (0.0, 80_000.0), 80_000.0, 1000.0);
+        let (_, end) = scrollbar_layout(
+            screen,
+            SidebarSide::Left,
+            64.0,
+            (0.0, 80_000.0),
+            80_000.0,
+            1000.0,
+        );
         assert_eq!(end.bottom(), track.bottom());
-        let (left, _) = scrollbar_layout(screen, SidebarSide::Right, (0.0, 1.0), 0.0, 1.0);
-        assert_eq!(left.left(), screen.left());
+        let (right, _) = scrollbar_layout(screen, SidebarSide::Right, 64.0, (0.0, 1.0), 0.0, 1.0);
+        assert_eq!(right.right(), screen.right() - 64.0);
+        assert!(right.left() > screen.center().x);
+        // Without a toolbar the bar sits on the toolbar's edge; it stays on screen even
+        // when the toolbar is wider than the window
+        let (edge, _) = scrollbar_layout(screen, SidebarSide::Right, 0.0, (0.0, 1.0), 0.0, 1.0);
+        assert_eq!(edge.right(), screen.right());
+        let (narrow, _) = scrollbar_layout(screen, SidebarSide::Left, 5000.0, (0.0, 1.0), 0.0, 1.0);
+        assert_eq!(narrow.right(), screen.right());
 
         // Notizbuch mit 80 Seiten, durchgehend, Ansicht auf Seite 1
         let mut notebook = Notebook::new();
@@ -5965,7 +5993,8 @@ mod tests {
         });
         let ctx = render_frames(&mut state, &notebook, 2);
         let updater = crate::updater::UpdaterController::new();
-        let x = screen.right() - 14.0;
+        let x = state.sidebar_reserved_width() + 14.0;
+        assert!(x > 14.0, "the toolbar has been laid out");
         let mut actions = Vec::new();
         // Griff greifen und bis ans untere Ende ziehen
         for (pos, pressed) in [

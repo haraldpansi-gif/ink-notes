@@ -101,7 +101,7 @@ Alle Koordinaten beziehen sich auf die **aktuelle Seite**. `PageStack` (`viewpor
 
 Nach dem Scrollen wird die Seite in der Fenstermitte zur aktuellen Seite; die Kamera wird dabei so verschoben, dass sich das Bild nicht bewegt. Während eines Strichs, einer Auswahl, beim Ziehen des Lineals oder beim Schreiben von Text wird nicht gewechselt. Wer auf einer sichtbaren Nachbarseite zu zeichnen beginnt, wechselt zuerst auf diese Seite.
 
-Schnelles Wischen mit dem Finger gleitet nach (`Fling` in `viewport.rs`): Die Geschwindigkeit wird über die letzten 100 ms vor dem Abheben gemessen und nimmt danach exponentiell ab. Die Bildlaufleiste am Rand gegenüber der Werkzeugleiste springt direkt an eine Stelle im Notizbuch.
+Schnelles Wischen mit dem Finger gleitet nach (`Fling` in `viewport.rs`): Die Geschwindigkeit wird über die letzten 100 ms vor dem Abheben gemessen und nimmt danach exponentiell ab. Die Bildlaufleiste neben der Werkzeugleiste (zur Seitenmitte hin, abseits der Schreibhand) springt direkt an eine Stelle im Notizbuch.
 
 ---
 
