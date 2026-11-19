@@ -222,7 +222,8 @@ fn expression_strokes(strokes: &[Stroke], equals: (usize, usize)) -> Vec<usize> 
             let s = &strokes[i].aabb;
             let center = (s.min.y + s.max.y) / 2.0;
             (center - middle).abs() <= 2.0 * height
-                && s.max.y - s.min.y <= 3.0 * height
+                // Root signs and brackets around fractions are taller than digits
+                && s.max.y - s.min.y <= 5.0 * height
                 && s.max.x <= min.x + 0.2 * height
         })
         .collect();
@@ -412,7 +413,7 @@ mod tests {
             ("2·3=", Some("6")),
             ("2·2=", Some("4")),
             ("4^(2)=", Some("16")),
-            ("√4=", None),
+            ("√(4)=", Some("2")),
             ("4^(4)+3·2+(5+2)·10=", Some("332")),
         ];
         let mut checked = 0;

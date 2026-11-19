@@ -6,14 +6,16 @@
 //!
 //! 1. **Grouping**: consecutive strokes that overlap form one symbol (the two strokes of `+`,
 //!    `x` or `4`). Straight horizontal strokes and dots are kept apart, as their meaning
-//!    depends on their neighbours.
+//!    depends on their neighbours, and so is a root sign: its shape is recognized directly
+//!    (a tick with a bar over the radicand, in one stroke or as tick and bar).
 //! 2. **Classifying** each symbol with the $P point-cloud recognizer (Vatavu, Anthony,
 //!    Wobbrock 2012): its points are compared with templates of each symbol. It does not
 //!    depend on stroke order or direction and needs no trained model; besides the built-in
 //!    templates, one's own handwriting can be added as templates.
 //! 3. **Structure** from the positions: two stacked lines are `=`, two stacked dots `:`, a
-//!    line with symbols above and below is a fraction bar, a dot low between digits a
-//!    decimal comma, and smaller raised symbols an exponent.
+//!    line with symbols above and below is a fraction bar, the symbols under the bar of a root
+//!    sign its radicand, a dot low between digits a decimal comma, and smaller raised symbols
+//!    an exponent.
 
 use glam::{Vec2, Vec3};
 
@@ -34,7 +36,7 @@ const BRACKET_RATIO: f32 = 1.5;
 /// A recognized symbol with the area it covers and the strokes it consists of
 #[derive(Debug, Clone, PartialEq)]
 pub struct Symbol {
-    /// `0`–`9`, `x`, `y`, `a`, `b`, `+`, `-`, `·`, `:`, `/`, `(`, `)`, `=`, `,` or `?`
+    /// `0`–`9`, `x`, `y`, `a`, `b`, `+`, `-`, `·`, `:`, `/`, `(`, `)`, `√`, `=`, `,` or `?`
     pub ch: char,
     pub min: Vec2,
     pub max: Vec2,
@@ -133,13 +135,27 @@ impl Recognizer {
             return None;
         }
         let line_height = line_height(&infos);
-        let kinds: Vec<Kind> = infos.iter().map(|i| i.kind(line_height)).collect();
+        let kinds: Vec<Kind> = infos
+            .iter()
+            .zip(strokes)
+            .map(|(info, points)| match info.kind(line_height) {
+                Kind::Other if root_bar_start(points).is_some() => Kind::Root,
+                Kind::Other if is_tick(points) => Kind::Tick,
+                kind => kind,
+            })
+            .collect();
         let groups = group_strokes(strokes, &infos, &kinds, line_height);
 
         let mut elements = Vec::new();
         for group in groups {
             let (min, max) = bounds(group.iter().map(|&i| &infos[i]));
+            let bar_start = match (group.as_slice(), kinds[group[0]]) {
+                ([root], Kind::Root) => root_bar_start(&strokes[*root]),
+                ([_, bar], Kind::Tick) => Some(infos[*bar].min.x),
+                _ => None,
+            };
             let ch = match (group.as_slice(), kinds[group[0]]) {
+                _ if bar_start.is_some() => ROOT,
                 ([_], Kind::Line) => LINE,
                 ([_], Kind::Dot) => DOT,
                 ([a, b], _) if is_plus(&strokes[*a], &strokes[*b]) => '+',
@@ -160,12 +176,13 @@ impl Recognizer {
                     strokes: group,
                 },
                 text: None,
+                bar_start,
             });
         }
 
         self.balance_brackets(&mut elements, strokes);
         let elements = pair_stacked(elements, line_height);
-        let elements = build_fractions(elements, line_height);
+        let elements = build_structures(elements, line_height);
         let text = layout(&elements, line_height);
         let mut symbols = Vec::new();
         for element in elements {
@@ -252,6 +269,49 @@ impl Recognizer {
             relabel((0..k).collect(), '(', elements);
         }
     }
+}
+
+/// The lowest point of `points[..end]` if the stroke comes from the left down to it and then
+/// climbs steeply to `points[end]`, like the tick of a root sign
+fn tick_bottom(points: &[Vec2], end: usize, height: f32) -> Option<Vec2> {
+    let (index, bottom) = points[..end]
+        .iter()
+        .enumerate()
+        .max_by(|a, b| a.1.y.total_cmp(&b.1.y))?;
+    let top = points[end];
+    (index > 0 && points[0].x < bottom.x && bottom.x < top.x && bottom.y - top.y >= 0.6 * height)
+        .then_some(*bottom)
+}
+
+/// Where the bar of a root sign written in one stroke begins (x): the stroke goes down to
+/// the bottom, up steeply and then right along the top for at least a quarter of its width
+fn root_bar_start(points: &[Vec2]) -> Option<f32> {
+    let info = StrokeInfo::new(points);
+    let size = info.size();
+    if size.x <= 0.0 || size.y <= 0.0 {
+        return None;
+    }
+    let near_top = |p: &Vec2| p.y <= info.min.y + 0.15 * size.y;
+    let bar = points.len() - points.iter().rev().take_while(|p| near_top(p)).count();
+    if bar == 0 || bar >= points.len() {
+        return None;
+    }
+    let (start, end) = (points[bar], points[points.len() - 1]);
+    let long = end.x - start.x >= 0.25 * size.x && end.x >= info.max.x - 0.05 * size.x;
+    (long && tick_bottom(points, bar, size.y).is_some()).then_some(start.x)
+}
+
+/// A root sign without its bar: down to the bottom and up steeply, ending at the top right
+fn is_tick(points: &[Vec2]) -> bool {
+    let info = StrokeInfo::new(points);
+    let size = info.size();
+    let Some(&end) = points.last() else {
+        return false;
+    };
+    size.y > 0.0
+        && end.y <= info.min.y + 0.15 * size.y
+        && end.x >= info.max.x - 0.15 * size.x
+        && tick_bottom(points, points.len() - 1, size.y).is_some()
 }
 
 /// A two-stroke `+`: a straight horizontal line crossed near its middle by a straight, steep
@@ -707,6 +767,7 @@ fn builtin_templates() -> Vec<(char, Vec<Vec<Vec2>>)> {
 /// Placeholder symbols before the structure is known
 const LINE: char = '—';
 const DOT: char = '•';
+const ROOT: char = '√';
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Kind {
@@ -714,6 +775,10 @@ enum Kind {
     Line,
     /// Small: multiplication dot, half of `:` or decimal comma
     Dot,
+    /// A root sign with its bar, in one stroke
+    Root,
+    /// A root sign without its bar, which follows as a [`Kind::Line`]
+    Tick,
     Other,
 }
 
@@ -790,6 +855,20 @@ fn group_strokes(
             let gsize = gmax - gmin;
             let group_kinds: Vec<Kind> = group.iter().map(|&j| kinds[j]).collect();
             if kinds[i] == Kind::Dot || group_kinds.contains(&Kind::Dot) {
+                return false;
+            }
+            if kinds[i] == Kind::Root || group_kinds.contains(&Kind::Root) {
+                return false;
+            }
+            // The bar of a root sign begins at the top of its tick
+            if group_kinds == [Kind::Tick] {
+                let tick = &infos[group[0]];
+                let reach = 0.3 * line_height;
+                return kinds[i] == Kind::Line
+                    && (info.min.x - tick.max.x).abs() <= reach
+                    && ((info.min.y + info.max.y) / 2.0 - tick.min.y).abs() <= reach;
+            }
+            if kinds[i] == Kind::Tick || group_kinds.contains(&Kind::Tick) {
                 return false;
             }
             let touches = || {
@@ -891,11 +970,13 @@ fn polyline_distance(a: &[Vec2], b: &[Vec2]) -> f32 {
 
 // --- Structure ------------------------------------------------------------------------------
 
-/// A symbol, or a fraction made of several (then `text` holds its text)
+/// A symbol, or a fraction or root made of several (then `text` holds its text)
 #[derive(Debug, Clone)]
 struct Element {
     symbol: Symbol,
     text: Option<(String, Vec<Element>)>,
+    /// For a root sign: where its bar begins (x)
+    bar_start: Option<f32>,
 }
 
 impl Element {
@@ -938,6 +1019,7 @@ fn merged(a: &Element, b: &Element, ch: char) -> Element {
             strokes,
         },
         text: None,
+        bar_start: None,
     }
 }
 
@@ -982,75 +1064,124 @@ fn pair_stacked(mut elements: Vec<Element>, line_height: f32) -> Vec<Element> {
     elements
 }
 
-/// Lines with symbols above and below become fractions, the narrowest first so that nested
-/// fractions work
-fn build_fractions(mut elements: Vec<Element>, line_height: f32) -> Vec<Element> {
+/// What a fraction bar or root sign spans: indices into the elements
+enum Structure {
+    Fraction {
+        bar: usize,
+        above: Vec<usize>,
+        below: Vec<usize>,
+    },
+    Root {
+        sign: usize,
+        radicand: Vec<usize>,
+    },
+}
+
+/// The symbols above and below the line `bar`, if there are both
+fn fraction_at(elements: &[Element], bar: usize, line_height: f32) -> Option<Structure> {
+    let b = &elements[bar];
+    let y = b.center().y;
+    let margin = 0.1 * line_height;
+    // A symbol may stick out a little at the ends of the bar
+    let inside_margin = 0.25 * line_height;
+    let inside = |e: &Element| {
+        let c = e.center().x;
+        c >= b.symbol.min.x - inside_margin && c <= b.symbol.max.x + inside_margin
+    };
+    let mut above = Vec::new();
+    let mut below = Vec::new();
+    for (i, e) in elements.iter().enumerate() {
+        if i == bar || !inside(e) {
+            continue;
+        }
+        if e.symbol.max.y <= y + margin && e.symbol.max.y > y - 1.5 * line_height {
+            above.push(i);
+        } else if e.symbol.min.y >= y - margin && e.symbol.min.y < y + 1.5 * line_height {
+            below.push(i);
+        }
+    }
+    (!above.is_empty() && !below.is_empty()).then_some(Structure::Fraction { bar, above, below })
+}
+
+/// The symbols under the bar of the root sign `sign`, if there are any
+fn root_at(elements: &[Element], sign: usize, line_height: f32) -> Option<Structure> {
+    let root = &elements[sign];
+    let start = root.bar_start?;
+    let margin = 0.1 * line_height;
+    let radicand: Vec<usize> = (0..elements.len())
+        .filter(|&i| {
+            let c = elements[i].center();
+            i != sign
+                && c.x >= start - margin
+                && c.x <= root.symbol.max.x + margin
+                && c.y > root.symbol.min.y
+                && c.y < root.symbol.max.y + 0.2 * line_height
+        })
+        .collect();
+    (!radicand.is_empty()).then_some(Structure::Root { sign, radicand })
+}
+
+/// Lines with symbols above and below become fractions and root signs with symbols under
+/// their bar roots, the narrowest first so that they can be nested
+fn build_structures(mut elements: Vec<Element>, line_height: f32) -> Vec<Element> {
     loop {
-        let mut bars: Vec<usize> = (0..elements.len())
-            .filter(|&i| elements[i].symbol.ch == LINE)
+        let mut candidates: Vec<usize> = (0..elements.len())
+            .filter(|&i| elements[i].text.is_none() && matches!(elements[i].symbol.ch, LINE | ROOT))
             .collect();
-        bars.sort_by(|&a, &b| elements[a].width().total_cmp(&elements[b].width()));
-        let found = bars.into_iter().find_map(|bar| {
-            let b = &elements[bar];
-            let y = b.center().y;
-            let margin = 0.1 * line_height;
-            // A symbol may stick out a little at the ends of the bar
-            let inside_margin = 0.25 * line_height;
-            let inside = |e: &Element| {
-                let c = e.center().x;
-                c >= b.symbol.min.x - inside_margin && c <= b.symbol.max.x + inside_margin
-            };
-            let mut above = Vec::new();
-            let mut below = Vec::new();
-            for (i, e) in elements.iter().enumerate() {
-                if i == bar || !inside(e) {
-                    continue;
-                }
-                if e.symbol.max.y <= y + margin && e.symbol.max.y > y - 1.5 * line_height {
-                    above.push(i);
-                } else if e.symbol.min.y >= y - margin && e.symbol.min.y < y + 1.5 * line_height {
-                    below.push(i);
-                }
-            }
-            (!above.is_empty() && !below.is_empty()).then_some((bar, above, below))
-        });
-        let Some((bar, above, below)) = found else {
-            return elements;
-        };
+        candidates.sort_by(|&a, &b| elements[a].width().total_cmp(&elements[b].width()));
+        let found = candidates
+            .into_iter()
+            .find_map(|i| match elements[i].symbol.ch {
+                LINE => fraction_at(&elements, i, line_height),
+                _ => root_at(&elements, i, line_height),
+            });
         let take = |indices: &[usize]| -> Vec<Element> {
             indices.iter().map(|&i| elements[i].clone()).collect()
         };
-        let numerator = take(&above);
-        let denominator = take(&below);
-        let text = format!(
-            "(({})/({}))",
-            layout(&numerator, line_height),
-            layout(&denominator, line_height)
-        );
-        let mut fraction = elements[bar].clone();
-        // No longer a line, so that it is not taken as a bar again
-        fraction.symbol.ch = '/';
-        for part in numerator.iter().chain(&denominator) {
-            fraction.symbol.min = fraction.symbol.min.min(part.symbol.min);
-            fraction.symbol.max = fraction.symbol.max.max(part.symbol.max);
+        let (at, text, mut parts, removed) = match found {
+            None => return elements,
+            Some(Structure::Fraction { bar, above, below }) => {
+                let numerator = take(&above);
+                let denominator = take(&below);
+                let text = format!(
+                    "(({})/({}))",
+                    layout(&numerator, line_height),
+                    layout(&denominator, line_height)
+                );
+                let mut parts = numerator;
+                parts.extend(denominator);
+                let removed: Vec<usize> = above.into_iter().chain(below).collect();
+                (bar, text, parts, removed)
+            }
+            Some(Structure::Root { sign, radicand }) => {
+                let parts = take(&radicand);
+                let text = format!("√({})", layout(&parts, line_height));
+                (sign, text, parts, radicand)
+            }
+        };
+        // The bar or sign itself, no longer a line, so that it is not taken as a bar again
+        let mut own = elements[at].clone();
+        if own.symbol.ch == LINE {
+            own.symbol.ch = '/';
         }
-        let mut parts = numerator;
-        parts.extend(denominator);
-        let mut bar_element = elements[bar].clone();
-        bar_element.symbol.ch = '/';
-        parts.push(bar_element);
-        fraction.symbol.strokes = parts
+        let mut whole = own.clone();
+        for part in &parts {
+            whole.symbol.min = whole.symbol.min.min(part.symbol.min);
+            whole.symbol.max = whole.symbol.max.max(part.symbol.max);
+        }
+        parts.push(own);
+        whole.symbol.strokes = parts
             .iter()
             .flat_map(|p| p.symbol.strokes.clone())
             .collect();
-        fraction.text = Some((text, parts));
-        let mut removed: Vec<usize> = above.into_iter().chain(below).chain([bar]).collect();
+        whole.text = Some((text, parts));
+        let mut removed: Vec<usize> = removed.into_iter().chain([at]).collect();
         removed.sort_unstable();
-        let at = removed[0];
+        let first = removed[0];
         for &i in removed.iter().rev() {
             elements.remove(i);
         }
-        elements.insert(at, fraction);
+        elements.insert(first, whole);
     }
 }
 
@@ -1475,6 +1606,78 @@ pub(crate) mod tests {
         (samples("symbols", "label"), samples("expressions", "text"))
     }
 
+    /// A root sign in one stroke whose bar covers `from`..`to` (x), for symbols 14 high
+    fn root_sign(from: f32, to: f32) -> Vec<Vec2> {
+        vec![
+            Vec2::new(from - 10.0, 9.0),
+            Vec2::new(from - 7.0, 7.0),
+            Vec2::new(from - 4.0, 16.0),
+            Vec2::new(from - 1.0, -3.0),
+            Vec2::new(to, -3.5),
+        ]
+    }
+
+    #[test]
+    fn reads_roots() {
+        let read_with = |before: Vec<Vec<Vec2>>, after: &str, at: f32| {
+            let mut strokes = before;
+            strokes.extend(shifted(
+                write_line(after, &mut Jitter(4)),
+                Vec2::new(at, 0.0),
+            ));
+            Recognizer::new().recognize(&strokes).unwrap().text
+        };
+        // √16 =, the sign in one stroke
+        let mut strokes = vec![root_sign(0.0, 26.0)];
+        strokes.extend(shifted(
+            write_line("16", &mut Jitter(2)),
+            Vec2::new(2.0, 0.0),
+        ));
+        assert_eq!(read_with(strokes, "=", 34.0), "√(16)=");
+
+        // The same with the bar as a stroke of its own
+        let mut strokes = vec![
+            root_sign(0.0, 26.0)[..4].to_vec(),
+            line(Vec2::new(-0.5, -3.0), Vec2::new(26.0, -3.5)),
+        ];
+        strokes.extend(shifted(
+            write_line("16", &mut Jitter(2)),
+            Vec2::new(2.0, 0.0),
+        ));
+        assert_eq!(read_with(strokes, "=", 34.0), "√(16)=");
+
+        // 2√(x+1)², with an exponent after the root
+        let mut strokes = write_line("2", &mut Jitter(6));
+        strokes.push(root_sign(24.0, 60.0));
+        strokes.extend(shifted(
+            write_line("x+1", &mut Jitter(3)),
+            Vec2::new(26.0, 0.0),
+        ));
+        strokes.extend(shifted(
+            write_line("^2", &mut Jitter(5)),
+            Vec2::new(62.0, 0.0),
+        ));
+        let text = read_with(strokes, "=", 74.0);
+        assert_eq!(text, "2√(x+1)^(2)=");
+
+        // A fraction under the bar: √(9/4)
+        let mut strokes = vec![root_sign(0.0, 18.0)];
+        strokes.extend(shifted(
+            write_line("9", &mut Jitter(1)),
+            Vec2::new(4.0, -1.0),
+        ));
+        strokes.push(line(Vec2::new(2.0, 15.0), Vec2::new(16.0, 15.0)));
+        strokes.extend(shifted(
+            write_line("4", &mut Jitter(8)),
+            Vec2::new(4.0, 17.0),
+        ));
+        // The sign reaches down past the denominator
+        strokes[0][2].y = 32.0;
+        let text = read_with(strokes, "=", 26.0);
+        assert_eq!(text, "√(((9)/(4)))=");
+        assert_eq!(crate::math::solve(&text, true), Some("1,5".into()));
+    }
+
     #[test]
     fn reads_real_handwriting() {
         // Digits written by a user for issue #46: almost all of them have to be read. The
@@ -1497,7 +1700,7 @@ pub(crate) mod tests {
             wrong.len(),
             symbols.len()
         );
-        for e in expressions.iter().filter(|e| !e.label.contains('√')) {
+        for e in &expressions {
             let text = recognizer.recognize(&e.strokes).unwrap().text;
             assert_eq!(text, e.label);
         }

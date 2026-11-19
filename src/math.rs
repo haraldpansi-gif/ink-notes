@@ -5,6 +5,10 @@
 //! `x² + 6x + 9`. Numbers are exact fractions, so `1 : 3 · 3` gives `1`, and expressions
 //! with variables are expanded into polynomials.
 //!
+//! Square roots (`√`) are exact where the radicand is the square of a fraction (`√2,25`
+//! gives `1,5`). Otherwise a result without variables is given as a decimal cut off after six
+//! places and marked with `…` (`√2` gives `1,414213…`).
+//!
 //! The input is lenient towards how math is written by hand: decimal comma or point,
 //! `·`, `×`, `*` and `:`, `÷`, `/`, superscript exponents, Unicode minus signs and implicit
 //! multiplication (`2x`, `3(x + 1)`, `(a + b)(a − b)`).
@@ -21,6 +25,10 @@ const MAX_NUMBER_EXPONENT: u32 = 1000;
 const MAX_TERMS: usize = 64;
 /// Terminating decimals with more digits after the separator are shown as fractions
 const MAX_DECIMALS: u32 = 12;
+/// Places after the separator of a result that is not exact (`√2`)
+const APPROX_DECIMALS: usize = 6;
+/// Larger results that are not exact are not shown
+const MAX_APPROX: f64 = 1e12;
 
 /// Computes the result of `expression`, written for display after its `=` sign.
 ///
@@ -34,11 +42,13 @@ pub fn solve(expression: &str, decimal_comma: bool) -> Option<String> {
     if matches!(ast, Expr::Number(_) | Expr::Variable(_)) {
         return None;
     }
-    let result = ast.eval()?;
-    if result.terms.len() > MAX_TERMS {
-        return None;
-    }
-    let text = result.format(decimal_comma);
+    let text = match ast.eval() {
+        Some(result) if result.terms.len() > MAX_TERMS => return None,
+        Some(result) => result.format(decimal_comma),
+        // An irrational root: only numbers can be given, as a decimal
+        None if ast.has_root() => format_approx(ast.approx()?, decimal_comma)?,
+        None => return None,
+    };
     let compact = |s: &str| -> String {
         s.chars()
             .filter(|c| !c.is_whitespace())
@@ -149,6 +159,18 @@ impl Rational {
         (self.den == 1).then_some(self.num)
     }
 
+    /// The square root if it is a fraction itself (`9/4` → `3/2`)
+    fn sqrt(self) -> Option<Rational> {
+        if self.num < 0 {
+            return None;
+        }
+        Rational::new(isqrt_exact(self.num)?, isqrt_exact(self.den)?)
+    }
+
+    fn to_f64(self) -> f64 {
+        self.num as f64 / self.den as f64
+    }
+
     /// The number without its sign: as a terminating decimal if it has one with at most
     /// [`MAX_DECIMALS`] digits, otherwise as a fraction `p/q`.
     fn format_abs(self, decimal_comma: bool) -> String {
@@ -184,6 +206,53 @@ impl Rational {
         }
         format!("{num}/{den}")
     }
+}
+
+/// `√n` if `n` is a perfect square
+fn isqrt_exact(n: i128) -> Option<i128> {
+    let n = u128::try_from(n).ok()?;
+    let mut root = (n as f64).sqrt() as u128;
+    // The float guess can be off by one for large numbers
+    while root.checked_mul(root).is_none_or(|sq| sq > n) {
+        root -= 1;
+    }
+    while (root + 1).checked_mul(root + 1).is_some_and(|sq| sq <= n) {
+        root += 1;
+    }
+    (root * root == n).then(|| i128::try_from(root).ok())?
+}
+
+/// A result that is not exact: if it is a short decimal up to rounding errors
+/// (`√2 · √2` = `2`) that decimal, otherwise cut off after [`APPROX_DECIMALS`] places with `…`
+fn format_approx(value: f64, decimal_comma: bool) -> Option<String> {
+    if !value.is_finite() || value.abs() >= MAX_APPROX {
+        return None;
+    }
+    let rounded = format!("{:.9}", value.abs());
+    let trimmed = rounded.trim_end_matches('0').trim_end_matches('.');
+    let places = trimmed.split_once('.').map_or(0, |(_, d)| d.len());
+    let digits = if places <= APPROX_DECIMALS {
+        trimmed.to_owned()
+    } else {
+        let scale = 10f64.powi(APPROX_DECIMALS as i32);
+        format!(
+            "{:.*}…",
+            APPROX_DECIMALS,
+            (value.abs() * scale).trunc() / scale
+        )
+    };
+    let digits = if decimal_comma {
+        digits.replace('.', ",")
+    } else {
+        digits
+    };
+    // No sign on a value that shows as zero
+    let negative = value < 0.0 && digits.chars().any(|c| matches!(c, '1'..='9'));
+    Some(if negative {
+        format!("−{digits}")
+    } else {
+        digits
+    })
 }
 
 // --- Polynomials --------------------------------------------------------------------------
@@ -270,6 +339,10 @@ impl Polynomial {
     fn div(&self, divisor: &Polynomial) -> Option<Polynomial> {
         let factor = divisor.as_constant()?.recip()?;
         self.mul(&Polynomial::constant(factor))
+    }
+
+    fn sqrt(&self) -> Option<Polynomial> {
+        Some(Polynomial::constant(self.as_constant()?.sqrt()?))
     }
 
     fn pow(&self, exponent: &Polynomial) -> Option<Polynomial> {
@@ -362,6 +435,7 @@ enum Token {
     /// `/` for a fraction, `:` for a division sign (`:` and `÷`)
     Divide(char),
     Power,
+    Root,
     Open,
     Close,
 }
@@ -408,6 +482,7 @@ fn tokenize(input: &str) -> Option<Vec<Token>> {
             '/' => Some(Token::Divide('/')),
             ':' | '÷' => Some(Token::Divide(':')),
             '^' => Some(Token::Power),
+            '√' => Some(Token::Root),
             '(' | '[' | '{' => Some(Token::Open),
             ')' | ']' | '}' => Some(Token::Close),
             _ if c.is_ascii_alphabetic() => Some(Token::Variable(c)),
@@ -463,6 +538,7 @@ enum Expr {
     /// With the sign it was written with, for [`display`]
     Div(Box<Expr>, Box<Expr>, char),
     Pow(Box<Expr>, Box<Expr>),
+    Sqrt(Box<Expr>),
 }
 
 impl Expr {
@@ -476,7 +552,43 @@ impl Expr {
             Expr::Mul(a, b) => a.eval()?.mul(&b.eval()?)?,
             Expr::Div(a, b, _) => a.eval()?.div(&b.eval()?)?,
             Expr::Pow(a, b) => a.eval()?.pow(&b.eval()?)?,
+            Expr::Sqrt(e) => e.eval()?.sqrt()?,
         })
+    }
+
+    fn has_root(&self) -> bool {
+        match self {
+            Expr::Number(_) | Expr::Variable(_) => false,
+            Expr::Sqrt(_) => true,
+            Expr::Neg(e) => e.has_root(),
+            Expr::Add(a, b)
+            | Expr::Sub(a, b)
+            | Expr::Mul(a, b)
+            | Expr::Div(a, b, _)
+            | Expr::Pow(a, b) => a.has_root() || b.has_root(),
+        }
+    }
+
+    /// The value as a float; `None` with a variable
+    fn approx(&self) -> Option<f64> {
+        let value = match self {
+            Expr::Number(value) => value.to_f64(),
+            Expr::Variable(_) => return None,
+            Expr::Neg(e) => -e.approx()?,
+            Expr::Add(a, b) => a.approx()? + b.approx()?,
+            Expr::Sub(a, b) => a.approx()? - b.approx()?,
+            Expr::Mul(a, b) => a.approx()? * b.approx()?,
+            Expr::Div(a, b, _) => a.approx()? / b.approx()?,
+            Expr::Pow(a, b) => {
+                let exponent = b.approx()?;
+                if exponent.fract() != 0.0 || exponent.abs() > MAX_NUMBER_EXPONENT as f64 {
+                    return None;
+                }
+                a.approx()?.powi(exponent as i32)
+            }
+            Expr::Sqrt(e) => e.approx()?.sqrt(),
+        };
+        value.is_finite().then_some(value)
     }
 }
 
@@ -488,7 +600,7 @@ impl Expr {
             Expr::Mul(..) | Expr::Div(..) => 2,
             Expr::Neg(_) => 3,
             Expr::Pow(..) => 4,
-            Expr::Number(_) | Expr::Variable(_) => 5,
+            Expr::Number(_) | Expr::Variable(_) | Expr::Sqrt(_) => 5,
         }
     }
 
@@ -517,7 +629,7 @@ impl Expr {
                 let implicit = !matches!(**a, Expr::Neg(_))
                     && (matches!(**b, Expr::Variable(_))
                         || matches!(&**b, Expr::Pow(base, _) if matches!(**base, Expr::Variable(_)))
-                        || right.starts_with('('));
+                        || right.starts_with(['(', '√']));
                 if implicit {
                     format!("{left}{right}")
                 } else {
@@ -528,6 +640,7 @@ impl Expr {
                 '/' => format!("{}/{}", a.display_at(4, dc), b.display_at(4, dc)),
                 _ => format!("{} : {}", a.display_at(2, dc), b.display_at(3, dc)),
             },
+            Expr::Sqrt(e) => format!("√{}", e.display_at(5, dc)),
             Expr::Pow(base, exponent) => {
                 let base = base.display_at(5, dc);
                 let integer = |e: &Expr| match e {
@@ -597,7 +710,10 @@ impl<'a> Parser<'a> {
             } else if let Some(&Token::Divide(sign)) = self.peek() {
                 self.pos += 1;
                 left = Expr::Div(Box::new(left), Box::new(self.unary()?), sign);
-            } else if matches!(self.peek(), Some(Token::Variable(_) | Token::Open)) {
+            } else if matches!(
+                self.peek(),
+                Some(Token::Variable(_) | Token::Open | Token::Root)
+            ) {
                 // Implicit multiplication: 2x, 3(x + 1), (a + b)(a − b). Two numbers in a
                 // row are not multiplied, they are more likely a misread.
                 left = Expr::Mul(Box::new(left), Box::new(self.power()?));
@@ -631,6 +747,8 @@ impl<'a> Parser<'a> {
         match token {
             Token::Number(value) => Some(Expr::Number(value)),
             Token::Variable(name) => Some(Expr::Variable(name)),
+            // The radicand is the next atom: √4² = (√4)², as the handwritten bar shows it
+            Token::Root => Some(Expr::Sqrt(Box::new(self.atom()?))),
             Token::Open => {
                 let inner = self.sum()?;
                 self.eat(&Token::Close).then_some(inner)
@@ -695,6 +813,31 @@ mod tests {
             de("(x+1)^10").map(|s| s.starts_with("x¹⁰ + 10x⁹")),
             Some(true)
         );
+    }
+
+    #[test]
+    fn square_roots() {
+        assert_eq!(de("√4="), Some("2".into()));
+        assert_eq!(de("√(4)="), Some("2".into()));
+        assert_eq!(de("√(9:4)"), Some("1,5".into()));
+        assert_eq!(de("√2,25"), Some("1,5".into()));
+        assert_eq!(de("2√9"), Some("6".into()));
+        assert_eq!(de("√(16)^(2)="), Some("16".into()));
+        assert_eq!(de("√(3^2+4^2)="), Some("5".into()));
+        assert_eq!(de("√2"), Some("1,414213…".into()));
+        assert_eq!(solve("√2", false), Some("1.414213…".into()));
+        assert_eq!(de("√2·√2"), Some("2".into()));
+        assert_eq!(de("−√3"), Some("−1,732050…".into()));
+        assert_eq!(de("1 : √4"), Some("0,5".into()));
+        assert_eq!(de("√(x^2)"), None);
+        assert_eq!(de("√2·x"), None);
+        assert_eq!(de("√(−4)"), None);
+        assert_eq!(de("√"), None);
+        assert_eq!(display("√(4)", true), Some("√4".into()));
+        assert_eq!(display("√(x+1)", true), Some("√(x + 1)".into()));
+        assert_eq!(display("2√(3)", true), Some("2√3".into()));
+        assert_eq!(isqrt_exact(i128::MAX), None);
+        assert_eq!(isqrt_exact(1 << 120), Some(1 << 60));
     }
 
     #[test]

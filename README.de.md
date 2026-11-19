@@ -39,7 +39,7 @@ Die Oberfläche gibt es auf Deutsch und Englisch; ink-notes folgt der Systemspra
 
 ### Formeln ausrechnen (experimentell)
 - Einschalten im ☰-Menü unter Eingabe („Formeln nach „=“ ausrechnen“). Nach einem handgeschriebenen `=` und einer kurzen Pause erscheint daneben das Ergebnis samt dem Gelesenen, z. B. `2⁴ = 16` oder `(x + 3)² = x² + 6x + 9`; Antippen mit dem Stift oder Klicken fügt es als Textfeld in der Stiftfarbe und in der Höhe der Handschrift ein (Rückgängig entfernt es). Finger und Handballen lösen nichts aus.
-- Gelesen werden Ziffern, `+ − · : /`, Klammern, Hochzahlen (hochgestellt geschrieben), Bruchstriche, Dezimalkommas und die Variablen `x`, `y`, `a`, `b`. Zahlen werden exakt als Brüche gerechnet, Ausdrücke mit Variablen ausmultipliziert. Vor der Formel etwas Abstand lassen, damit weiter links Geschriebenes nicht mitgelesen wird; in einer Kette wie `x = 2 · 3 =` wird der Teil nach dem vorigen `=` gerechnet.
+- Gelesen werden Ziffern, `+ − · : /`, Klammern, Hochzahlen (hochgestellt geschrieben), Bruchstriche, Quadratwurzeln (mit dem Strich über dem Inhalt), Dezimalkommas und die Variablen `x`, `y`, `a`, `b`. Zahlen werden exakt als Brüche gerechnet, Ausdrücke mit Variablen ausmultipliziert. Eine Wurzel, die nicht aufgeht, wird als nach sechs Stellen abgeschnittene Dezimalzahl angegeben (`√2 = 1,414213…`). Vor der Formel etwas Abstand lassen, damit weiter links Geschriebenes nicht mitgelesen wird; in einer Kette wie `x = 2 · 3 =` wird der Teil nach dem vorigen `=` gerechnet.
 - Die Zeichen werden mit Punktwolken-Vorlagen ($P) erkannt, ohne Machine Learning und offline. Zeigt der Vorschlag ein falsches Zeichen, ihn einfach ignorieren.
 
 ### Auswählen und Bearbeiten

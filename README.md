@@ -39,7 +39,7 @@ The interface is available in English and German; ink-notes follows the system l
 
 ### Computing formulas (experimental)
 - Turn on in the ☰ menu under input ("Compute formulas after “=”"). After a handwritten `=` and a short pause, the result appears next to it together with what was read, e.g. `2⁴ = 16` or `(x + 3)² = x² + 6x + 9`; tapping it with the pen or clicking inserts it as a text box in the ink color, as high as the handwriting (undo removes it). Fingers and palms do not trigger it.
-- Read are digits, `+ − · : /`, parentheses, exponents (written raised), fraction bars, decimal commas and the variables `x`, `y`, `a`, `b`. Numbers are computed exactly as fractions, expressions with variables are multiplied out. Leave some space before the formula, so that writing further to the left is not read with it; in a chain such as `x = 2 · 3 =` the part after the previous `=` is computed.
+- Read are digits, `+ − · : /`, parentheses, exponents (written raised), fraction bars, square roots (the bar over the radicand), decimal commas and the variables `x`, `y`, `a`, `b`. Numbers are computed exactly as fractions, expressions with variables are multiplied out. A root that does not come out exactly is given as a decimal cut off after six places (`√2 = 1,414213…`). Leave some space before the formula, so that writing further to the left is not read with it; in a chain such as `x = 2 · 3 =` the part after the previous `=` is computed.
 - The symbols are recognized with point-cloud templates ($P), without machine learning and offline. If the suggestion shows a wrong symbol, just ignore it.
 
 ### Selecting and editing
