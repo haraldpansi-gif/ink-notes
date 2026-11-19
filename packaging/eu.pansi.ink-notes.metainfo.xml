@@ -84,6 +84,11 @@
   </branding>
   <content_rating type="oars-1.1" />
   <releases>
+    <release version="0.45.8" date="2026-11-19">
+      <description>
+        <p>Handwritten formulas can contain square roots: √4 gives 2, and a root that does not come out exactly is given as a decimal (√2 = 1.414213…).</p>
+      </description>
+    </release>
     <release version="0.45.7" date="2026-11-19">
       <description>
         <p>Handwritten formulas are read more reliably: more ways of writing 0, 1, 3, 8, plus signs and brackets are recognized, and fractions keep their numerator and denominator apart.</p>
