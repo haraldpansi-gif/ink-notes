@@ -311,7 +311,7 @@ fn suggest(
 mod tests {
     use super::*;
     use crate::document::StylusSample;
-    use crate::math_ink::tests::{write_line, Jitter};
+    use crate::math_ink::tests::{real_handwriting, write_line, Jitter};
 
     const BLACK: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
 
@@ -388,6 +388,49 @@ mod tests {
         let suggestion = run(&page).unwrap();
         assert_eq!(suggestion.expression, "2⁴");
         assert_eq!(suggestion.result, "16");
+    }
+
+    #[test]
+    fn computes_real_handwriting() {
+        // The sample page of issue #46 written again stroke by stroke: the rows of digits,
+        // then the sums, each computed right after its `=`
+        let (symbols, expressions) = real_handwriting();
+        let mut page = Page::new(7, crate::document::PageBackground::Blank);
+        let mut id = 1;
+        let mut add = |page: &mut Page, strokes: &[Vec<Vec2>]| {
+            for points in strokes {
+                page.add_stroke(stroke(id, points));
+                id += 1;
+            }
+        };
+        for symbol in &symbols {
+            add(&mut page, &symbol.strokes);
+        }
+        let expected = [
+            ("1·1=", Some("1")),
+            ("5·20=", Some("100")),
+            ("2·3=", Some("6")),
+            ("2·2=", Some("4")),
+            ("4^(2)=", Some("16")),
+            ("√4=", None),
+            ("4^(4)+3·2+(5+2)·10=", Some("332")),
+        ];
+        let mut checked = 0;
+        for expression in &expressions {
+            add(&mut page, &expression.strokes);
+            let Some(&(_, result)) = expected.iter().find(|(t, _)| *t == expression.label) else {
+                continue;
+            };
+            let suggestion = run(&page);
+            assert_eq!(
+                suggestion.as_ref().map(|s| s.result.as_str()),
+                result,
+                "{} {suggestion:?}",
+                expression.label
+            );
+            checked += 1;
+        }
+        assert_eq!(checked, 8);
     }
 
     #[test]

@@ -27,6 +27,9 @@ const STROKE_PENALTY: f32 = 0.15;
 const TEMPLATE_SLANTS: [f32; 2] = [0.0, 0.25];
 /// Weight of the turning angle against the position of a point ($P+)
 const ANGLE_WEIGHT: f32 = 1.0;
+/// A `1` becomes a missing bracket if its distance to the bracket is at most this many times
+/// its distance to `1`
+const BRACKET_RATIO: f32 = 1.5;
 
 /// A recognized symbol with the area it covers and the strokes it consists of
 #[derive(Debug, Clone, PartialEq)]
@@ -139,6 +142,7 @@ impl Recognizer {
             let ch = match (group.as_slice(), kinds[group[0]]) {
                 ([_], Kind::Line) => LINE,
                 ([_], Kind::Dot) => DOT,
+                ([a, b], _) if is_plus(&strokes[*a], &strokes[*b]) => '+',
                 _ => {
                     let parts: Vec<&[Vec2]> =
                         group.iter().map(|&i| strokes[i].as_slice()).collect();
@@ -159,6 +163,7 @@ impl Recognizer {
             });
         }
 
+        self.balance_brackets(&mut elements, strokes);
         let elements = pair_stacked(elements, line_height);
         let elements = build_fractions(elements, line_height);
         let text = layout(&elements, line_height);
@@ -169,6 +174,107 @@ impl Recognizer {
         symbols.sort_by(|a, b| a.min.x.total_cmp(&b.min.x));
         Some(Recognition { text, symbols })
     }
+}
+
+impl Recognizer {
+    /// Distance of the strokes to the closest template of `symbol`
+    fn distance_to(&self, strokes: &[&[Vec2]], symbol: char) -> f32 {
+        let Some(cloud) = normalize(strokes) else {
+            return f32::INFINITY;
+        };
+        self.templates
+            .iter()
+            .filter(|t| t.symbol == symbol)
+            .map(|t| {
+                let penalty = 1.0 + STROKE_PENALTY * t.strokes.abs_diff(strokes.len()) as f32;
+                greedy_cloud_match(&cloud, &t.cloud, f32::MAX) * penalty
+            })
+            .fold(f32::INFINITY, f32::min)
+    }
+
+    /// A slim `)` looks much like a `1`. If a `(` is left open, the `1` after it that comes
+    /// closest to a `)` (and is not followed by a digit) is taken as the `)`; likewise for a
+    /// `)` without its `(`.
+    fn balance_brackets(&self, elements: &mut [Element], strokes: &[Vec<Vec2>]) {
+        let mut order: Vec<usize> = (0..elements.len()).collect();
+        order.sort_by(|&a, &b| {
+            elements[a]
+                .symbol
+                .min
+                .x
+                .total_cmp(&elements[b].symbol.min.x)
+        });
+        let ch = |elements: &[Element], k: usize| elements[order[k]].symbol.ch;
+        let parts = |e: &Element| -> Vec<Vec<Vec2>> {
+            e.symbol
+                .strokes
+                .iter()
+                .map(|&i| strokes[i].clone())
+                .collect()
+        };
+        // Unmatched `(` from the right, unmatched `)` from the left
+        let mut open = Vec::new();
+        let mut unmatched_close = Vec::new();
+        for k in 0..order.len() {
+            match ch(elements, k) {
+                '(' => open.push(k),
+                ')' if open.pop().is_none() => unmatched_close.push(k),
+                _ => {}
+            }
+        }
+        let mut used = vec![false; order.len()];
+        let mut relabel = |range: Vec<usize>, target: char, elements: &mut [Element]| {
+            let best = range
+                .into_iter()
+                .filter(|&k| !used[k] && ch(elements, k) == '1')
+                .filter(|&k| {
+                    target == '(' || k + 1 >= order.len() || !ch(elements, k + 1).is_ascii_digit()
+                })
+                .filter(|&k| target == ')' || k == 0 || !ch(elements, k - 1).is_ascii_digit())
+                .map(|k| {
+                    let e = &elements[order[k]];
+                    let owned = parts(e);
+                    let refs: Vec<&[Vec2]> = owned.iter().map(Vec::as_slice).collect();
+                    let ratio = self.distance_to(&refs, target) / self.distance_to(&refs, '1');
+                    (k, ratio)
+                })
+                .filter(|&(_, ratio)| ratio < BRACKET_RATIO)
+                .min_by(|a, b| a.1.total_cmp(&b.1));
+            if let Some((k, _)) = best {
+                used[k] = true;
+                elements[order[k]].symbol.ch = target;
+            }
+        };
+        for &k in open.iter().rev() {
+            relabel((k + 1..order.len()).collect(), ')', elements);
+        }
+        for &k in &unmatched_close {
+            relabel((0..k).collect(), '(', elements);
+        }
+    }
+}
+
+/// A two-stroke `+`: a straight horizontal line crossed near its middle by a straight, steep
+/// stroke near that stroke's middle (unlike `7` or `4`, whose other stroke bends)
+fn is_plus(a: &[Vec2], b: &[Vec2]) -> bool {
+    let (line, other) = if StrokeInfo::new(a).straight_horizontal {
+        (a, b)
+    } else {
+        (b, a)
+    };
+    let (l, o) = (StrokeInfo::new(line), StrokeInfo::new(other));
+    let size = o.size();
+    let straight = path_length(other) <= 1.15 * size.length();
+    if !l.straight_horizontal || o.straight_horizontal || !straight || size.y < 1.5 * size.x {
+        return false;
+    }
+    if polyline_distance(line, other) > 0.1 * size.y {
+        return false;
+    }
+    let y = (l.min.y + l.max.y) / 2.0;
+    let x = (o.min.x + o.max.x) / 2.0;
+    let across = |v: f32, lo: f32, hi: f32| v > lo + 0.2 * (hi - lo) && v < hi - 0.2 * (hi - lo);
+    across(y, o.min.y, o.max.y) && across(x, l.min.x, l.max.x)
 }
 
 // --- $P point-cloud recognizer --------------------------------------------------------------
@@ -362,8 +468,19 @@ fn builtin_templates() -> Vec<(char, Vec<Vec<Vec2>>)> {
     vec![
         ('0', vec![arc(0.5, 0.5, 0.35, 0.5, -90.0, 270.0)]),
         ('0', vec![arc(0.5, 0.5, 0.3, 0.5, -100.0, -460.0)]),
+        // Wide, begun with a short tail inside at the top right
+        (
+            '0',
+            vec![chain(&[
+                polyline(&[(0.9, 0.38), (0.82, 0.05)]),
+                arc(0.65, 0.5, 0.62, 0.48, -100.0, -420.0),
+            ])],
+        ),
         ('1', vec![polyline(&[(0.5, 0.0), (0.5, 1.0)])]),
         ('1', vec![polyline(&[(0.3, 0.2), (0.55, 0.0), (0.55, 1.0)])]),
+        // A long upstroke from the middle left
+        ('1', vec![polyline(&[(0.1, 0.45), (0.6, 0.0), (0.6, 1.0)])]),
+        ('1', vec![polyline(&[(0.0, 0.75), (1.1, 0.0), (1.15, 1.0)])]),
         (
             '2',
             vec![chain(&[
@@ -384,6 +501,27 @@ fn builtin_templates() -> Vec<(char, Vec<Vec<Vec2>>)> {
             vec![chain(&[
                 arc(0.5, 0.25, 0.35, 0.25, 200.0, 450.0),
                 arc(0.5, 0.75, 0.38, 0.25, 270.0, 520.0),
+            ])],
+        ),
+        // Pointed in the middle: a small hook on top, a line back to the middle, a bowl
+        (
+            '3',
+            vec![polyline(&[
+                (0.0, 0.22),
+                (0.08, 0.08),
+                (0.3, 0.0),
+                (0.45, 0.02),
+                (0.52, 0.12),
+                (0.5, 0.25),
+                (0.35, 0.5),
+                (0.5, 0.44),
+                (0.62, 0.45),
+                (0.7, 0.55),
+                (0.72, 0.72),
+                (0.65, 0.88),
+                (0.5, 0.98),
+                (0.35, 1.0),
+                (0.2, 0.93),
             ])],
         ),
         (
@@ -457,6 +595,15 @@ fn builtin_templates() -> Vec<(char, Vec<Vec<Vec2>>)> {
                 arc(0.5, 0.75, 0.36, 0.25, -90.0, 270.0),
             ])],
         ),
+        // Begun at the top right, the loops joined by two crossing diagonals
+        (
+            '8',
+            vec![chain(&[
+                arc(0.5, 0.22, 0.25, 0.22, 20.0, -200.0),
+                arc(0.5, 0.75, 0.28, 0.25, -40.0, 200.0),
+                polyline(&[(0.85, 0.12)]),
+            ])],
+        ),
         (
             '9',
             vec![chain(&[
@@ -478,10 +625,21 @@ fn builtin_templates() -> Vec<(char, Vec<Vec<Vec2>>)> {
                 polyline(&[(0.5, 0.0), (0.5, 1.0)]),
             ],
         ),
+        // With a short bar
+        (
+            '+',
+            vec![
+                polyline(&[(0.2, 0.5), (0.8, 0.5)]),
+                polyline(&[(0.5, 0.0), (0.5, 1.0)]),
+            ],
+        ),
         ('(', vec![arc(1.0, 0.5, 0.7, 0.5, 240.0, 120.0)]),
         ('(', vec![arc(1.2, 0.5, 0.9, 0.55, 235.0, 125.0)]),
         (')', vec![arc(0.0, 0.5, 0.7, 0.5, -60.0, 60.0)]),
         (')', vec![arc(-0.2, 0.5, 0.9, 0.55, -55.0, 55.0)]),
+        // Slim brackets, barely curved
+        ('(', vec![arc(1.4, 0.5, 1.2, 0.6, 236.0, 124.0)]),
+        (')', vec![arc(-0.4, 0.5, 1.2, 0.6, -56.0, 56.0)]),
         ('/', vec![polyline(&[(0.75, 0.0), (0.25, 1.0)])]),
         (
             'x',
@@ -644,9 +802,20 @@ fn group_strokes(
                 // Two lines are `=` or a fraction bar and a minus; decided later
                 (Kind::Line, true) => false,
                 // The bar of `+`, `7` or `5`: it crosses or touches the symbol and is not much
-                // wider (a fraction bar is wider than the numerator and lies below it)
-                (Kind::Line, false) => info.size().x <= 1.5 * gsize.max_element() && touches(),
-                (_, true) => gsize.x <= 1.5 * info.size().max_element() && touches(),
+                // wider (a fraction bar is wider than the numerator and lies below it),
+                // nor below it (then it is a fraction bar under a numerator)
+                (Kind::Line, false) => {
+                    info.size().x <= 1.5 * gsize.max_element()
+                        && (info.min.y + info.max.y) / 2.0 <= gmin.y + 0.8 * gsize.y
+                        && touches()
+                }
+                // The rest of a `+`, `5` or `7` begun with its bar, unless the bar has symbols
+                // written above it before: then it is a fraction bar and this the denominator
+                (_, true) => {
+                    gsize.x <= 1.5 * info.size().max_element()
+                        && touches()
+                        && !has_numerator(&infos[..group[0]], gmin, gmax, line_height)
+                }
                 _ => {
                     let margin = 0.1 * line_height;
                     let overlap_x =
@@ -665,6 +834,19 @@ fn group_strokes(
         }
     }
     groups
+}
+
+/// Whether some of `earlier` lie just above the line from `min` to `max`, like a numerator
+fn has_numerator(earlier: &[StrokeInfo], min: Vec2, max: Vec2, line_height: f32) -> bool {
+    let y = (min.y + max.y) / 2.0;
+    earlier.iter().any(|e| {
+        let center = (e.min.x + e.max.x) / 2.0;
+        !e.straight_horizontal
+            && center >= min.x
+            && center <= max.x
+            && e.max.y <= y + 0.1 * line_height
+            && e.max.y > y - 0.5 * line_height
+    })
 }
 
 fn point_segment_distance(p: Vec2, a: Vec2, b: Vec2) -> f32 {
@@ -812,9 +994,11 @@ fn build_fractions(mut elements: Vec<Element>, line_height: f32) -> Vec<Element>
             let b = &elements[bar];
             let y = b.center().y;
             let margin = 0.1 * line_height;
+            // A symbol may stick out a little at the ends of the bar
+            let inside_margin = 0.25 * line_height;
             let inside = |e: &Element| {
                 let c = e.center().x;
-                c >= b.symbol.min.x - margin && c <= b.symbol.max.x + margin
+                c >= b.symbol.min.x - inside_margin && c <= b.symbol.max.x + inside_margin
             };
             let mut above = Vec::new();
             let mut below = Vec::new();
@@ -1255,5 +1439,67 @@ pub(crate) mod tests {
         let recognition = recognizer.recognize(&[zigzag]).unwrap();
         assert_eq!(recognition.text, "?");
         assert!(recognizer.recognize(&[]).is_none());
+    }
+
+    // --- Real handwriting (tests/fixtures/handwriting) ---------------------------------------
+
+    pub(crate) struct Sample {
+        /// The symbol, or for an expression the text it has to be read as
+        pub label: String,
+        /// In page coordinates and in the order they were written
+        pub strokes: Vec<Vec<Vec2>>,
+    }
+
+    /// Labeled symbols and expressions written by a user for issue #46, as (symbols,
+    /// expressions)
+    pub(crate) fn real_handwriting() -> (Vec<Sample>, Vec<Sample>) {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/handwriting/issue46_digits.json");
+        let json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let samples = |key: &str, label: &str| -> Vec<Sample> {
+            json[key]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|item| Sample {
+                    label: item[label].as_str().unwrap().to_string(),
+                    strokes: serde_json::from_value::<Vec<Vec<[f32; 2]>>>(item["strokes"].clone())
+                        .unwrap()
+                        .into_iter()
+                        .map(|s| s.into_iter().map(Vec2::from).collect())
+                        .collect(),
+                })
+                .collect()
+        };
+        (samples("symbols", "label"), samples("expressions", "text"))
+    }
+
+    #[test]
+    fn reads_real_handwriting() {
+        // Digits written by a user for issue #46: almost all of them have to be read. The
+        // templates were tuned with these samples, so this guards against regressions rather
+        // than measuring accuracy on unseen handwriting.
+        let recognizer = Recognizer::new();
+        let (symbols, expressions) = real_handwriting();
+        let wrong: Vec<(String, Option<(char, f32)>)> = symbols
+            .iter()
+            .filter_map(|s| {
+                let parts: Vec<&[Vec2]> = s.strokes.iter().map(Vec::as_slice).collect();
+                let found = recognizer.classify(&parts);
+                let ok = found.is_some_and(|(c, d)| c.to_string() == s.label && d <= MAX_DISTANCE);
+                (!ok).then(|| (s.label.clone(), found))
+            })
+            .collect();
+        assert!(
+            wrong.len() * 40 <= symbols.len(),
+            "misread {} of {}: {wrong:?}",
+            wrong.len(),
+            symbols.len()
+        );
+        for e in expressions.iter().filter(|e| !e.label.contains('√')) {
+            let text = recognizer.recognize(&e.strokes).unwrap().text;
+            assert_eq!(text, e.label);
+        }
     }
 }
