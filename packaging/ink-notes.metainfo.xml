@@ -84,6 +84,11 @@
   </branding>
   <content_rating type="oars-1.1" />
   <releases>
+    <release version="0.45.9" date="2026-11-19">
+      <description>
+        <p>Light pink is available as paper color, and new pages and notebooks get the background chosen last, also after a restart.</p>
+      </description>
+    </release>
     <release version="0.45.8" date="2026-11-19">
       <description>
         <p>Handwritten formulas can contain square roots: √4 gives 2, and a root that does not come out exactly is given as a decimal (√2 = 1.414213…).</p>
