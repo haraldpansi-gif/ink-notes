@@ -81,6 +81,8 @@ pub enum PaperTheme {
     White,
     /// Cremefarben (augenschonend, wie Recyclingpapier)
     Cream,
+    /// Light pink
+    Pink,
     /// Dunkelgrau (Nachtmodus)
     DarkGray,
     /// Schwarz (OLED)
@@ -88,9 +90,10 @@ pub enum PaperTheme {
 }
 
 impl PaperTheme {
-    pub const ALL: [PaperTheme; 4] = [
+    pub const ALL: [PaperTheme; 5] = [
         PaperTheme::White,
         PaperTheme::Cream,
+        PaperTheme::Pink,
         PaperTheme::DarkGray,
         PaperTheme::Black,
     ];
@@ -99,6 +102,7 @@ impl PaperTheme {
         match self {
             PaperTheme::White => t!("Weiß"),
             PaperTheme::Cream => t!("Creme"),
+            PaperTheme::Pink => t!("Rosa"),
             PaperTheme::DarkGray => t!("Dunkelgrau"),
             PaperTheme::Black => t!("Schwarz"),
         }
@@ -115,6 +119,8 @@ impl PaperTheme {
             PaperTheme::White => [1.0, 1.0, 1.0, 1.0],
             // sRGB #FBF5E6
             PaperTheme::Cream => [0.965, 0.913, 0.791, 1.0],
+            // sRGB #FCE8EF
+            PaperTheme::Pink => [0.973, 0.807, 0.863, 1.0],
             // sRGB #2B2B2E
             PaperTheme::DarkGray => [0.024, 0.024, 0.027, 1.0],
             PaperTheme::Black => [0.0, 0.0, 0.0, 1.0],
@@ -126,6 +132,8 @@ impl PaperTheme {
         match self {
             PaperTheme::White => [0.88, 0.88, 0.88, 1.0],
             PaperTheme::Cream => [0.78, 0.72, 0.60, 1.0],
+            // sRGB #EECAD6
+            PaperTheme::Pink => [0.855, 0.591, 0.672, 1.0],
             // sRGB #48484D bzw. #38383C
             PaperTheme::DarkGray => [0.064, 0.064, 0.074, 1.0],
             PaperTheme::Black => [0.040, 0.040, 0.045, 1.0],
@@ -136,7 +144,7 @@ impl PaperTheme {
     /// das Blatt abhebt.
     pub fn desk_color(self) -> wgpu::Color {
         let (r, g, b) = match self {
-            PaperTheme::White | PaperTheme::Cream => (0.16, 0.16, 0.18),
+            PaperTheme::White | PaperTheme::Cream | PaperTheme::Pink => (0.16, 0.16, 0.18),
             PaperTheme::DarkGray => (0.004, 0.004, 0.005),
             PaperTheme::Black => (0.03, 0.03, 0.035),
         };

@@ -4640,8 +4640,11 @@ pub fn run_with(
                                 UiAction::AddPage if notebook.is_endless() => {}
                                 UiAction::AddPage => {
                                     // Leere Seite direkt nach der aktuellen (in PDFs: nach der Folie,
-                                    // auf der man gerade ist) und dorthin wechseln
-                                    let bg = notebook.current_page().background;
+                                    // auf der man gerade ist) und dorthin wechseln, with the
+                                    // background chosen last (Issue #60)
+                                    let bg = ui_settings
+                                        .page_background
+                                        .unwrap_or(notebook.current_page().background);
                                     let index = notebook.insert_page_after_current(bg);
                                     manifest.sync_from_notebook(&notebook);
                                     switch_to_page(
@@ -4762,6 +4765,14 @@ pub fn run_with(
                                     }
                                 }
                                 UiAction::SetBackground(bg) => {
+                                    if ui_settings.page_background != Some(bg) {
+                                        ui_settings.page_background = Some(bg);
+                                        save_ui_settings(
+                                            &ui_settings,
+                                            ui_settings_path.as_deref(),
+                                            &mut ui_state,
+                                        );
+                                    }
                                     let page = notebook.current_page_mut();
                                     page.background = bg;
                                     canvas.sync_page(page);
@@ -5055,6 +5066,9 @@ pub fn run_with(
                                             Ok((mut new_nb, mut new_manifest, new_dir)) => {
                                                 let id = new_manifest.id.clone();
                                                 new_manifest.layout = Some(layout);
+                                                if let Some(bg) = ui_settings.page_background {
+                                                    new_nb.pages[0].background = bg;
+                                                }
                                                 if layout == NotebookLayout::Endless {
                                                     new_nb.make_endless();
                                                 }

@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::background::{PaperTheme, PatternColor};
+use crate::document::PageBackground;
 use crate::i18n::Language;
 use crate::storage::{self, StorageError};
 use crate::t;
@@ -262,6 +263,9 @@ pub struct UiSettings {
     pub touch_draw: bool,
     /// Own colors under the presets of the color popovers (Issue #56)
     pub saved_colors: Vec<[f32; 3]>,
+    /// Background of new pages and notebooks: the one chosen last (Issue #60). Until one is
+    /// chosen, a new page takes the background of the current one.
+    pub page_background: Option<PageBackground>,
 }
 
 impl Default for UiSettings {
@@ -292,6 +296,7 @@ impl Default for UiSettings {
             math_assist: false,
             touch_draw: cfg!(target_os = "android"),
             saved_colors: Vec::new(),
+            page_background: None,
         }
     }
 }
@@ -404,7 +409,7 @@ mod tests {
 
         let settings = UiSettings {
             sidebar_side: SidebarSide::Right,
-            paper_theme: PaperTheme::Black,
+            paper_theme: PaperTheme::Pink,
             adapt_ink_colors: false,
             pattern_color: PatternColor::Strong,
             pressure_curve: PressureCurve {
@@ -444,6 +449,7 @@ mod tests {
             math_assist: true,
             touch_draw: true,
             saved_colors: vec![[0.2, 0.4, 0.6], [1.0, 0.5, 0.0]],
+            page_background: Some(PageBackground::DotGrid),
         };
         settings.save_to(&path).unwrap();
         assert_eq!(UiSettings::load_from(&path), settings);
