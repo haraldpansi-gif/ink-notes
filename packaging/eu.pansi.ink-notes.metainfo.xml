@@ -84,6 +84,11 @@
   </branding>
   <content_rating type="oars-1.1" />
   <releases>
+    <release version="0.46.0" date="2026-11-23">
+      <description>
+        <p>Text boxes show LaTeX formulas, e.g. copied from Overleaf: $…$ inside the text and \[…\], $$…$$ or equation/align on a line of their own are typeset, with fractions, roots, sums and integrals, Greek letters, matrices and aligned equations. The editor keeps the LaTeX code.</p>
+      </description>
+    </release>
     <release version="0.45.9" date="2026-11-19">
       <description>
         <p>Light pink is available as paper color, and new pages and notebooks get the background chosen last, also after a restart.</p>
