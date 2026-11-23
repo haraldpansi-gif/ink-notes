@@ -50,6 +50,7 @@ The interface is available in English and German; ink-notes follows the system l
 
 ### Text, images and PDFs
 - **Text tool** (`T`): tap the page and type – regular or code font (fixed character width, Tab indents), 8–36 pt, line wrapping at the box edge. Tap existing text to change it, `Esc` finishes. Text boxes can be moved, rotated and scaled like images. Text copied in other programs becomes a text box with `Ctrl + V`.
+- **LaTeX formulas in text boxes** (Issue #61): `$…$` and `\(…\)` inside the text, and `$$…$$`, `\[…\]` or `\begin{equation}`/`align`/`gather` on a line of their own, are shown as typeset formulas, e.g. formulas copied from Overleaf. While editing, the box shows the LaTeX code. Supported: sub- and superscripts, `\frac`, `\sqrt`, `\sum`/`\int`/`\lim` with limits, Greek letters and the usual symbols, `\left…\right`, accents (`\vec`, `\bar`, `\hat`), `\text`, matrices, `cases` and aligned equations; unknown commands stay visible as `\name`. Write `\$` for a dollar sign; an amount like `$5` stays text. Code-font boxes show the text as it is.
 - **Images** (PNG, JPEG, GIF, WebP, BMP) via `Ctrl + I`, from the clipboard, or by dragging them into the window.
 - **Paste with a finger:** Pressing the page with a finger for half a second opens a "Paste" menu – a screenshot, copied text or copied objects land exactly at that spot.
 - **Import** (☰ menu, or drag the file into the window) – **PDF**: Every PDF page becomes a notebook page with the PDF page as background. Portrait pages become A4; landscape pages (e.g. slides) get a landscape page without an empty strip below. When you zoom in, PDF pages are re-rendered more sharply.
@@ -183,6 +184,7 @@ src/
 ├── geometry.rs     # Shape recognition (Douglas-Peucker, circle fitting, …)
 ├── selection.rs    # Selection, handles, move/rotate/scale
 ├── ruler.rs        # Virtual ruler
+├── latex.rs        # LaTeX formulas in text boxes: parsing and layout
 ├── text.rs         # Text boxes: layout, line wrapping, rasterization
 ├── background.rs   # Paper colors, pattern colors, squares/lines/dots
 ├── image_layer.rs  # Textures for images, PDF pages and text

@@ -18,6 +18,7 @@ pub mod history;
 pub mod i18n;
 pub mod image_layer;
 pub mod import;
+pub mod latex;
 pub mod library;
 pub mod math;
 pub mod math_assist;

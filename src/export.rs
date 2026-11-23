@@ -687,20 +687,30 @@ fn render_image_layer(
     }
 }
 
-/// Bettet die von Textfeldern des Notizbuchs verwendeten Schriften ein.
+/// Bettet die von Textfeldern des Notizbuchs verwendeten Schriften ein (formulas may use the
+/// other font for symbols).
 fn embed_text_fonts(
     doc: &PdfDocumentReference,
     notebook: &Notebook,
 ) -> Result<HashMap<TextFont, crate::pdf_writer::IndirectFontRef>, Box<dyn Error>> {
     let mut fonts = HashMap::new();
-    let used = notebook
+    for text in notebook
         .pages
         .iter()
         .flat_map(|p| &p.strokes)
-        .filter_map(|s| s.text.as_ref().map(|t| t.font));
-    for font in used {
-        if let std::collections::hash_map::Entry::Vacant(entry) = fonts.entry(font) {
-            entry.insert(doc.add_external_font(font.bytes())?);
+        .filter_map(|s| s.text.as_ref())
+    {
+        let layout = text.layout();
+        let used = std::iter::once(text.font).chain(
+            layout
+                .lines
+                .iter()
+                .flat_map(|line| line.glyphs.iter().map(|g| g.font)),
+        );
+        for font in used {
+            if let std::collections::hash_map::Entry::Vacant(entry) = fonts.entry(font) {
+                entry.insert(doc.add_external_font(font.bytes())?);
+            }
         }
     }
     Ok(fonts)
@@ -709,21 +719,19 @@ fn embed_text_fonts(
 /// Rendert die Textfelder einer Seite als echten Text: Jedes Feld wird in seinem eigenen
 /// Koordinatensystem (eine Einheit = eine Seiteneinheit, y nach oben) gesetzt, das eine
 /// Transformationsmatrix auf seine Ecken abbildet – so stimmen Drehung und Skalierung.
+/// Fraction bars and root bars of formulas are filled rectangles.
 fn render_text_layer(
     layer: &crate::pdf_writer::PdfLayerReference,
     page: &Page,
     fonts: &HashMap<TextFont, crate::pdf_writer::IndirectFontRef>,
 ) {
+    use crate::pdf_writer::{Point, Pt};
     for stroke in &page.strokes {
         let (Some(text), Some(corners)) = (&stroke.text, stroke.object_corners()) else {
             continue;
         };
-        let Some(font) = fonts.get(&text.font) else {
-            continue;
-        };
         let layout = text.layout();
-        let size = glam::Vec2::new(text.wrap_width.max(text.size), layout.height());
-        let (origin, [right, down]) = crate::text::frame_axes(&corners, size);
+        let (origin, [right, down]) = crate::text::frame_axes(&corners, text.box_size());
         // Seite → PDF-Punkte: x · k, Höhe − y · k
         let k = PT_PER_UNIT;
         let o = page_to_pdf_pt(origin);
@@ -737,26 +745,72 @@ fn render_text_layer(
             None,
         )));
         layer.begin_text_section();
-        layer.set_font(font, text.size);
-        for (i, line) in layout.lines.iter().enumerate() {
-            if line.text.trim().is_empty() {
-                continue;
+        for line in &layout.lines {
+            // Runs of glyphs in the same font, size and height share one `TJ`; the shifts
+            // between them carry kerning and formula spacing (in 1/1000 em)
+            let mut start = 0;
+            while start < line.glyphs.len() {
+                let first = line.glyphs[start];
+                let mut end = start + 1;
+                while end < line.glyphs.len() {
+                    let g = line.glyphs[end];
+                    if g.font != first.font
+                        || g.size != first.size
+                        || g.stretch != first.stretch
+                        || g.dy != first.dy
+                        || g.x < line.glyphs[end - 1].x
+                    {
+                        break;
+                    }
+                    end += 1;
+                }
+                let Some(font) = fonts.get(&first.font) else {
+                    start = end;
+                    continue;
+                };
+                layer.set_font(font, first.size);
+                let (x, y) = (Pt(first.x), Pt(-(line.baseline + first.dy)));
+                layer.set_text_matrix(if first.stretch == 1.0 {
+                    crate::pdf_writer::TextMatrix::Translate(x, y)
+                } else {
+                    crate::pdf_writer::TextMatrix::Stretched(x, y, first.stretch)
+                });
+                let face = first.font.face();
+                let per_em = 1.0 / face.units_per_em().unwrap_or(1000.0);
+                let mut expected = first.x;
+                layer.write_positioned_codepoints(line.glyphs[start..end].iter().map(|g| {
+                    let shift = (-(g.x - expected) / g.size * 1000.0).round() as i64;
+                    expected = g.x + face.h_advance_unscaled(g.id) * per_em * g.size;
+                    (shift, g.id.0)
+                }));
+                start = end;
             }
-            layer.set_text_matrix(crate::pdf_writer::TextMatrix::Translate(
-                crate::pdf_writer::Pt(0.0),
-                crate::pdf_writer::Pt(-layout.baseline(i)),
-            ));
-            // Glyphen samt Unterschneidung wie auf dem Bildschirm (Abstände in 1/1000 Em)
-            let face = text.font.face();
-            let per_em = 1000.0 / face.units_per_em().unwrap_or(1000.0);
-            let mut previous: Option<ab_glyph::GlyphId> = None;
-            layer.write_positioned_codepoints(line.glyphs.iter().map(|&(id, _)| {
-                let kern = previous.map_or(0.0, |p| face.kern_unscaled(p, id));
-                previous = Some(id);
-                ((-kern * per_em).round() as i64, id.0)
-            }));
         }
         layer.end_text_section();
+        for line in &layout.lines {
+            for rule in &line.rules {
+                let top = line.baseline + rule.dy;
+                let corner = |x: f32, y: f32| {
+                    (
+                        Point {
+                            x: Pt(x),
+                            y: Pt(-y),
+                        },
+                        false,
+                    )
+                };
+                layer.add_polygon(crate::pdf_writer::Polygon {
+                    rings: vec![vec![
+                        corner(rule.x, top),
+                        corner(rule.x + rule.width, top),
+                        corner(rule.x + rule.width, top + rule.height),
+                        corner(rule.x, top + rule.height),
+                    ]],
+                    mode: crate::pdf_writer::PaintMode::Fill,
+                    winding_order: crate::pdf_writer::WindingOrder::NonZero,
+                });
+            }
+        }
         layer.restore_graphics_state();
     }
 }

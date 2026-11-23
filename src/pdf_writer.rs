@@ -106,6 +106,8 @@ pub enum CurTransMat {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum TextMatrix {
     Translate(Pt, Pt),
+    /// Translation with the glyphs stretched vertically by the factor
+    Stretched(Pt, Pt, f32),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -733,17 +735,18 @@ impl PdfLayerReference {
     }
 
     pub fn set_text_matrix(&self, matrix: TextMatrix) {
-        let TextMatrix::Translate(x, y) = matrix;
+        let (x, y, stretch) = match matrix {
+            TextMatrix::Translate(x, y) => (x, y, 1.0),
+            TextMatrix::Stretched(x, y, stretch) => (x, y, stretch),
+        };
+        let d: Object = if stretch == 1.0 {
+            1.into()
+        } else {
+            stretch.into()
+        };
         self.push(
             "Tm",
-            vec![
-                1.into(),
-                0.into(),
-                0.into(),
-                1.into(),
-                x.0.into(),
-                y.0.into(),
-            ],
+            vec![1.into(), 0.into(), 0.into(), d, x.0.into(), y.0.into()],
         );
     }
 

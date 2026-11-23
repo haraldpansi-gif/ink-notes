@@ -306,13 +306,13 @@ mod tests {
     }
 
     fn page_with_text() -> (Page, crate::text::TextBox) {
-        let text = crate::text::TextBox::new(
-            "Hallo Welt\nzweite Zeile".into(),
-            100.0,
-            crate::text::TextFont::Sans,
-            1200.0,
-        );
-        let size = glam::Vec2::new(1200.0, text.layout().height());
+        page_with_content("Hallo Welt\nzweite Zeile")
+    }
+
+    fn page_with_content(content: &str) -> (Page, crate::text::TextBox) {
+        let text =
+            crate::text::TextBox::new(content.into(), 100.0, crate::text::TextFont::Sans, 1200.0);
+        let size = text.box_size();
         let corners = crate::text::frame_corners(
             glam::Vec2::new(300.0, 400.0),
             [glam::Vec2::X, glam::Vec2::Y],
@@ -331,9 +331,22 @@ mod tests {
     #[test]
     fn test_exported_text_matches_screen_rendering() {
         let (page, text) = page_with_text();
+        assert_export_matches_screen(&page, &text);
+    }
+
+    #[test]
+    fn test_exported_formula_matches_screen_rendering() {
+        // Issue #61: glyphs moved, scaled and stretched, and the bars of fractions and roots
+        let (page, text) = page_with_content(
+            "\\[ \\left( \\int_0^1 x^2 \\, dx \\right) = \\frac{1}{\\sqrt{9}} \\]",
+        );
+        assert_export_matches_screen(&page, &text);
+    }
+
+    fn assert_export_matches_screen(page: &Page, text: &crate::text::TextBox) {
         let png = decode(
             &page_png(
-                &page,
+                page,
                 None,
                 ImageBackground::Transparent,
                 PatternColor::default(),
@@ -342,9 +355,12 @@ mod tests {
         );
         let px_per_unit = png.width() as f32 / PAGE_WIDTH;
         let exported = ink_bounds(png.width(), png.as_raw());
+        if let Ok(dir) = std::env::var("INK_PREVIEW_DIR") {
+            png.save(format!("{dir}/export.png")).unwrap();
+        }
 
         // Dieselbe Stelle, wie sie die Bildschirmtextur zeigt
-        let screen = crate::text::rasterize(&text, [0.0, 0.0, 0.0, 1.0], px_per_unit);
+        let screen = crate::text::rasterize(text, [0.0, 0.0, 0.0, 1.0], px_per_unit);
         let local = ink_bounds(screen.width, &screen.pixels);
         let (ox, oy) = ((300.0 * px_per_unit) as u32, (400.0 * px_per_unit) as u32);
         let expected = (local.0 + ox, local.1 + oy, local.2 + ox, local.3 + oy);

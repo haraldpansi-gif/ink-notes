@@ -50,6 +50,7 @@ Die Oberfläche gibt es auf Deutsch und Englisch; ink-notes folgt der Systemspra
 
 ### Text, Bilder und PDFs
 - **Text-Werkzeug** (`T`): ins Blatt tippen und schreiben – normale oder Code-Schrift (feste Zeichenbreite, Tab rückt ein), 8–36 pt, Zeilenumbruch am Feldrand. Vorhandenen Text antippen zum Ändern, `Esc` beendet. Textfelder lassen sich wie Bilder verschieben, drehen und skalieren. In anderen Programmen kopierter Text wird mit `Strg + V` zum Textfeld.
+- **LaTeX-Formeln in Textfeldern** (Issue #61): `$…$` und `\(…\)` im Text sowie `$$…$$`, `\[…\]` oder `\begin{equation}`/`align`/`gather` in einer eigenen Zeile werden als gesetzte Formel angezeigt, z. B. aus Overleaf kopierte Formeln. Beim Bearbeiten zeigt das Feld den LaTeX-Code. Unterstützt werden Hoch- und Tiefstellung, `\frac`, `\sqrt`, `\sum`/`\int`/`\lim` mit Grenzen, griechische Buchstaben und die üblichen Symbole, `\left…\right`, Akzente (`\vec`, `\bar`, `\hat`), `\text`, Matrizen, `cases` und ausgerichtete Gleichungen; unbekannte Befehle bleiben als `\name` sichtbar. Ein Dollarzeichen schreibt man `\$`; ein Betrag wie `$5` bleibt Text. Felder in Code-Schrift zeigen den Text unverändert.
 - **Bilder** (PNG, JPEG, GIF, WebP, BMP) über `Strg + I`, aus der Zwischenablage oder per Ziehen ins Fenster einfügen.
 - **Einfügen per Finger:** Lange (½ s) mit dem Finger aufs Blatt drücken öffnet ein Menü „Einfügen“ – Screenshot, kopierter Text oder kopierte Objekte landen genau an dieser Stelle.
 - **Importieren** (☰-Menü oder Datei ins Fenster ziehen) – **PDF**: Jede PDF-Seite wird eine Notizbuchseite mit der PDF-Seite als Hintergrund. Hochformat-Seiten werden DIN A4, Querformat-Seiten (z. B. Folien) bekommen eine Querformat-Seite ohne leeren Streifen darunter. Beim Hineinzoomen werden PDF-Seiten schärfer nachgerendert.
@@ -181,6 +182,7 @@ src/
 ├── geometry.rs     # Formerkennung (Douglas-Peucker, Kreis-Fit, …)
 ├── selection.rs    # Auswahl, Griffe, Verschieben/Drehen/Skalieren
 ├── ruler.rs        # Virtuelles Lineal
+├── latex.rs        # LaTeX-Formeln in Textfeldern: Einlesen und Satz
 ├── text.rs         # Textfelder: Satz, Zeilenumbruch, Rasterung
 ├── background.rs   # Papierfarben, Musterfarben, Karo/Linien/Punkte
 ├── image_layer.rs  # Texturen für Bilder, PDF-Seiten und Text

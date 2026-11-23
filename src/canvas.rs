@@ -1274,8 +1274,9 @@ impl CanvasState {
                     stroke.color
                 };
                 let key = text_key(text, color);
-                let scale = ((corners[1] - corners[0]).length() / text.wrap_width.max(text.size))
-                    .max((corners[3] - corners[0]).length() / text.layout().height());
+                let size = text.box_size();
+                let scale = ((corners[1] - corners[0]).length() / size.x)
+                    .max((corners[3] - corners[0]).length() / size.y);
                 self.text_specs.entry(key.clone()).or_insert(TextSpec {
                     text: text.clone(),
                     color,
