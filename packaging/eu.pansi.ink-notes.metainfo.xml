@@ -84,6 +84,11 @@
   </branding>
   <content_rating type="oars-1.1" />
   <releases>
+    <release version="0.49.2" date="2026-11-24">
+      <description>
+        <p>Imported PDFs now keep their embedded table of contents (outlines, including nested chapters and subchapters) as page titles and bookmarks, and three-way Nextcloud sync preserves page reordering even when another device edits page titles concurrently.</p>
+      </description>
+    </release>
     <release version="0.49.1" date="2026-11-24">
       <description>
         <p>Full-text search (Ctrl+F) now also searches the text inside imported PDF pages (such as lecture slides), cached in memory per PDF.</p>
