@@ -84,6 +84,11 @@
   </branding>
   <content_rating type="oars-1.1" />
   <releases>
+    <release version="0.48.0" date="2026-11-24">
+      <description>
+        <p>Added a compact tab bar for switching quickly between open notebooks (appears once two or more notebooks are open, with Ctrl+Tab and Ctrl+W) and a reusable stamps library to save selections of strokes, shapes and text boxes and insert them again with a tap.</p>
+      </description>
+    </release>
     <release version="0.47.0" date="2026-11-24">
       <description>
         <p>Updated the windowing, UI and graphics stack (winit 0.30, egui 0.37, wgpu 30), enabled network access in the Flatpak package for Nextcloud sync, and hardened update downloads, archive imports, PDF rendering and file saving.</p>

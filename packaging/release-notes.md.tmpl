@@ -3,6 +3,8 @@
 Notebook app for pen, touch and mouse on Linux (tested on Zorin OS 18 / Ubuntu 24.04).
 
 ### Highlights:
+- **Notebook tabs**: A compact tab bar at the top appears as soon as two or more notebooks are open (up to 8 tabs, remembered across restarts), with close buttons, middle-click to close, `+` for the notebook manager, and `Ctrl+Tab` / `Ctrl+Shift+Tab` / `Ctrl+W` shortcuts
+- **Reusable stamps**: Tap 📌 in the toolbar to save any selection of vector strokes, shapes or text boxes (including LaTeX formulas) as a named stamp with a thumbnail preview, and insert it into any notebook with a single tap
 - **Updated graphics & UI stack**: Upgraded to winit 0.30, egui 0.37 and wgpu 30, and split the application and UI code into focused modules
 - **Hardening & Flatpak sync**: Enabled network access in the Flatpak manifest for Nextcloud sync, capped update download size, guarded PDF rendering against panics, rejected oversized compressed imports with a clear error, and created temporary save files atomically with restricted permissions
 - **LaTeX formulas in text boxes**: Formulas pasted from Overleaf or typed in LaTeX are shown typeset: `$…$` and `\(…\)` inside the text, `$$…$$`, `\[…\]` and `equation`/`align`/`gather` on a line of their own. Sub- and superscripts, fractions, roots, sums, integrals and limits, Greek letters and symbols, growing brackets, accents, `\text`, matrices, `cases` and aligned equations are supported; while editing, the box shows the code. Code-font boxes and amounts like `$5` stay plain text. PDF export keeps formulas as searchable text. Text boxes written with an earlier version are resized to fit their formulas instead of being squeezed (#61)
