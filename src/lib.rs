@@ -35,6 +35,7 @@ pub mod platform;
 pub mod rnote;
 pub mod ruler;
 pub mod saber;
+pub mod search;
 pub mod selection;
 pub mod settings;
 pub mod spline;

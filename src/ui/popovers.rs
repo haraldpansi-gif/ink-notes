@@ -130,6 +130,47 @@ pub(super) fn render_popovers(
                         {
                             actions.push(UiAction::SetStrokeWidthMm(state.pen_stroke_width_mm));
                         }
+
+                        ui.add_space(10.0);
+
+                        // Zeile 4: Linienstil (durchgezogen, gestrichelt, gepunktet) & Form-Füllung
+                        ui.label(
+                            egui::RichText::new(t!("LINIENSTIL"))
+                                .size(10.5)
+                                .strong()
+                                .color(egui::Color32::from_gray(160)),
+                        );
+                        ui.add_space(4.0);
+                        ui.horizontal(|ui| {
+                            use crate::document::LineStyle;
+                            for (style, icon, tip) in [
+                                (LineStyle::Solid, "━━━━", t!("Durchgezogen")),
+                                (LineStyle::Dashed, "╌ ╌ ╌", t!("Gestrichelt")),
+                                (LineStyle::Dotted, "⋯⋯⋯", t!("Gepunktet")),
+                            ] {
+                                if ui
+                                    .add_sized(
+                                        [92.0, 30.0],
+                                        egui::Button::selectable(state.line_style == style, icon),
+                                    )
+                                    .on_hover_text(tip)
+                                    .clicked()
+                                {
+                                    state.line_style = style;
+                                    actions.push(UiAction::SetLineStyle(style));
+                                }
+                            }
+                        });
+                        ui.add_space(6.0);
+                        if ui
+                            .checkbox(&mut state.shape_fill, t!("Erkannte Formen füllen"))
+                            .on_hover_text(t!(
+                                "Geschlossene Formen (Kreis, Rechteck, Dreieck) halbtransparent füllen"
+                            ))
+                            .changed()
+                        {
+                            actions.push(UiAction::SetShapeFill(state.shape_fill));
+                        }
                     });
 
                     frame.response.rect
@@ -613,6 +654,22 @@ pub(super) fn render_popovers(
                                 );
                             });
 
+                            ui.add_space(4.0);
+                            if ui
+                                .add_sized(
+                                    [ui.available_width(), 32.0],
+                                    egui::Button::new(t!("🔍 Suchen (Strg+F)")),
+                                )
+                                .clicked()
+                            {
+                                state.close_overlays();
+                                state.is_search_open = true;
+                                state.search_focus = true;
+                                if !state.search_query.trim().is_empty() {
+                                    actions.push(UiAction::RunSearch);
+                                }
+                            }
+
                             // Bei kleinen Fenstern scrollen statt abschneiden
                             egui::ScrollArea::vertical()
                                 .max_height((ctx.viewport_rect().height() - 90.0).max(150.0))
@@ -983,7 +1040,7 @@ pub(super) fn render_popovers(
                             let field = ui.add(
                                 egui::TextEdit::singleline(&mut state.page_title_input)
                                     .hint_text(t!("z. B. Kapitel 2 – Integrale"))
-                                    .margin(egui::vec2(8.0, 8.0))
+                                    .margin(egui::vec2(8.0, 6.0))
                                     .desired_width(f32::INFINITY),
                             );
                             // Bei jeder Änderung übernehmen: schließt sich die Übersicht, geht nichts verloren
@@ -995,12 +1052,66 @@ pub(super) fn render_popovers(
                             }
                             ui.add_space(2.0);
                             ui.horizontal(|ui| {
+                                let is_bookmarked = current.bookmarked;
+                                let star_label = if is_bookmarked { "★" } else { "☆" };
+                                let star_color = if is_bookmarked {
+                                    egui::Color32::from_rgb(255, 200, 60)
+                                } else {
+                                    egui::Color32::from_gray(190)
+                                };
+                                if ui
+                                    .add_sized(
+                                        [34.0, 28.0],
+                                        egui::Button::new(
+                                            egui::RichText::new(star_label)
+                                                .size(14.0)
+                                                .color(star_color),
+                                        ),
+                                    )
+                                    .on_hover_text(t!("Lesezeichen umschalten (Strg+D)"))
+                                    .clicked()
+                                {
+                                    actions.push(UiAction::ToggleBookmark(current.id));
+                                }
+                                let can_prev = notebook.current_page_index > 0;
+                                if ui
+                                    .add_enabled(
+                                        can_prev,
+                                        egui::Button::new("◀").min_size(egui::vec2(30.0, 28.0)),
+                                    )
+                                    .on_hover_text(t!("Seite nach vorne schieben"))
+                                    .clicked()
+                                {
+                                    actions.push(UiAction::MoveCurrentPage(-1));
+                                }
+                                let can_next =
+                                    notebook.current_page_index + 1 < notebook.pages.len();
+                                if ui
+                                    .add_enabled(
+                                        can_next,
+                                        egui::Button::new("▶").min_size(egui::vec2(30.0, 28.0)),
+                                    )
+                                    .on_hover_text(t!("Seite nach hinten schieben"))
+                                    .clicked()
+                                {
+                                    actions.push(UiAction::MoveCurrentPage(1));
+                                }
+                                if ui
+                                    .add_sized([34.0, 28.0], egui::Button::new("⧉"))
+                                    .on_hover_text(t!("Aktuelle Seite duplizieren"))
+                                    .clicked()
+                                {
+                                    actions.push(UiAction::DuplicateCurrentPage);
+                                }
+                            });
+                            ui.add_space(2.0);
+                            ui.horizontal(|ui| {
                                 for (list, label) in
                                     [(false, t!("🖼  Kacheln")), (true, t!("📑  Inhalt"))]
                                 {
                                     if ui
                                         .add_sized(
-                                            [140.0, 30.0],
+                                            [104.0, 30.0],
                                             egui::Button::selectable(
                                                 state.page_picker_list == list,
                                                 label,
@@ -1010,6 +1121,27 @@ pub(super) fn render_popovers(
                                     {
                                         state.page_picker_list = list;
                                     }
+                                }
+                                let bm_count =
+                                    notebook.pages.iter().filter(|p| p.bookmarked).count();
+                                let bm_label = if bm_count > 0 {
+                                    format!("★ {bm_count}")
+                                } else {
+                                    "★".to_string()
+                                };
+                                if ui
+                                    .add_sized(
+                                        [46.0, 30.0],
+                                        egui::Button::selectable(
+                                            state.page_picker_bookmarks_only,
+                                            bm_label,
+                                        ),
+                                    )
+                                    .on_hover_text(t!("Nur Lesezeichen anzeigen"))
+                                    .clicked()
+                                {
+                                    state.page_picker_bookmarks_only =
+                                        !state.page_picker_bookmarks_only;
                                 }
                             });
                             ui.add_space(2.0);
@@ -1024,7 +1156,11 @@ pub(super) fn render_popovers(
                                     .max_height(420.0)
                                     .show(ui, |ui| {
                                         ui.set_width(ui.available_width());
-                                        if let Some(idx) = page_title_list(ui, notebook) {
+                                        if let Some(idx) = page_title_list(
+                                            ui,
+                                            notebook,
+                                            state.page_picker_bookmarks_only,
+                                        ) {
                                             actions.push(UiAction::GoToPage(idx));
                                             state.show_page_jump_popup = false;
                                         }
@@ -1033,37 +1169,61 @@ pub(super) fn render_popovers(
                                 egui::ScrollArea::vertical()
                                     .max_height(420.0)
                                     .show(ui, |ui| {
-                                        let mut wanted_pdfs = Vec::new();
-                                        let tile = page_tile_size(notebook);
-                                        egui::Grid::new("page_picker_grid")
-                                            .spacing([8.0, 8.0])
-                                            .show(ui, |ui| {
-                                                for (idx, page) in notebook.pages.iter().enumerate()
-                                                {
-                                                    let is_current =
-                                                        idx == notebook.current_page_index;
-                                                    if page_thumbnail(
-                                                        ui,
-                                                        state,
-                                                        page,
-                                                        idx + 1,
-                                                        is_current,
-                                                        tile,
-                                                        &mut wanted_pdfs,
-                                                    )
-                                                    .clicked()
+                                        let visible_pages: Vec<(usize, &crate::document::Page)> =
+                                            notebook
+                                                .pages
+                                                .iter()
+                                                .enumerate()
+                                                .filter(|(_, p)| {
+                                                    !state.page_picker_bookmarks_only
+                                                        || p.bookmarked
+                                                })
+                                                .collect();
+                                        if state.page_picker_bookmarks_only
+                                            && visible_pages.is_empty()
+                                        {
+                                            ui.label(
+                                                egui::RichText::new(t!(
+                                                    "Noch keine Lesezeichen gesetzt. Tippe oben auf ☆ oder drücke Strg+D."
+                                                ))
+                                                .color(egui::Color32::from_gray(150)),
+                                            );
+                                        } else {
+                                            let mut wanted_pdfs = Vec::new();
+                                            let tile = page_tile_size(notebook);
+                                            egui::Grid::new("page_picker_grid")
+                                                .spacing([8.0, 8.0])
+                                                .show(ui, |ui| {
+                                                    for (col_idx, (idx, page)) in
+                                                        visible_pages.into_iter().enumerate()
                                                     {
-                                                        actions.push(UiAction::GoToPage(idx));
-                                                        state.show_page_jump_popup = false;
+                                                        let is_current =
+                                                            idx == notebook.current_page_index;
+                                                        if page_thumbnail(
+                                                            ui,
+                                                            state,
+                                                            page,
+                                                            idx + 1,
+                                                            is_current,
+                                                            tile,
+                                                            &mut wanted_pdfs,
+                                                        )
+                                                        .clicked()
+                                                        {
+                                                            actions.push(UiAction::GoToPage(idx));
+                                                            state.show_page_jump_popup = false;
+                                                        }
+                                                        if (col_idx + 1) % PAGE_PICKER_COLUMNS == 0
+                                                        {
+                                                            ui.end_row();
+                                                        }
                                                     }
-                                                    if (idx + 1) % PAGE_PICKER_COLUMNS == 0 {
-                                                        ui.end_row();
-                                                    }
-                                                }
-                                            });
-                                        if !wanted_pdfs.is_empty() {
-                                            actions
-                                                .push(UiAction::RequestPdfThumbnails(wanted_pdfs));
+                                                });
+                                            if !wanted_pdfs.is_empty() {
+                                                actions.push(UiAction::RequestPdfThumbnails(
+                                                    wanted_pdfs,
+                                                ));
+                                            }
                                         }
                                     });
                             }

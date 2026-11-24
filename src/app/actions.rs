@@ -101,6 +101,20 @@ impl AppState {
                 }
                 self.window.request_redraw();
             }
+            UiAction::SetLineStyle(style) => {
+                self.ui_state.line_style = style;
+                self.canvas.current_line_style =
+                    if self.ui_state.active_tool == ActiveTool::Highlighter {
+                        crate::document::LineStyle::Solid
+                    } else {
+                        style
+                    };
+                self.window.request_redraw();
+            }
+            UiAction::SetShapeFill(fill) => {
+                self.ui_state.shape_fill = fill;
+                self.window.request_redraw();
+            }
             UiAction::DeleteSelected => {
                 if !self.selection_state.is_empty() {
                     let removed = self
@@ -395,6 +409,114 @@ impl AppState {
                 self.ui_state
                     .set_export_message(t!("Seite wird exportiert …").to_string());
                 self.window.request_redraw();
+            }
+            UiAction::ToggleBookmark(page_id) => {
+                if let Some(on) = self.notebook.toggle_bookmark(page_id) {
+                    if let Some(page) = self.notebook.pages.iter().find(|p| p.id == page_id) {
+                        self.manifest.sync_from_notebook(&self.notebook);
+                        self.autosave.mark_page_dirty(page, &self.manifest);
+                    }
+                    self.ui_state.set_export_message(if on {
+                        t!("Lesezeichen gesetzt").to_string()
+                    } else {
+                        t!("Lesezeichen entfernt").to_string()
+                    });
+                    self.window.request_redraw();
+                }
+            }
+            UiAction::MoveCurrentPage(delta) => {
+                let from = self.notebook.current_page_index;
+                let to = from.saturating_add_signed(delta);
+                if to < self.notebook.pages.len() && self.notebook.move_page(from, to) {
+                    self.manifest.sync_from_notebook(&self.notebook);
+                    self.autosave.mark_manifest_dirty(&self.manifest);
+                    self.canvas.sync_page(self.notebook.current_page_mut());
+                    update_window_title(
+                        &self.window,
+                        &self.notebook,
+                        &self.manifest,
+                        self.ui_state.active_tool,
+                        self.autosave.status(),
+                    );
+                    self.ui_state.set_export_message(t!(
+                        "Seite auf Position {number} verschoben",
+                        number = to + 1
+                    ));
+                    self.window.request_redraw();
+                }
+            }
+            UiAction::DuplicateCurrentPage => {
+                finish_text_edit(
+                    &mut self.canvas,
+                    &mut self.notebook,
+                    &mut self.manifest,
+                    &mut self.autosave,
+                    &mut self.ui_state,
+                );
+                let curr = self.notebook.current_page_index;
+                let _ = storage::ensure_page_loaded(&self.storage_dir, &mut self.notebook, curr);
+                let new_idx = self.notebook.duplicate_current_page();
+                self.selection_state.clear();
+                self.manifest.sync_from_notebook(&self.notebook);
+                self.autosave.mark_dirty(&self.notebook, &mut self.manifest);
+                self.canvas.sync_page(self.notebook.current_page_mut());
+                update_window_title(
+                    &self.window,
+                    &self.notebook,
+                    &self.manifest,
+                    self.ui_state.active_tool,
+                    self.autosave.status(),
+                );
+                self.ui_state.set_export_message(t!(
+                    "Seite dupliziert (Seite {number})",
+                    number = new_idx + 1
+                ));
+                self.window.request_redraw();
+            }
+            UiAction::RunSearch => {
+                let query = self.ui_state.search_query.clone();
+                let hits = match self.ui_state.search_scope {
+                    crate::search::SearchScope::CurrentNotebook => crate::search::search_notebook(
+                        &self.manifest.id,
+                        &self.manifest.title,
+                        &self.notebook,
+                        &self.storage_dir,
+                        &query,
+                        80,
+                    ),
+                    crate::search::SearchScope::AllNotebooks => {
+                        crate::search::search_all_notebooks(
+                            &self.storage_base_dir,
+                            &self.manifest.id,
+                            &self.manifest.title,
+                            &self.notebook,
+                            &self.storage_dir,
+                            &query,
+                            80,
+                        )
+                    }
+                };
+                self.ui_state.search_hits = hits;
+                self.window.request_redraw();
+            }
+            UiAction::JumpToSearchHit {
+                notebook_id,
+                page_index,
+            } => {
+                if notebook_id != self.manifest.id {
+                    self.handle_ui_action(
+                        UiAction::OpenNotebook(notebook_id.clone()),
+                        pdf_thumbnails_wanted,
+                        target,
+                    );
+                }
+                if self.manifest.id == notebook_id {
+                    self.handle_ui_action(
+                        UiAction::GoToPage(page_index),
+                        pdf_thumbnails_wanted,
+                        target,
+                    );
+                }
             }
             UiAction::SetPageTitle { page_id, title } => {
                 if self.notebook.set_page_title(page_id, &title) {

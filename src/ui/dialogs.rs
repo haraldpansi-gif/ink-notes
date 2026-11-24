@@ -17,6 +17,91 @@ pub(super) fn render_dialogs(
     updater: &crate::updater::UpdaterController,
     actions: &mut Vec<UiAction>,
 ) {
+    // 3a. Volltext-Suche (Strg+F)
+    if state.is_search_open {
+        let width = dialog_width(ctx, state, 440.0);
+        let search_win = dialog_window(t!("Suchen"), state, false).show(ctx, |ui| {
+            ui.set_width(width);
+            touch_friendly_spacing(ui);
+            if dialog_header(ui, t!("🔍 Suchen"), true) {
+                state.is_search_open = false;
+            }
+            let edit = ui.add(
+                egui::TextEdit::singleline(&mut state.search_query)
+                    .hint_text(t!("Titel, Text oder LaTeX suchen …"))
+                    .desired_width(f32::INFINITY)
+                    .margin(egui::vec2(8.0, 8.0)),
+            );
+            if state.search_focus {
+                edit.request_focus();
+                state.search_focus = false;
+            }
+            if edit.changed() {
+                actions.push(UiAction::RunSearch);
+            }
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                use crate::search::SearchScope;
+                for (scope, label) in [
+                    (SearchScope::CurrentNotebook, t!("Dieses Notizbuch")),
+                    (SearchScope::AllNotebooks, t!("Alle Notizbücher")),
+                ] {
+                    if ui
+                        .selectable_label(state.search_scope == scope, label)
+                        .clicked()
+                        && state.search_scope != scope
+                    {
+                        state.search_scope = scope;
+                        actions.push(UiAction::RunSearch);
+                    }
+                }
+            });
+            ui.add_space(6.0);
+            if state.search_query.trim().is_empty() {
+                ui.label(
+                    egui::RichText::new(t!("Suchbegriff eingeben (Strg+F)."))
+                        .color(egui::Color32::from_gray(150)),
+                );
+            } else if state.search_hits.is_empty() {
+                ui.label(
+                    egui::RichText::new(t!("Keine Treffer gefunden."))
+                        .color(egui::Color32::from_gray(150)),
+                );
+            } else {
+                let hits_snapshot = state.search_hits.clone();
+                let show_nb = state.search_scope == crate::search::SearchScope::AllNotebooks;
+                egui::ScrollArea::vertical()
+                    .id_salt("search_hits_scroll")
+                    .max_height(320.0)
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        for hit in &hits_snapshot {
+                            let header = if show_nb {
+                                format!("{} · S. {}", hit.notebook_title, hit.page_index + 1)
+                            } else {
+                                t!("Seite {number}", number = hit.page_index + 1)
+                            };
+                            let text = egui::RichText::new(format!("{header}\n{}", hit.snippet))
+                                .size(12.5);
+                            if ui
+                                .add_sized([ui.available_width(), 42.0], egui::Button::new(text))
+                                .clicked()
+                            {
+                                actions.push(UiAction::JumpToSearchHit {
+                                    notebook_id: hit.notebook_id.clone(),
+                                    page_index: hit.page_index,
+                                });
+                                state.is_search_open = false;
+                            }
+                        }
+                    });
+            }
+        });
+        state.search_modal_rect = search_win.map(|r| r.response.rect);
+    } else {
+        state.search_modal_rect = None;
+    }
+
     // 3b. Dokumenten-Manager (Notizbücher wechseln, anlegen, umbenennen, löschen)
     if state.is_document_menu_open {
         let width = dialog_width(ctx, state, 420.0);

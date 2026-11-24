@@ -10,7 +10,7 @@
 //! Generiert daraus Triangle-Strips für das GPU-Rendering mit `wgpu`.
 
 use crate::canvas::InkVertex;
-use crate::document::{point_to_segment_distance, Stroke, StylusSample};
+use crate::document::{point_to_segment_distance, LineStyle, Stroke, StylusSample};
 
 /// Standardtoleranz für Ramer-Douglas-Peucker (ca. 0.075 mm in DIN-A4-Einheiten).
 pub const RDP_TOLERANCE_UNITS: f32 = 0.75;
@@ -667,6 +667,108 @@ pub fn generate_finalized_triangle_strip(
     }
 
     vertices
+}
+
+/// Zerlegt eine Polylinie entlang ihrer Bogenlänge in Striche (`Dashed`) oder Punkte (`Dotted`).
+///
+/// Bei `LineStyle::Solid` wird die ursprüngliche Punktfolge unverändert zurückgegeben.
+pub fn split_polyline_by_style(
+    samples: &[StylusSample],
+    style: LineStyle,
+    width_units: f32,
+) -> Vec<Vec<StylusSample>> {
+    if style == LineStyle::Solid || samples.len() < 2 {
+        return vec![samples.to_vec()];
+    }
+    let w = width_units.max(2.0);
+    let (dash_len, gap_len) = match style {
+        LineStyle::Solid => unreachable!(),
+        LineStyle::Dashed => ((w * 4.5).clamp(18.0, 120.0), (w * 3.0).clamp(12.0, 80.0)),
+        LineStyle::Dotted => ((w * 0.35).clamp(1.0, 6.0), (w * 2.8).clamp(12.0, 70.0)),
+    };
+
+    let mut segments: Vec<Vec<StylusSample>> = Vec::new();
+    let mut current: Vec<StylusSample> = Vec::new();
+    let mut drawing = true;
+    let mut remaining = dash_len;
+
+    current.push(samples[0]);
+
+    for pair in samples.windows(2) {
+        let mut a = pair[0];
+        let b = pair[1];
+        let mut seg_len = a.position.distance(b.position);
+        if seg_len <= 1e-4 {
+            continue;
+        }
+        while seg_len > 1e-4 {
+            if seg_len < remaining {
+                if drawing {
+                    current.push(b);
+                }
+                remaining -= seg_len;
+                break;
+            }
+            let t = (remaining / seg_len).clamp(0.0, 1.0);
+            let mid = StylusSample {
+                position: a.position.lerp(b.position, t),
+                pressure: a.pressure + (b.pressure - a.pressure) * t,
+                timestamp: a.timestamp + (b.timestamp - a.timestamp) * t as f64,
+            };
+            if drawing {
+                current.push(mid);
+                if current.len() >= 2 {
+                    segments.push(std::mem::take(&mut current));
+                } else {
+                    current.clear();
+                }
+                drawing = false;
+                remaining = gap_len;
+            } else {
+                current.clear();
+                current.push(mid);
+                drawing = true;
+                remaining = dash_len;
+            }
+            a = mid;
+            seg_len = a.position.distance(b.position);
+        }
+    }
+    if drawing && current.len() >= 2 {
+        segments.push(current);
+    }
+    if segments.is_empty() {
+        segments.push(samples[..2].to_vec());
+    }
+    segments
+}
+
+/// Erzeugt den finalisierten Triangle-Strip unter Berücksichtigung von `LineStyle`.
+/// Getrennte Teilstriche werden über degenerierte Vertices zu einem Strip verbunden.
+pub fn generate_styled_triangle_strip(
+    samples: &[StylusSample],
+    corners: &[usize],
+    config: &SplineConfig,
+    style: LineStyle,
+    width_units: f32,
+) -> Vec<Vertex> {
+    if style == LineStyle::Solid {
+        return generate_finalized_triangle_strip(samples, corners, config);
+    }
+    let parts = split_polyline_by_style(samples, style, width_units);
+    let mut combined: Vec<Vertex> = Vec::new();
+    for part in parts {
+        let strip = generate_finalized_triangle_strip(&part, &[], config);
+        if strip.is_empty() {
+            continue;
+        }
+        if let Some(&last) = combined.last() {
+            combined.push(last);
+            combined.push(strip[0]);
+        }
+        combined.extend_from_slice(&strip);
+    }
+    combined
 }
 
 /// Finalisiert einen Strich nach dem Zwei-Stufen-Modell:

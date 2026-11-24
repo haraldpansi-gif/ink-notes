@@ -311,6 +311,7 @@ pub struct CanvasState {
     pub camera_bind_group: wgpu::BindGroup,
     pub current_ink_color: [f32; 4],
     pub current_stroke_width_mm: f32,
+    pub current_line_style: crate::document::LineStyle,
 
     // Statische Hintergrund-Geometrie
     pub paper_buffer: wgpu::Buffer,
@@ -734,6 +735,7 @@ impl CanvasState {
             camera_bind_group,
             current_ink_color: default_ink_color,
             current_stroke_width_mm: 0.5,
+            current_line_style: crate::document::LineStyle::Solid,
             paper_buffer,
             background_buffer,
             background_vertex_count: bg_mesh.len() as u32,
@@ -1434,15 +1436,32 @@ impl CanvasState {
         } else {
             &self.live_raw_samples
         };
-        let stroke = spline::finalize_stroke_with_config(
+        let mut stroke = spline::finalize_stroke_with_config(
             stroke_id,
             source,
             self.current_ink_color,
             &self.spline_config,
         );
-        let mut stroke = stroke;
-        stroke.width = self.current_stroke_width_mm * crate::document::UNITS_PER_MM;
+        let width_units = self.current_stroke_width_mm * crate::document::UNITS_PER_MM;
+        stroke.width = width_units;
         stroke.finalized = true;
+        stroke.line_style = self.current_line_style;
+        if self.current_line_style != crate::document::LineStyle::Solid && stroke.points.len() >= 2
+        {
+            let corners =
+                spline::detect_corners(&stroke.points, spline::CORNER_ANGLE_THRESHOLD_DEG);
+            let styled = spline::generate_styled_triangle_strip(
+                &stroke.points,
+                &corners,
+                &self.spline_config,
+                self.current_line_style,
+                width_units,
+            );
+            stroke.vertices = styled
+                .into_iter()
+                .map(|v| InkVertex::new(v.position[0], v.position[1], self.current_ink_color))
+                .collect();
+        }
 
         // Temporären GPU-Live-Buffer vollständig leeren
         self.live_samples.clear();
@@ -1468,8 +1487,13 @@ impl CanvasState {
         let color = self.current_ink_color;
         let points = spline::rdp_filter_samples(&self.live_samples, spline::RDP_TOLERANCE_UNITS);
         let corners = spline::detect_corners(&points, spline::CORNER_ANGLE_THRESHOLD_DEG);
-        let raw_strip =
-            spline::generate_finalized_triangle_strip(&points, &corners, &self.spline_config);
+        let raw_strip = spline::generate_styled_triangle_strip(
+            &points,
+            &corners,
+            &self.spline_config,
+            self.current_line_style,
+            self.current_stroke_width_mm * crate::document::UNITS_PER_MM,
+        );
         self.live_vertices = raw_strip
             .into_iter()
             .map(|v| InkVertex::new(v.position[0], v.position[1], color))

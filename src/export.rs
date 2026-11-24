@@ -406,9 +406,11 @@ fn generate_pdf_document_with(
             let (width, height) = pdf_page_mm(page);
             doc.add_page(width, height, "Background")
         };
-        // Seitentitel werden zu Lesezeichen (Inhaltsverzeichnis im PDF-Betrachter)
+        // Seitentitel und Lesezeichen werden zu PDF-Lesezeichen (Inhaltsverzeichnis im Betrachter)
         if let Some(title) = &page.title {
             doc.add_bookmark(title.clone(), page_idx);
+        } else if page.bookmarked {
+            doc.add_bookmark(t!("Seite {number}", number = i + 1), page_idx);
         }
         let page_ref = doc.get_page(page_idx);
         render_background_layer(&page_ref.get_layer(layer_bg), page, pattern);

@@ -71,6 +71,12 @@ pub struct StrokeData {
     pub width: f32,
     #[serde(default = "default_finalized")]
     pub finalized: bool,
+    /// Linienstil (durchgezogen, gestrichelt, gepunktet)
+    #[serde(default, skip_serializing_if = "crate::document::LineStyle::is_solid")]
+    pub line_style: crate::document::LineStyle,
+    /// Optionale halbtransparente Füllfarbe für geschlossene Formen
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fill_color: Option<[f32; 4]>,
     /// Eingefügtes Bild (Name im Asset-Ordner); die Samples sind dann die vier Bildecken
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image: Option<String>,
@@ -93,6 +99,8 @@ impl From<&Stroke> for StrokeData {
             tool: stroke.tool,
             width: stroke.width,
             finalized: stroke.finalized,
+            line_style: stroke.line_style,
+            fill_color: stroke.fill_color,
             image: stroke.image.clone(),
             text: stroke.text.clone(),
             typeset: stroke.text.is_some(),
@@ -136,8 +144,28 @@ impl StrokeData {
             5.0
         };
         let vertices = if let Some(ref shape) = self.shape {
-            let (_, shape_verts) = crate::geometry::shape_to_mesh(shape, width, self.color);
+            let (_, shape_verts) = crate::geometry::shape_to_mesh_styled(
+                shape,
+                width,
+                self.color,
+                self.line_style,
+                self.fill_color,
+            );
             shape_verts
+        } else if self.line_style != crate::document::LineStyle::Solid && self.finalized {
+            let config = SplineConfig::from_width_units(width);
+            let corners =
+                spline::detect_corners(&stylus_samples, spline::CORNER_ANGLE_THRESHOLD_DEG);
+            spline::generate_styled_triangle_strip(
+                &stylus_samples,
+                &corners,
+                &config,
+                self.line_style,
+                width,
+            )
+            .into_iter()
+            .map(|v| InkVertex::new(v.position[0], v.position[1], self.color))
+            .collect()
         } else {
             reconstruct_stroke_vertices(
                 &stylus_samples,
@@ -156,6 +184,8 @@ impl StrokeData {
         );
         stroke.width = width;
         stroke.finalized = self.finalized;
+        stroke.line_style = self.line_style;
+        stroke.fill_color = self.fill_color;
         stroke
     }
 }
@@ -194,6 +224,9 @@ pub struct PageData {
     /// Seitentitel (steht zusätzlich im Manifest)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    /// Lesezeichen (steht zusätzlich im Manifest)
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub bookmarked: bool,
     /// Seitengröße in Seiteneinheiten, wenn nicht DIN A4 hoch (steht zusätzlich im Manifest)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub size: Option<[f32; 2]>,
@@ -227,6 +260,7 @@ impl From<&Page> for PageData {
             background: page.background,
             pdf_background: page.pdf_background.clone(),
             title: page.title.clone(),
+            bookmarked: page.bookmarked,
             size: stored_size(page.size),
             strokes: page.strokes.iter().map(StrokeData::from).collect(),
         }
@@ -239,6 +273,7 @@ impl PageData {
         let mut page = Page::new(self.id, self.background).with_size(page_size_from(self.size));
         page.pdf_background = self.pdf_background.clone();
         page.title = self.title.clone();
+        page.bookmarked = self.bookmarked;
         for stroke_data in &self.strokes {
             page.strokes.push(stroke_data.to_stroke());
         }
@@ -258,6 +293,9 @@ pub struct PageMeta {
     /// Seitentitel (Lesezeichen), damit die Seitenübersicht ihn ohne Laden der Seite kennt
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    /// Ob die Seite als Lesezeichen markiert ist
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub bookmarked: bool,
     /// Seitengröße, wenn nicht DIN A4 hoch (für Lage und Maßstab ungeladener Seiten)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub size: Option<[f32; 2]>,
@@ -269,6 +307,7 @@ impl PageMeta {
             id,
             background,
             title: None,
+            bookmarked: false,
             size: None,
         }
     }
@@ -378,6 +417,7 @@ impl NotebookManifest {
                 id: p.id,
                 background: Some(p.background),
                 title: p.title.clone(),
+                bookmarked: p.bookmarked,
                 size: stored_size(p.size),
             })
             .collect();
@@ -1040,10 +1080,18 @@ pub fn load_notebook(notebook_dir: &Path) -> Result<(Notebook, NotebookManifest)
         pages.push(Page::new_unloaded(page_id, bg).with_size(manifest.size_for_page(page_id)));
     }
 
-    // Titel aus dem Manifest (Platzhalter und Ersatzseiten kennen sie sonst nicht)
+    // Titel & Lesezeichen aus dem Manifest (Platzhalter und Ersatzseiten kennen sie sonst nicht)
     for page in &mut pages {
         if page.title.is_none() {
             page.title = manifest.title_for_page(page.id);
+        }
+        if !page.bookmarked
+            && manifest
+                .pages
+                .iter()
+                .any(|m| m.id == page.id && m.bookmarked)
+        {
+            page.bookmarked = true;
         }
     }
 
@@ -1085,8 +1133,10 @@ pub fn ensure_page_loaded(
     match load_page(notebook_dir, page_id) {
         Ok(data) => {
             let title = notebook.pages[page_idx].title.take();
+            let bookmarked = notebook.pages[page_idx].bookmarked;
             let mut page = data.to_page();
             page.title = page.title.or(title);
+            page.bookmarked = page.bookmarked || bookmarked;
             notebook.pages[page_idx] = page;
             Ok(())
         }
@@ -1095,6 +1145,7 @@ pub fn ensure_page_loaded(
             let placeholder = &mut notebook.pages[page_idx];
             let mut page = Page::new(page_id, placeholder.background).with_size(placeholder.size);
             page.title = placeholder.title.take();
+            page.bookmarked = placeholder.bookmarked;
             *placeholder = page;
             Ok(())
         }

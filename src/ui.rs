@@ -251,6 +251,10 @@ pub enum UiAction {
     SetViewMode(bool),
     SetColor([f32; 4]),
     SetStrokeWidthMm(f32),
+    /// Linienstil für Stift, Lineal und Formen umschalten
+    SetLineStyle(crate::document::LineStyle),
+    /// Geschlossene erkannte Formen halbtransparent füllen
+    SetShapeFill(bool),
     Undo,
     Redo,
     PreviousPage,
@@ -261,6 +265,19 @@ pub enum UiAction {
     /// Zuletzt gelöschte Seite wiederherstellen
     RestoreDeletedPage,
     GoToPage(usize),
+    /// Lesezeichen für die Seite mit dieser ID umschalten
+    ToggleBookmark(u64),
+    /// Aktuelle Seite um `delta` (-1 / +1) in der Reihenfolge verschieben
+    MoveCurrentPage(isize),
+    /// Aktuelle Seite direkt dahinter duplizieren
+    DuplicateCurrentPage,
+    /// Volltext-Suche ausführen
+    RunSearch,
+    /// Zu einem Suchtreffer springen (Notizbuch + Seitenindex)
+    JumpToSearchHit {
+        notebook_id: String,
+        page_index: usize,
+    },
     /// Alle noch nicht geladenen Seiten laden (für die Vorschaubilder der Seitenauswahl)
     LoadAllPages,
     /// Render these PDF pages small for the page picker (see `UiState::pdf_thumbnails`)
@@ -404,6 +421,10 @@ pub struct UiState {
     pub highlighter_color: [f32; 4],
     pub pen_stroke_width_mm: f32,
     pub highlighter_stroke_width_mm: f32,
+    /// Linienstil für Stift, Lineal und Formen (durchgezogen / gestrichelt / gepunktet)
+    pub line_style: crate::document::LineStyle,
+    /// Geschlossene erkannte Formen halbtransparent in der Stiftfarbe füllen
+    pub shape_fill: bool,
     pub export_message: Option<(String, Instant)>,
     pub show_page_jump_popup: bool,
     /// Aktueller Zoomfaktor zur Anzeige in der Toolbar
@@ -445,6 +466,13 @@ pub struct UiState {
     pub moving: Option<MoveSubject>,
     pub renaming_title_input: String,
     pub document_modal_rect: Option<egui::Rect>,
+    /// Volltext-Suche (Strg+F)
+    pub is_search_open: bool,
+    pub search_focus: bool,
+    pub search_query: String,
+    pub search_scope: crate::search::SearchScope,
+    pub search_hits: Vec<crate::search::SearchHit>,
+    pub search_modal_rect: Option<egui::Rect>,
     /// Gitea Release- & Update-Manager
     pub is_update_dialog_open: bool,
     pub updater_server_url_input: String,
@@ -545,6 +573,8 @@ pub struct UiState {
     pub page_title_for: Option<u64>,
     /// Seitenübersicht als Liste mit Titeln (Inhaltsverzeichnis) statt Kacheln
     pub page_picker_list: bool,
+    /// Seitenübersicht auf Lesezeichen-Seiten filtern
+    pub page_picker_bookmarks_only: bool,
     /// Aktionen, die außerhalb der Oberfläche ausgelöst wurden (z. B. ins Fenster gezogene
     /// PDF-Datei); `render_ui` gibt sie beim nächsten Bild mit aus
     pub queued_actions: Vec<UiAction>,
@@ -566,6 +596,8 @@ impl Default for UiState {
             highlighter_color: HIGHLIGHTER_COLOR_PRESETS[0].0,
             pen_stroke_width_mm: 0.5, // Standard: 0.5 mm (feine Handschrift)
             highlighter_stroke_width_mm: 6.0,
+            line_style: crate::document::LineStyle::Solid,
+            shape_fill: false,
             export_message: None,
             show_page_jump_popup: false,
             current_zoom: 1.0,
@@ -593,6 +625,12 @@ impl Default for UiState {
             moving: None,
             renaming_title_input: String::new(),
             document_modal_rect: None,
+            is_search_open: false,
+            search_focus: false,
+            search_query: String::new(),
+            search_scope: crate::search::SearchScope::CurrentNotebook,
+            search_hits: Vec::new(),
+            search_modal_rect: None,
             is_update_dialog_open: false,
             updater_server_url_input: "https://gitea.pansi.eu".to_string(),
             updater_token_input: String::new(),
@@ -647,6 +685,7 @@ impl Default for UiState {
             page_title_input: String::new(),
             page_title_for: None,
             page_picker_list: false,
+            page_picker_bookmarks_only: false,
             last_picker_dir: None,
             storage_dir: std::path::PathBuf::new(),
             storage_dir_custom: false,
@@ -692,6 +731,7 @@ impl UiState {
         self.is_more_menu_open = false;
         self.show_page_jump_popup = false;
         self.is_document_menu_open = false;
+        self.is_search_open = false;
         self.is_update_dialog_open = false;
         self.file_picker = None;
     }
@@ -1026,6 +1066,13 @@ impl UiState {
                 }
             }
         }
+        if self.is_search_open {
+            if let Some(search_rect) = self.search_modal_rect {
+                if search_rect.contains(egui::pos2(px, py)) {
+                    return true;
+                }
+            }
+        }
         if self.is_update_dialog_open {
             if let Some(upd_rect) = self.update_modal_rect {
                 if upd_rect.contains(egui::pos2(px, py)) {
@@ -1080,7 +1127,7 @@ pub fn key_allowed_in_view_mode(key: &winit::keyboard::Key, ctrl: bool) -> bool 
             ) || (ctrl && named == &NamedKey::Tab)
         }
         Key::Character(c) => {
-            ctrl && ["0", "+", "=", "-", "_", "s", "e", "q"]
+            ctrl && ["0", "+", "=", "-", "_", "s", "e", "q", "f"]
                 .iter()
                 .any(|k| c.eq_ignore_ascii_case(k))
         }

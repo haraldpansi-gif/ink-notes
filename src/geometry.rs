@@ -1989,6 +1989,123 @@ pub fn octahedron_edges(
     ]
 }
 
+/// Erzeugt ein halbtransparentes Füll-Mesh (Triangle-Strip) für geschlossene erkannte Formen.
+pub fn shape_fill_strip(shape: &RecognizedShape, fill_color: [f32; 4]) -> Vec<InkVertex> {
+    let perimeter: Vec<Vec2> = match shape {
+        RecognizedShape::Circle { center, radius } => {
+            let n = 48;
+            (0..=n)
+                .map(|i| {
+                    let a = (i as f32 / n as f32) * std::f32::consts::TAU;
+                    *center + Vec2::new(a.cos(), a.sin()) * *radius
+                })
+                .collect()
+        }
+        RecognizedShape::Ellipse {
+            center,
+            radius_x,
+            radius_y,
+            rotation,
+        } => {
+            let n = 48;
+            let (sin_r, cos_r) = rotation.sin_cos();
+            (0..=n)
+                .map(|i| {
+                    let a = (i as f32 / n as f32) * std::f32::consts::TAU;
+                    let lx = a.cos() * *radius_x;
+                    let ly = a.sin() * *radius_y;
+                    *center + Vec2::new(lx * cos_r - ly * sin_r, lx * sin_r + ly * cos_r)
+                })
+                .collect()
+        }
+        RecognizedShape::Rectangle { corners } => {
+            vec![corners[0], corners[1], corners[2], corners[3], corners[0]]
+        }
+        RecognizedShape::Triangle { corners } => {
+            vec![corners[0], corners[1], corners[2], corners[0]]
+        }
+        RecognizedShape::Rhombus { corners } => {
+            vec![corners[0], corners[1], corners[2], corners[3], corners[0]]
+        }
+        RecognizedShape::Polygon { vertices } if vertices.len() >= 3 => {
+            let mut pts = vertices.clone();
+            pts.push(vertices[0]);
+            pts
+        }
+        _ => return Vec::new(),
+    };
+
+    if perimeter.len() < 4 {
+        return Vec::new();
+    }
+    let count = perimeter.len() - 1;
+    let center: Vec2 = perimeter[..count].iter().copied().sum::<Vec2>() / count as f32;
+    let center_v = InkVertex::new(center.x, center.y, fill_color);
+    let mut strip = Vec::with_capacity(perimeter.len() * 2);
+    for p in perimeter {
+        strip.push(center_v);
+        strip.push(InkVertex::new(p.x, p.y, fill_color));
+    }
+    strip
+}
+
+/// Erzeugt Samples und GPU-Mesh für eine Form mit optionalem Linienstil und Füllfarbe.
+pub fn shape_to_mesh_styled(
+    shape: &RecognizedShape,
+    width_units: f32,
+    color: [f32; 4],
+    style: crate::document::LineStyle,
+    fill_color: Option<[f32; 4]>,
+) -> (Vec<StylusSample>, Vec<InkVertex>) {
+    let (samples, mut outline) = shape_to_mesh(shape, width_units, color);
+    if style != crate::document::LineStyle::Solid && samples.len() >= 2 {
+        let cfg = crate::spline::SplineConfig::from_width_units(width_units.max(2.0));
+        let styled = crate::spline::generate_styled_triangle_strip(
+            &samples,
+            &[],
+            &cfg,
+            style,
+            width_units.max(2.0),
+        );
+        if !styled.is_empty() {
+            outline = styled
+                .into_iter()
+                .map(|v| InkVertex::new(v.position[0], v.position[1], color))
+                .collect();
+        }
+    }
+    if let Some(fill) = fill_color {
+        let mut combined = shape_fill_strip(shape, fill);
+        if !combined.is_empty() && !outline.is_empty() {
+            let last = *combined.last().unwrap();
+            combined.push(last);
+            combined.push(outline[0]);
+            combined.extend_from_slice(&outline);
+            return (samples, combined);
+        }
+    }
+    (samples, outline)
+}
+
+/// Baut aus einer erkannten Form einen fertigen `Stroke` inkl. Linienstil und optionaler Füllung.
+pub fn shape_to_stroke_styled(
+    shape: RecognizedShape,
+    id: u64,
+    color: [f32; 4],
+    width_units: f32,
+    style: crate::document::LineStyle,
+    fill_color: Option<[f32; 4]>,
+) -> Stroke {
+    let (samples, vertices) = shape_to_mesh_styled(&shape, width_units, color, style, fill_color);
+    let mut stroke = Stroke::new(id, samples, vertices, color);
+    stroke.shape = Some(shape);
+    stroke.tool = crate::document::StrokeTool::Shape;
+    stroke.width = width_units;
+    stroke.line_style = style;
+    stroke.fill_color = fill_color;
+    stroke
+}
+
 /// Erzeugt dichte Abtastpunkte und ein GPU-kompatibles Triangle-Strip-Mesh für eine erkannte Form.
 pub fn shape_to_mesh(
     shape: &RecognizedShape,

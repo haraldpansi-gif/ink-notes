@@ -351,6 +351,15 @@ pub(super) fn page_thumbnail(
             border,
             egui::StrokeKind::Middle,
         );
+        if page.bookmarked {
+            painter.text(
+                egui::pos2(sheet.max.x - 9.0, sheet.min.y + 9.0),
+                egui::Align2::CENTER_CENTER,
+                "★",
+                egui::FontId::proportional(13.0),
+                egui::Color32::from_rgb(255, 200, 60),
+            );
+        }
         painter.text(
             egui::pos2(rect.center().x, rect.max.y - 8.0),
             egui::Align2::CENTER_CENTER,
@@ -374,9 +383,28 @@ pub(super) fn page_thumbnail(
 }
 /// Inhaltsverzeichnis der Seitenübersicht: alle Seiten mit Nummer und Titel, benannte
 /// Seiten hervorgehoben. Gibt die angetippte Seite zurück.
-pub(super) fn page_title_list(ui: &mut egui::Ui, notebook: &Notebook) -> Option<usize> {
+pub(super) fn page_title_list(
+    ui: &mut egui::Ui,
+    notebook: &Notebook,
+    bookmarks_only: bool,
+) -> Option<usize> {
     let mut chosen = None;
-    if notebook.pages.iter().all(|p| p.title.is_none()) {
+    let visible: Vec<(usize, &Page)> = notebook
+        .pages
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| !bookmarks_only || p.bookmarked)
+        .collect();
+    if bookmarks_only && visible.is_empty() {
+        ui.label(
+            egui::RichText::new(t!(
+                "Noch keine Lesezeichen gesetzt. Tippe oben auf ☆ oder drücke Strg+D."
+            ))
+            .color(egui::Color32::from_gray(150)),
+        );
+        return None;
+    }
+    if !bookmarks_only && notebook.pages.iter().all(|p| p.title.is_none()) {
         ui.label(
             egui::RichText::new(
                 t!("Noch keine Seite hat einen Titel. Gib oben einen Titel für die aktuelle Seite ein."),
@@ -385,14 +413,20 @@ pub(super) fn page_title_list(ui: &mut egui::Ui, notebook: &Notebook) -> Option<
         );
         ui.add_space(4.0);
     }
-    for (idx, page) in notebook.pages.iter().enumerate() {
+    for (idx, page) in visible {
         let is_current = idx == notebook.current_page_index;
+        let star = if page.bookmarked { "★ " } else { "" };
         let text = match &page.title {
-            Some(title) => egui::RichText::new(format!("{:>3}   {title}", idx + 1))
+            Some(title) => egui::RichText::new(format!("{:>3}   {star}{title}", idx + 1))
                 .strong()
                 .color(egui::Color32::WHITE),
-            None => egui::RichText::new(format!("{:>3}   –", idx + 1))
-                .color(egui::Color32::from_gray(130)),
+            None => {
+                egui::RichText::new(format!("{:>3}   {star}–", idx + 1)).color(if page.bookmarked {
+                    egui::Color32::from_rgb(255, 210, 90)
+                } else {
+                    egui::Color32::from_gray(130)
+                })
+            }
         };
         let response = ui.add_sized(
             [ui.available_width(), 32.0],

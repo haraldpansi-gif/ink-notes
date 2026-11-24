@@ -618,6 +618,26 @@ impl AppState {
                 }
             }
 
+            // Volltext-Suche öffnen: Strg + F
+            Key::Character(c) if c.eq_ignore_ascii_case("f") && ctrl => {
+                self.ui_state.close_overlays();
+                self.ui_state.is_search_open = true;
+                self.ui_state.search_focus = true;
+                if !self.ui_state.search_query.trim().is_empty() {
+                    self.ui_state.queued_actions.push(ui::UiAction::RunSearch);
+                }
+                self.window.request_redraw();
+            }
+
+            // Lesezeichen für die aktuelle Seite umschalten: Strg + D
+            Key::Character(c) if c.eq_ignore_ascii_case("d") && ctrl => {
+                let page_id = self.notebook.current_page().id;
+                self.ui_state
+                    .queued_actions
+                    .push(ui::UiAction::ToggleBookmark(page_id));
+                self.window.request_redraw();
+            }
+
             // Beenden: Strg + Q
             Key::Character(c) if c.eq_ignore_ascii_case("q") && ctrl => {
                 finish_text_edit(

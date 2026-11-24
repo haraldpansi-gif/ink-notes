@@ -184,6 +184,7 @@ mod tests {
         ("import.rs", include_str!("import.rs")),
         ("rnote.rs", include_str!("rnote.rs")),
         ("saber.rs", include_str!("saber.rs")),
+        ("search.rs", include_str!("search.rs")),
         ("xopp.rs", include_str!("xopp.rs")),
         ("nextcloud.rs", include_str!("nextcloud.rs")),
         ("cloud_sync.rs", include_str!("cloud_sync.rs")),

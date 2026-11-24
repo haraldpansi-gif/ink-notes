@@ -136,10 +136,12 @@ pub(super) fn activate_tool(tool: ActiveTool, ui_state: &mut UiState, canvas: &m
         ActiveTool::Pen | ActiveTool::Shape => {
             canvas.set_stroke_color(ui_state.pen_color);
             canvas.set_stroke_width_mm(ui_state.pen_stroke_width_mm);
+            canvas.current_line_style = ui_state.line_style;
         }
         ActiveTool::Highlighter => {
             canvas.set_stroke_color(ui_state.highlighter_color);
             canvas.set_stroke_width_mm(ui_state.highlighter_stroke_width_mm);
+            canvas.current_line_style = crate::document::LineStyle::Solid;
         }
         ActiveTool::Eraser | ActiveTool::Select | ActiveTool::Text | ActiveTool::Space => {}
     }
@@ -345,12 +347,20 @@ pub(super) fn commit_stroke_to_notebook(
     let new_id = notebook.next_stroke_id();
     let stroke_opt = if let Some(shape) = snapped_shape {
         let color = canvas.current_ink_color;
+        let style = canvas.current_line_style;
+        let fill = if ui_state.shape_fill && ui_state.active_tool != ActiveTool::Highlighter {
+            Some([color[0], color[1], color[2], 0.18])
+        } else {
+            None
+        };
         canvas.cancel_stroke();
-        Some(geometry::shape_to_stroke(
+        Some(geometry::shape_to_stroke_styled(
             shape,
             new_id,
             color,
             stroke_width,
+            style,
+            fill,
         ))
     } else {
         canvas.finish_stroke(new_id)

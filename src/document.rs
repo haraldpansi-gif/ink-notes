@@ -392,6 +392,21 @@ pub fn split_samples_at_circle(
     )
 }
 
+/// Linienstil für Freihandstriche, Lineal und erkannte Formen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub enum LineStyle {
+    #[default]
+    Solid,
+    Dashed,
+    Dotted,
+}
+
+impl LineStyle {
+    pub fn is_solid(&self) -> bool {
+        matches!(self, LineStyle::Solid)
+    }
+}
+
 /// Ein einzelner Vektor-Strich auf einer Seite.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Stroke {
@@ -404,6 +419,10 @@ pub struct Stroke {
     pub tool: StrokeTool,
     pub width: f32,
     pub finalized: bool,
+    /// Linienstil (durchgezogen, gestrichelt, gepunktet)
+    pub line_style: LineStyle,
+    /// Optionale halbtransparente Füllfarbe für geschlossene erkannte Formen
+    pub fill_color: Option<[f32; 4]>,
     /// Eingefügtes Bild (Name im Asset-Ordner, siehe `assets`). Die vier Punkte sind dann die
     /// Bildecken oben links, oben rechts, unten rechts, unten links; Verschieben, Drehen und
     /// Skalieren wirken so automatisch auch auf Bilder. Bilder liegen immer unter der Tinte.
@@ -443,6 +462,8 @@ impl Stroke {
             tool: StrokeTool::Pen,
             width: 5.0,
             finalized: true,
+            line_style: LineStyle::Solid,
+            fill_color: None,
             image: None,
             text: None,
         }
@@ -758,6 +779,8 @@ pub struct Page {
     pub pdf_background: Option<PdfBackground>,
     /// Seitentitel (Lesezeichen); auch im Manifest, damit er ohne Laden der Seite bekannt ist
     pub title: Option<String>,
+    /// Ob die Seite als Lesezeichen markiert ist (auch im Manifest gespeichert)
+    pub bookmarked: bool,
     pub vertex_cache: Vec<InkVertex>,
     pub stroke_ranges: Vec<Range<u32>>,
     pub is_dirty: bool,
@@ -777,6 +800,7 @@ impl Page {
             size: A4_SIZE,
             pdf_background: None,
             title: None,
+            bookmarked: false,
             vertex_cache: Vec::new(),
             stroke_ranges: Vec::new(),
             is_dirty: false,
@@ -796,6 +820,7 @@ impl Page {
             size: A4_SIZE,
             pdf_background: None,
             title: None,
+            bookmarked: false,
             vertex_cache: Vec::new(),
             stroke_ranges: Vec::new(),
             is_dirty: false,
@@ -1496,6 +1521,52 @@ impl Notebook {
         }
         page.title = title;
         true
+    }
+
+    /// Schaltet das Lesezeichen für die Seite `page_id` um und gibt den neuen Zustand zurück.
+    pub fn toggle_bookmark(&mut self, page_id: u64) -> Option<bool> {
+        let page = self.pages.iter_mut().find(|p| p.id == page_id)?;
+        if page.is_readonly() {
+            return None;
+        }
+        page.bookmarked = !page.bookmarked;
+        Some(page.bookmarked)
+    }
+
+    /// Verschiebt eine Seite von Index `from` an Index `to` und hält die aktuelle Seite stabil.
+    pub fn move_page(&mut self, from: usize, to: usize) -> bool {
+        if from >= self.pages.len() || to >= self.pages.len() || from == to {
+            return false;
+        }
+        let current_id = self.pages[self.current_page_index].id;
+        let page = self.pages.remove(from);
+        self.pages.insert(to, page);
+        if let Some(pos) = self.pages.iter().position(|p| p.id == current_id) {
+            self.current_page_index = pos;
+        }
+        true
+    }
+
+    /// Dupliziert die aktuelle Seite direkt dahinter (mit neuer Seiten-ID und frischen Strich-IDs)
+    /// und wechselt auf die Kopie.
+    pub fn duplicate_current_page(&mut self) -> usize {
+        let new_page_id = self.next_page_id;
+        self.next_page_id += 1;
+        let src = self.current_page().clone();
+        let mut copy = Page::new(new_page_id, src.background).with_size(src.size);
+        copy.pdf_background = src.pdf_background;
+        copy.title = src.title;
+        copy.bookmarked = src.bookmarked;
+        for mut stroke in src.strokes {
+            stroke.id = self.next_stroke_id();
+            copy.strokes.push(stroke);
+        }
+        copy.is_dirty = true;
+        copy.rebuild_cache_if_dirty();
+        let insert_idx = (self.current_page_index + 1).min(self.pages.len());
+        self.pages.insert(insert_idx, copy);
+        self.current_page_index = insert_idx;
+        insert_idx
     }
 
     /// Text für das On-Screen-Display (OSD), z. B. "Seite 3 / 12".
@@ -3035,5 +3106,43 @@ mod tests {
         let cropped = page.cropped(origin, size);
         assert_eq!(cropped.size, size);
         assert!((cropped.strokes[0].points[0].position - (from - origin)).length() < 1e-2);
+    }
+
+    #[test]
+    fn test_bookmark_move_and_duplicate_pages() {
+        let mut nb = Notebook::new();
+        let p0 = nb.pages[0].id;
+        nb.add_page(PageBackground::Blank);
+        let p1 = nb.pages[1].id;
+        nb.add_page(PageBackground::Grid5mm);
+        let p2 = nb.pages[2].id;
+
+        assert_eq!(nb.toggle_bookmark(p1), Some(true));
+        assert!(nb.pages[1].bookmarked);
+        assert_eq!(nb.toggle_bookmark(p1), Some(false));
+        assert!(!nb.pages[1].bookmarked);
+
+        // Aktuelle Seite ist p2 (Index 2); nach Index 0 verschieben
+        nb.current_page_index = 2;
+        assert!(nb.move_page(2, 0));
+        assert_eq!(nb.current_page_index, 0);
+        assert_eq!(
+            nb.pages.iter().map(|p| p.id).collect::<Vec<_>>(),
+            vec![p2, p0, p1]
+        );
+
+        // Aktuelle Seite duplizieren
+        let sid = nb.next_stroke_id();
+        nb.current_page_mut().add_stroke(line(
+            sid,
+            glam::Vec2::new(10.0, 10.0),
+            glam::Vec2::new(50.0, 50.0),
+        ));
+        let dup_idx = nb.duplicate_current_page();
+        assert_eq!(dup_idx, 1);
+        assert_eq!(nb.pages.len(), 4);
+        assert_ne!(nb.pages[1].id, nb.pages[0].id);
+        assert_eq!(nb.pages[1].strokes.len(), 1);
+        assert_ne!(nb.pages[1].strokes[0].id, nb.pages[0].strokes[0].id);
     }
 }
