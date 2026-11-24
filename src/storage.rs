@@ -77,6 +77,10 @@ pub struct StrokeData {
     /// Textfeld; die Samples sind dann die vier Ecken des Felds
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<crate::text::TextBox>,
+    /// The corners fit the field with typeset formulas (written since 0.46.0). Older versions
+    /// sized it for the LaTeX code and drop this flag when they save (Issue #61).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub typeset: bool,
 }
 
 impl From<&Stroke> for StrokeData {
@@ -91,6 +95,7 @@ impl From<&Stroke> for StrokeData {
             finalized: stroke.finalized,
             image: stroke.image.clone(),
             text: stroke.text.clone(),
+            typeset: stroke.text.is_some(),
         }
     }
 }
@@ -106,12 +111,11 @@ impl StrokeData {
             .map(StylusSample::from)
             .collect();
         if let (Some(text), [a, b, c, d, ..]) = (&self.text, stylus_samples.as_slice()) {
-            return Stroke::new_text(
-                self.id,
-                text.clone(),
-                [a.position, b.position, c.position, d.position],
-                self.color,
-            );
+            let mut corners = [a.position, b.position, c.position, d.position];
+            if !self.typeset {
+                corners = text.fit_plain_corners(corners);
+            }
+            return Stroke::new_text(self.id, text.clone(), corners, self.color);
         }
         if let Some(asset) = &self.image {
             if let [a, b, c, d, ..] = stylus_samples.as_slice() {
@@ -3149,6 +3153,54 @@ mod tests {
         assert_eq!(stroke.object_corners(), Some(corners));
         assert_eq!(stroke.color, [0.15, 0.35, 0.85, 1.0]);
         assert!(stroke.is_text() && !stroke.is_image() && stroke.vertices.is_empty());
+    }
+
+    #[test]
+    fn test_text_box_from_before_formulas_keeps_its_proportions() {
+        // Saved by 0.45: the corners fit the LaTeX code, which wraps onto more lines than
+        // the typeset formulas, so the text would be squeezed (Issue #61)
+        let text = crate::text::TextBox::new(
+            "Um den Arbeitspunkt ($I_D = 15\\,\\text{mA}$, $V_{DS} = 5\\,\\text{V}$) einzustellen, \
+             wird $R_2$ und $R_3$ ersetzt, $V_D = V^+ - V_{DS}$."
+                .into(),
+            40.0,
+            crate::text::TextFont::Sans,
+            700.0,
+        );
+        let scale = 0.5;
+        let typeset = text.box_size() * scale;
+        let mut data = StrokeData::from(&Stroke::new_text(
+            1,
+            text.clone(),
+            crate::text::frame_corners(
+                glam::Vec2::new(100.0, 200.0),
+                [glam::Vec2::X * scale, glam::Vec2::Y * scale],
+                text.box_size(),
+            ),
+            [0.0, 0.0, 0.0, 1.0],
+        ));
+        let json = serde_json::to_string(&data).unwrap();
+        assert!(json.contains("\"typeset\":true"));
+        assert_eq!(
+            data.to_stroke().object_corners().unwrap()[2],
+            glam::Vec2::new(100.0, 200.0) + typeset
+        );
+
+        // The same field as 0.45 stored it
+        let old = crate::text::frame_corners(
+            glam::Vec2::new(100.0, 200.0),
+            [glam::Vec2::X * scale, glam::Vec2::Y * scale],
+            text.box_size_with(false),
+        );
+        assert!(text.box_size_with(false).y > text.box_size().y + 40.0);
+        data.typeset = false;
+        for (sample, corner) in data.samples.iter_mut().zip(old) {
+            sample.x = corner.x;
+            sample.y = corner.y;
+        }
+        let corners = data.to_stroke().object_corners().unwrap();
+        assert_eq!(corners[0], glam::Vec2::new(100.0, 200.0));
+        assert!((corners[2] - (glam::Vec2::new(100.0, 200.0) + typeset)).length() < 1e-3);
     }
 
     #[test]

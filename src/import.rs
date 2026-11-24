@@ -199,6 +199,7 @@ pub fn ink_stroke(
         finalized: true,
         image: None,
         text: None,
+        typeset: false,
     }
 }
 
@@ -238,6 +239,7 @@ pub fn text_stroke(
         finalized: true,
         image: None,
         text: Some(text),
+        typeset: true,
     }
 }
 
@@ -253,6 +255,7 @@ pub fn image_stroke(id: u64, asset: String, corners: [glam::Vec2; 4]) -> StrokeD
         finalized: true,
         image: Some(asset),
         text: None,
+        typeset: false,
     }
 }
 

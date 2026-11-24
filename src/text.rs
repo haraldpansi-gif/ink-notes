@@ -269,11 +269,29 @@ impl TextBox {
     /// Größe des ungedrehten, unskalierten Felds in Seiteneinheiten (a formula wider than the
     /// wrap width widens the field).
     pub fn box_size(&self) -> glam::Vec2 {
-        let layout = self.layout();
+        self.box_size_with(self.shows_math())
+    }
+
+    /// Size with typeset formulas (`math`) or with the LaTeX code shown as it is.
+    pub fn box_size_with(&self, math: bool) -> glam::Vec2 {
+        let layout = self.layout_with(math);
         glam::Vec2::new(
             self.wrap_width.max(self.size).max(layout.widest()),
             layout.height(),
         )
+    }
+
+    /// Corners of this field for `corners` stored by a version before 0.46.0, which sized the
+    /// field for the LaTeX code instead of the typeset formulas (Issue #61). Position,
+    /// rotation and scale stay; only the size follows the formulas.
+    pub fn fit_plain_corners(&self, corners: [glam::Vec2; 4]) -> [glam::Vec2; 4] {
+        let plain = self.box_size_with(false);
+        let typeset = self.box_size();
+        if plain == typeset {
+            return corners;
+        }
+        let (origin, axes) = frame_axes(&corners, plain);
+        frame_corners(origin, axes, typeset)
     }
 
     /// Does this field show LaTeX formulas? Code fields (Mono) show the text as it is.
