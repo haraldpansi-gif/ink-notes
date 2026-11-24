@@ -8,16 +8,18 @@ Dieses Dokument beschreibt, wie ink-notes intern aufgebaut ist: Eingabe und Stri
 
 ## 1. Überblick
 
-ink-notes ist ein einzelnes Programm mit einem Event-Loop (`winit`) im Haupt-Thread. Dazu kommen drei Hintergrund-Threads:
+ink-notes ist ein einzelnes Programm mit einem Event-Loop (`winit 0.30` `ApplicationHandler`) im Haupt-Thread. Dazu kommen Hintergrund-Threads für Datei-I/O, Rendering, Synchronisation und Updates:
 
 | Thread | Aufgabe |
 | :--- | :--- |
 | Haupt-Thread | Eingaben, Datenmodell, Rendering (`wgpu`), Oberfläche (`egui`) |
 | Autosave | Seiten und Manifest auf die Festplatte schreiben (`autosave.rs`) |
 | PDF-Rendering | Importierte PDF-Seiten zu Texturen rendern (`pdf_doc.rs`, `hayro`) |
-| Export | PDF/PNG/SVG-Export, damit die Oberfläche nicht hängt (`app.rs`) |
+| Export | PDF/PNG/SVG-Export, damit die Oberfläche nicht hängt (`app/helpers.rs`) |
+| Nextcloud-Sync | Regelmäßiger WebDAV-Abgleich mit einem Nextcloud-Server (`cloud_sync.rs`, `nextcloud.rs`) |
+| Updater | Gitea-Releases abfragen und signierte Pakete laden (`updater.rs`) |
 
-Stifteingaben kommen über `octotablet` (Tablet-Protokoll von Wayland bzw. X11), Maus und Touch über `winit`. Die Oberfläche (Werkzeugleiste, Menüs, Dialoge, Textbearbeitung) ist mit `egui` gebaut und wird im selben Render-Durchgang über das Blatt gezeichnet.
+Stifteingaben kommen unter Linux (Wayland/X11) und Windows (Windows Ink) über `octotablet`, unter Android über gepatchte `winit`-Stiftdaten (`pen.rs`); Maus und Touch kommen über `winit`. Event-Loop und Laufzeitzustand liegen in `app.rs` (`AppState`) mit eigenen Untermodulen (`app/about_to_wait.rs`, `app/actions.rs`, `app/helpers.rs`, `app/keyboard.rs`, `app/pointer.rs`, `app/redraw.rs`). Die `egui`-Oberfläche ist in `ui.rs` sowie `ui/{dialogs,overlays,popovers,sidebar,widgets}.rs` gegliedert und wird im selben Render-Durchgang über das Blatt gezeichnet.
 
 ---
 
@@ -139,8 +141,10 @@ Alles auf einer Seite ist ein `Stroke` (`document.rs`):
 - **Formen:** zusätzlich eine `RecognizedShape` (siehe Abschnitt 6).
 - **Bilder und Textfelder:** vier Eckpunkte (oben links, oben rechts, unten rechts, unten links) plus Verweis auf die Bilddatei bzw. ein `TextBox`. Weil die Ecken normale Punkte sind, wirken Verschieben, Drehen und Skalieren der Auswahl ohne Sonderfälle.
 
-### 5.1 Textfelder
-`text.rs` setzt den Text selbst: Zeilenumbruch an Leerzeichen (zu lange Wörter zeichenweise), Unterschneidung, Tabulator = 4 Leerzeichen. Bildschirm-Textur, PDF-Export und Bearbeitung verwenden dieselben Schriften (Ubuntu Light und Hack aus den eingebauten `egui`-Schriften) und denselben Umbruch. Bearbeitet wird in einem `egui`-Textfeld an der Stelle des Felds; danach wird die Höhe des Felds an den Text angepasst, Lage, Drehung und Skalierung bleiben.
+### 5.1 Textfelder, LaTeX-Formeln und Mathe-Assistent
+`text.rs` setzt den Text selbst: Zeilenumbruch an Leerzeichen (zu lange Wörter zeichenweise), Unterschneidung, Tabulator = 4 Leerzeichen. Inline- (`$...$`) und abgesetzte (`$$...$$`) LaTeX-Formeln setzt `latex.rs` mit denselben eingebauten Schriften (Ubuntu Light und Hack aus `egui`), sodass Bildschirm-Textur und PDF-Export übereinstimmen. Bearbeitet wird in einem `egui`-Textfeld an der Stelle des Felds; danach wird die Höhe des Felds an den Text angepasst, Lage, Drehung und Skalierung bleiben.
+
+Optional erkennen `math_ink.rs`, `math_assist.rs` und `math.rs` handgeschriebene Rechenausdrücke nach einem `=` und bieten das berechnete Ergebnis zum Einfügen neben der Handschrift an.
 
 ### 5.2 Rückgängig
 Jede Seite hat einen eigenen Verlauf (`history.rs`): Hinzufügen, Entfernen, Ersetzen und Ändern von Strichen. Verschieben/Drehen/Skalieren einer Auswahl, ein Radierzug mit dem Teilstrich-Radierer und eine Textbearbeitung sind jeweils ein Schritt.
@@ -184,6 +188,7 @@ Jede Seite hat einen eigenen Verlauf (`history.rs`): Hinzufügen, Entfernen, Ers
 - `flush()` schreibt alles Ausstehende und wartet darauf. Es läuft bei `Strg + S`, beim Wechsel des Notizbuchs und beim Beenden. Schlägt es beim Beenden fehl, bleibt die App offen und bietet Wiederholen oder einen Notfall-Export der ungespeicherten Seiten an (`~/.local/share/ink-notes/recovery/`).
 - Seiten werden erst beim Anzeigen geladen (Lazy Loading); Titel, Hintergrund und Größe stehen im Manifest, damit Seitenübersicht und durchgehende Ansicht sie vorher kennen.
 - Ein zweites Fenster mit demselben Notizbuch öffnet es schreibgeschützt (Sperrdatei).
+- **Synchronisation & externe Änderungen:** `disk_watch.rs` erkennt Änderungen auf der Festplatte durch externe Sync-Clients oder den eingebauten Nextcloud-Sync (`cloud_sync.rs`, `nextcloud.rs` über Login Flow v2, WebDAV und optionales SHA-256-Zertifikat-Pinning). Manifeste und `library.json` werden zusammengeführt; bei Seitenkonflikten bleibt die fremde Fassung als eigene Konfliktseite erhalten, sodass nichts verloren geht.
 
 ---
 
@@ -201,8 +206,10 @@ Importierte PDF-Seiten werden anschließend als Form-XObject unter die Seite gel
 
 PNG und SVG einer Seite (`page_export.rs`) entstehen aus diesem PDF: `hayro` rastert es bzw. wandelt es in SVG um. So sehen alle Exporte gleich aus.
 
+**Import:** `import.rs` legt neue Notizbücher aus PDFs (`storage.rs`), Xournal++ (`xopp.rs`), Rnote (`rnote.rs`) und Saber (`saber.rs`) an – mit Größenbegrenzung nach der Dekompression zum Schutz vor Gzip-Bomben.
+
 ---
 
 ## 9. Updates
 
-`updater.rs` fragt die Gitea-Releases ab, vergleicht die Version (SemVer) und lädt auf Wunsch das passende Paket. Vor der Installation prüft er die Minisign-Signatur von `SHA256SUMS.txt` gegen den eingebauten Schlüssel und danach die SHA-256-Prüfsumme des Pakets. Ein AppImage wird per `rename` ersetzt; ein `.deb`-Paket wird mit `xdg-open` an die Softwareinstallation des Systems übergeben. Details im [README](../README.de.md#sicherheit-der-updates) unter „Sicherheit der Updates“.
+`updater.rs` fragt die Gitea-Releases ab, vergleicht die Version (SemVer) und lädt auf Wunsch das passende Paket (mit Größenlimit). Vor der Installation prüft er die Minisign-Signatur von `SHA256SUMS.txt` gegen den eingebauten Schlüssel und danach die SHA-256-Prüfsumme des Pakets. Ein AppImage oder eine portable Windows-`.exe` wird atomar per `rename` (mit Backup) ersetzt; ein `.deb`-Paket wird mit `xdg-open` an die Softwareinstallation des Systems übergeben. In Flatpak-Builds sind Selbst-Updates deaktiviert. Details im [README](../README.de.md#sicherheit-der-updates) unter „Sicherheit der Updates“.

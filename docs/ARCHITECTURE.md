@@ -8,16 +8,18 @@ This document describes how ink-notes is built internally: input and stroke proc
 
 ## 1. Overview
 
-ink-notes is a single program with an event loop (`winit`) on the main thread, plus three background threads:
+ink-notes is a single program with an event loop (`winit 0.30` `ApplicationHandler`) on the main thread, plus background threads for I/O, rendering, sync and updates:
 
 | Thread | Task |
 | :--- | :--- |
 | Main thread | Input, data model, rendering (`wgpu`), interface (`egui`) |
 | Autosave | Writes pages and manifest to disk (`autosave.rs`) |
 | PDF rendering | Renders imported PDF pages to textures (`pdf_doc.rs`, `hayro`) |
-| Export | PDF/PNG/SVG export, so the interface does not freeze (`app.rs`) |
+| Export | PDF/PNG/SVG export, so the interface does not freeze (`app/helpers.rs`) |
+| Nextcloud sync | Periodic WebDAV sync with a Nextcloud server (`cloud_sync.rs`, `nextcloud.rs`) |
+| Updater | Checks Gitea releases and downloads verified packages (`updater.rs`) |
 
-Pen input arrives via `octotablet` (the Wayland or X11 tablet protocol), mouse and touch via `winit`. The interface (toolbar, menus, dialogs, text editing) is built with `egui` and drawn over the page in the same render pass.
+Pen input arrives via `octotablet` on Linux (Wayland/X11) and Windows (Windows Ink), and via patched `winit` pen samples on Android (`pen.rs`); mouse and touch arrive via `winit`. The event loop and state live in `app.rs` (`AppState`) with dedicated submodules (`app/about_to_wait.rs`, `app/actions.rs`, `app/helpers.rs`, `app/keyboard.rs`, `app/pointer.rs`, `app/redraw.rs`). The `egui` interface is split into `ui.rs` and `ui/{dialogs,overlays,popovers,sidebar,widgets}.rs` and drawn over the page in the same render pass.
 
 ---
 
@@ -139,8 +141,10 @@ Everything on a page is a `Stroke` (`document.rs`):
 - **Shapes:** additionally a `RecognizedShape` (see section 6).
 - **Images and text boxes:** four corner points (top left, top right, bottom right, bottom left) plus a reference to the image file or a `TextBox`. Because the corners are ordinary points, moving, rotating and scaling a selection work without special cases.
 
-### 5.1 Text boxes
-`text.rs` lays out the text itself: line wrapping at spaces (overlong words character by character), kerning, tab = 4 spaces. The screen texture, the PDF export and editing use the same fonts (Ubuntu Light and Hack from the fonts built into `egui`) and the same wrapping. Editing happens in an `egui` text field at the position of the box; afterwards the box height is adapted to the text, while position, rotation and scaling stay.
+### 5.1 Text boxes, LaTeX formulas and math assistant
+`text.rs` lays out the text itself: line wrapping at spaces (overlong words character by character), kerning, tab = 4 spaces. Inline (`$...$`) and display (`$$...$$`) LaTeX formulas are parsed and laid out by `latex.rs` using the same embedded fonts (Ubuntu Light and Hack from `egui`), so screen textures and PDF exports match. Editing happens in an `egui` text field at the position of the box; afterwards the box height is adapted to the text, while position, rotation and scaling stay.
+
+Optionally, `math_ink.rs`, `math_assist.rs` and `math.rs` recognize handwritten arithmetic expressions ending in `=` and offer the computed result to insert next to the ink.
 
 ### 5.2 Undo
 Each page has its own history (`history.rs`): adding, removing, replacing and modifying strokes. Moving/rotating/scaling a selection, one stroke of the partial-stroke eraser and one text edit are each a single step.
@@ -184,6 +188,7 @@ Each page has its own history (`history.rs`): adding, removing, replacing and mo
 - `flush()` writes everything pending and waits for it. It runs on `Ctrl + S`, when switching notebooks and when quitting. If it fails when quitting, the app stays open and offers to retry or to make an emergency export of the unsaved pages (`~/.local/share/ink-notes/recovery/`).
 - Pages are only loaded when shown (lazy loading); title, background and size are in the manifest, so the page overview and the continuous view know them in advance.
 - A second window with the same notebook opens it read-only (lock file).
+- **Sync and external changes:** `disk_watch.rs` detects files updated on disk by external sync clients (or the built-in Nextcloud sync in `cloud_sync.rs` / `nextcloud.rs`, which uses Login Flow v2, WebDAV and optional SHA-256 certificate pinning). Manifests and `library.json` are merged; conflicting page edits are kept as separate conflict pages so nothing is lost.
 
 ---
 
@@ -201,8 +206,10 @@ Imported PDF pages are then placed under the page as a form XObject (`pdf_merge.
 
 PNG and SVG of a page (`page_export.rs`) are created from this PDF: `hayro` rasterizes it or converts it to SVG. This way all exports look the same.
 
+**Import:** `import.rs` creates new notebooks from PDFs (`storage.rs`), Xournal++ (`xopp.rs`), Rnote (`rnote.rs`) and Saber (`saber.rs`), with decompression size limits guarding against gzip bombs.
+
 ---
 
 ## 9. Updates
 
-`updater.rs` queries the Gitea releases, compares the version (SemVer) and downloads the matching package on request. Before installing, it verifies the Minisign signature of `SHA256SUMS.txt` against the built-in key and then the SHA-256 checksum of the package. An AppImage is replaced via `rename`; a `.deb` package is handed to the system's software installer with `xdg-open`. Details in the [README](../README.md#update-security) under "Update security".
+`updater.rs` queries the Gitea releases, compares the version (SemVer) and downloads the matching package on request (with a download size cap). Before installing, it verifies the Minisign signature of `SHA256SUMS.txt` against the built-in key and then the SHA-256 checksum of the package. An AppImage or portable Windows `.exe` is replaced atomically via `rename` (with backup); a `.deb` package is handed to the system's software installer with `xdg-open`. In Flatpak builds, self-updates are disabled. Details in the [README](../README.md#update-security) under "Update security".
