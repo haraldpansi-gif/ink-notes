@@ -34,7 +34,8 @@ jobs:
             libxcursor-dev \
             libxrandr-dev \
             libxi-dev \
-            libxkbcommon-dev
+            libxkbcommon-dev \
+            gcc-mingw-w64-x86-64
 
       - name: Setup Rust Toolchain
         uses: actions-rust-lang/setup-rust-toolchain@v1.11.0
@@ -54,3 +55,8 @@ jobs:
 
       - name: Tests
         run: cargo test
+
+      - name: Windows Cross-Compile Check
+        run: |
+          rustup target add x86_64-pc-windows-gnu
+          cargo check --target x86_64-pc-windows-gnu --locked
