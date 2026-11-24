@@ -126,6 +126,7 @@ pub fn page(
         pdf_background,
         title: None,
         bookmarked: false,
+        outline_level: 0,
         size: (size != crate::document::A4_SIZE).then(|| size.to_array()),
         strokes,
     }

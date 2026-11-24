@@ -351,8 +351,8 @@ pub fn merge_json(base: Option<&Value>, ours: &Value, theirs: &Value) -> Value {
     }
 }
 
-/// Merges two versions of a list whose elements have a key; keeps our order and puts
-/// elements only they added after their predecessor in their list.
+/// Merges two versions of a list whose elements have a key; keeps our order unless only they
+/// reordered the common elements, and puts elements only one side added after their predecessor.
 fn merge_list(
     base: Option<&Vec<Value>>,
     ours: &[Value],
@@ -361,33 +361,77 @@ fn merge_list(
 ) -> Value {
     let find = |list: &[Value], k: &Value| list.iter().find(|v| key(v) == *k).cloned();
     let base_list: &[Value] = base.map_or(&[], |b| b.as_slice());
+
+    // If only `theirs` reordered the elements that exist in base, ours and theirs, preserve
+    // their order so a concurrent metadata edit on `ours` does not silently undo a page move.
+    let use_theirs_order = if !base_list.is_empty() {
+        let common = |k: &Value| {
+            find(base_list, k).is_some() && find(ours, k).is_some() && find(theirs, k).is_some()
+        };
+        let base_order: Vec<Value> = base_list.iter().map(key).filter(&common).collect();
+        let ours_order: Vec<Value> = ours.iter().map(key).filter(&common).collect();
+        let theirs_order: Vec<Value> = theirs.iter().map(key).filter(&common).collect();
+        ours_order == base_order && theirs_order != base_order
+    } else {
+        false
+    };
+
     let mut out: Vec<Value> = Vec::new();
-    for o in ours {
-        let k = key(o);
-        let b = find(base_list, &k);
-        match find(theirs, &k) {
-            Some(t) => out.push(merge_json(b.as_ref(), o, &t)),
-            // They removed it: gone unless we changed it
-            None if b.as_ref() == Some(o) => {}
-            None => out.push(o.clone()),
+    if use_theirs_order {
+        for t in theirs {
+            let k = key(t);
+            let b = find(base_list, &k);
+            match find(ours, &k) {
+                Some(o) => out.push(merge_json(b.as_ref(), &o, t)),
+                // We removed it: gone unless they changed it
+                None if b.as_ref() == Some(t) => {}
+                None => out.push(t.clone()),
+            }
         }
-    }
-    for (i, t) in theirs.iter().enumerate() {
-        let k = key(t);
-        if out.iter().any(|v| key(v) == k) {
-            continue;
+        for (i, o) in ours.iter().enumerate() {
+            let k = key(o);
+            if out.iter().any(|v| key(v) == k) {
+                continue;
+            }
+            let in_theirs = theirs.iter().any(|v| key(v) == k);
+            let b = find(base_list, &k);
+            if in_theirs || b.as_ref() == Some(o) {
+                continue;
+            }
+            let after = ours[..i]
+                .iter()
+                .rev()
+                .find_map(|p| out.iter().position(|v| key(v) == key(p)));
+            out.insert(after.map_or(0, |pos| pos + 1), o.clone());
         }
-        let in_ours = ours.iter().any(|v| key(v) == k);
-        let b = find(base_list, &k);
-        // We removed it: gone unless they changed it
-        if in_ours || b.as_ref() == Some(t) {
-            continue;
+    } else {
+        for o in ours {
+            let k = key(o);
+            let b = find(base_list, &k);
+            match find(theirs, &k) {
+                Some(t) => out.push(merge_json(b.as_ref(), o, &t)),
+                // They removed it: gone unless we changed it
+                None if b.as_ref() == Some(o) => {}
+                None => out.push(o.clone()),
+            }
         }
-        let after = theirs[..i]
-            .iter()
-            .rev()
-            .find_map(|p| out.iter().position(|v| key(v) == key(p)));
-        out.insert(after.map_or(0, |pos| pos + 1), t.clone());
+        for (i, t) in theirs.iter().enumerate() {
+            let k = key(t);
+            if out.iter().any(|v| key(v) == k) {
+                continue;
+            }
+            let in_ours = ours.iter().any(|v| key(v) == k);
+            let b = find(base_list, &k);
+            // We removed it: gone unless they changed it
+            if in_ours || b.as_ref() == Some(t) {
+                continue;
+            }
+            let after = theirs[..i]
+                .iter()
+                .rev()
+                .find_map(|p| out.iter().position(|v| key(v) == key(p)));
+            out.insert(after.map_or(0, |pos| pos + 1), t.clone());
+        }
     }
     Value::Array(out)
 }
@@ -1525,6 +1569,46 @@ mod tests {
 
     fn page(text: &str) -> String {
         format!("{{\"text\":\"{text}\"}}")
+    }
+
+    #[test]
+    fn reordering_on_one_side_survives_metadata_edit_on_the_other() {
+        let base = serde_json::json!({
+            "pages": [
+                {"id": 1, "title": "A"},
+                {"id": 2, "title": "B"},
+                {"id": 3, "title": "C"}
+            ],
+            "page_ids": [1, 2, 3]
+        });
+        // Gerät B (ours) ändert nur den Titel von Seite 2, Reihenfolge bleibt wie in base
+        let ours = serde_json::json!({
+            "pages": [
+                {"id": 1, "title": "A"},
+                {"id": 2, "title": "B neu"},
+                {"id": 3, "title": "C"}
+            ],
+            "page_ids": [1, 2, 3]
+        });
+        // Gerät A (theirs) schiebt Seite 3 an den Anfang
+        let theirs = serde_json::json!({
+            "pages": [
+                {"id": 3, "title": "C"},
+                {"id": 1, "title": "A"},
+                {"id": 2, "title": "B"}
+            ],
+            "page_ids": [3, 1, 2]
+        });
+        let merged = merge_json(Some(&base), &ours, &theirs);
+        assert_eq!(merged["page_ids"], serde_json::json!([3, 1, 2]));
+        let ids: Vec<i64> = merged["pages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| p["id"].as_i64().unwrap())
+            .collect();
+        assert_eq!(ids, vec![3, 1, 2]);
+        assert_eq!(merged["pages"][2]["title"], "B neu");
     }
 
     #[test]

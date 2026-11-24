@@ -211,6 +211,10 @@ pub fn legacy_format_version() -> u32 {
     0
 }
 
+fn is_zero_u8(v: &u8) -> bool {
+    *v == 0
+}
+
 /// Serialisierbare semantische Seitendaten.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PageData {
@@ -227,6 +231,9 @@ pub struct PageData {
     /// Lesezeichen (steht zusätzlich im Manifest)
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub bookmarked: bool,
+    /// Gliederungsebene (0 = oberste Ebene, 1 = Unterkapitel, …)
+    #[serde(default, skip_serializing_if = "is_zero_u8")]
+    pub outline_level: u8,
     /// Seitengröße in Seiteneinheiten, wenn nicht DIN A4 hoch (steht zusätzlich im Manifest)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub size: Option<[f32; 2]>,
@@ -261,6 +268,7 @@ impl From<&Page> for PageData {
             pdf_background: page.pdf_background.clone(),
             title: page.title.clone(),
             bookmarked: page.bookmarked,
+            outline_level: page.outline_level,
             size: stored_size(page.size),
             strokes: page.strokes.iter().map(StrokeData::from).collect(),
         }
@@ -274,6 +282,7 @@ impl PageData {
         page.pdf_background = self.pdf_background.clone();
         page.title = self.title.clone();
         page.bookmarked = self.bookmarked;
+        page.outline_level = self.outline_level;
         for stroke_data in &self.strokes {
             page.strokes.push(stroke_data.to_stroke());
         }
@@ -296,6 +305,9 @@ pub struct PageMeta {
     /// Ob die Seite als Lesezeichen markiert ist
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub bookmarked: bool,
+    /// Gliederungsebene (0 = oberste Ebene, 1 = Unterkapitel, …)
+    #[serde(default, skip_serializing_if = "is_zero_u8")]
+    pub outline_level: u8,
     /// Seitengröße, wenn nicht DIN A4 hoch (für Lage und Maßstab ungeladener Seiten)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub size: Option<[f32; 2]>,
@@ -308,6 +320,7 @@ impl PageMeta {
             background,
             title: None,
             bookmarked: false,
+            outline_level: 0,
             size: None,
         }
     }
@@ -418,6 +431,7 @@ impl NotebookManifest {
                 background: Some(p.background),
                 title: p.title.clone(),
                 bookmarked: p.bookmarked,
+                outline_level: p.outline_level,
                 size: stored_size(p.size),
             })
             .collect();
@@ -1085,13 +1099,13 @@ pub fn load_notebook(notebook_dir: &Path) -> Result<(Notebook, NotebookManifest)
         if page.title.is_none() {
             page.title = manifest.title_for_page(page.id);
         }
-        if !page.bookmarked
-            && manifest
-                .pages
-                .iter()
-                .any(|m| m.id == page.id && m.bookmarked)
-        {
-            page.bookmarked = true;
+        if let Some(meta) = manifest.pages.iter().find(|m| m.id == page.id) {
+            if !page.bookmarked && meta.bookmarked {
+                page.bookmarked = true;
+            }
+            if page.outline_level == 0 && meta.outline_level > 0 {
+                page.outline_level = meta.outline_level;
+            }
         }
     }
 
@@ -1134,9 +1148,13 @@ pub fn ensure_page_loaded(
         Ok(data) => {
             let title = notebook.pages[page_idx].title.take();
             let bookmarked = notebook.pages[page_idx].bookmarked;
+            let outline_level = notebook.pages[page_idx].outline_level;
             let mut page = data.to_page();
             page.title = page.title.or(title);
             page.bookmarked = page.bookmarked || bookmarked;
+            if page.outline_level == 0 {
+                page.outline_level = outline_level;
+            }
             notebook.pages[page_idx] = page;
             Ok(())
         }
@@ -1146,6 +1164,7 @@ pub fn ensure_page_loaded(
             let mut page = Page::new(page_id, placeholder.background).with_size(placeholder.size);
             page.title = placeholder.title.take();
             page.bookmarked = placeholder.bookmarked;
+            page.outline_level = placeholder.outline_level;
             *placeholder = page;
             Ok(())
         }
@@ -1581,7 +1600,7 @@ pub fn create_notebook_from_pdf(
         let asset = crate::assets::AssetStore::new(&dir)
             .import_pdf(&pdf_bytes)
             .map_err(|e| e.to_string())?;
-        let pages: Vec<Page> = sizes
+        let mut pages: Vec<Page> = sizes
             .iter()
             .enumerate()
             .map(|(i, &(width_pt, height_pt))| {
@@ -1596,6 +1615,16 @@ pub fn create_notebook_from_pdf(
                 page
             })
             .collect();
+        // PDF-Gliederung (/Outlines) als Seitentitel + Lesezeichen (inkl. Verschachtelung) übernehmen
+        for (page_idx, outline_title, level) in crate::pdf_doc::extract_outlines(&pdf_bytes) {
+            if let Some(page) = pages.get_mut(page_idx) {
+                if page.title.is_none() {
+                    page.title = Some(outline_title);
+                    page.bookmarked = true;
+                    page.outline_level = level;
+                }
+            }
+        }
         let page_count = pages.len() as u64;
         let notebook = Notebook::from_pages(pages, 0, 1, page_count + 1);
         let mut manifest = load_manifest(&dir).map_err(|e| e.to_string())?;

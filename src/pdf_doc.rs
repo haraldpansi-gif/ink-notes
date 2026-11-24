@@ -114,6 +114,33 @@ pub fn render_file_page(
     guarded(|| render_page(&open(bytes)?, index, max_pixels))
 }
 
+/// Liest die eingebettete PDF-Gliederung (`/Outlines`) als `(page_index_0_based, title, level)`.
+///
+/// `level` beginnt bei `0` für oberste Kapitel und wird auf maximal `4` begrenzt. Bei fehlender
+/// Gliederung oder defektem PDF wird eine leere Liste zurückgegeben.
+pub fn extract_outlines(pdf_bytes: &[u8]) -> Vec<(usize, String, u8)> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let Ok(doc) = lopdf::Document::load_mem(pdf_bytes) else {
+            return Vec::new();
+        };
+        let Ok(toc) = doc.get_toc() else {
+            return Vec::new();
+        };
+        toc.toc
+            .into_iter()
+            .filter_map(|entry| {
+                if entry.page == 0 {
+                    return None;
+                }
+                let title = crate::document::normalize_page_title(&entry.title)?;
+                let depth = entry.level.saturating_sub(1).min(4) as u8;
+                Some((entry.page - 1, title, depth))
+            })
+            .collect()
+    }))
+    .unwrap_or_default()
+}
+
 struct RenderRequest {
     key: String,
     path: PathBuf,
@@ -563,5 +590,80 @@ pub(crate) mod tests {
         assert_eq!(parse_page_key("abc.pdf#3@5120"), Some(("abc.pdf", 3, 5120)));
         assert_eq!(parse_page_key("abc.png"), None);
         assert_eq!(parse_page_key("abc.pdf#x"), None);
+    }
+
+    #[test]
+    fn test_extract_pdf_outlines_nested() {
+        use lopdf::dictionary;
+
+        let mut doc = lopdf::Document::with_version("1.5");
+        let pages_id = doc.new_object_id();
+        let page1_id = doc.add_object(dictionary! {
+            "Type" => "Page",
+            "Parent" => pages_id,
+            "MediaBox" => vec![0.into(), 0.into(), 595.into(), 842.into()],
+        });
+        let page2_id = doc.add_object(dictionary! {
+            "Type" => "Page",
+            "Parent" => pages_id,
+            "MediaBox" => vec![0.into(), 0.into(), 595.into(), 842.into()],
+        });
+        doc.objects.insert(
+            pages_id,
+            lopdf::Object::Dictionary(dictionary! {
+                "Type" => "Pages",
+                "Kids" => vec![page1_id.into(), page2_id.into()],
+                "Count" => 2,
+            }),
+        );
+
+        let outlines_id = doc.new_object_id();
+        let ch1_id = doc.new_object_id();
+        let sub1_id = doc.new_object_id();
+        doc.objects.insert(
+            sub1_id,
+            lopdf::Object::Dictionary(dictionary! {
+                "Title" => lopdf::Object::string_literal("1.1 Grundlagen"),
+                "Parent" => ch1_id,
+                "Dest" => vec![page2_id.into(), "Fit".into()],
+            }),
+        );
+        doc.objects.insert(
+            ch1_id,
+            lopdf::Object::Dictionary(dictionary! {
+                "Title" => lopdf::Object::string_literal("1 Einleitung"),
+                "Parent" => outlines_id,
+                "First" => sub1_id,
+                "Last" => sub1_id,
+                "Count" => 1,
+                "Dest" => vec![page1_id.into(), "Fit".into()],
+            }),
+        );
+        doc.objects.insert(
+            outlines_id,
+            lopdf::Object::Dictionary(dictionary! {
+                "Type" => "Outlines",
+                "First" => ch1_id,
+                "Last" => ch1_id,
+                "Count" => 2,
+            }),
+        );
+        let catalog_id = doc.add_object(dictionary! {
+            "Type" => "Catalog",
+            "Pages" => pages_id,
+            "Outlines" => outlines_id,
+        });
+        doc.trailer.set("Root", catalog_id);
+
+        let mut bytes = Vec::new();
+        doc.save_to(&mut bytes).unwrap();
+        let outlines = extract_outlines(&bytes);
+        assert_eq!(
+            outlines,
+            vec![
+                (0, "1 Einleitung".to_string(), 0),
+                (1, "1.1 Grundlagen".to_string(), 1),
+            ]
+        );
     }
 }

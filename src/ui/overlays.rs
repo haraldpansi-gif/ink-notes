@@ -415,18 +415,19 @@ pub(super) fn page_title_list(
     }
     for (idx, page) in visible {
         let is_current = idx == notebook.current_page_index;
+        let indent = "  ".repeat((page.outline_level as usize).min(4));
         let star = if page.bookmarked { "★ " } else { "" };
         let text = match &page.title {
-            Some(title) => egui::RichText::new(format!("{:>3}   {star}{title}", idx + 1))
+            Some(title) => egui::RichText::new(format!("{:>3}   {indent}{star}{title}", idx + 1))
                 .strong()
                 .color(egui::Color32::WHITE),
-            None => {
-                egui::RichText::new(format!("{:>3}   {star}–", idx + 1)).color(if page.bookmarked {
+            None => egui::RichText::new(format!("{:>3}   {indent}{star}–", idx + 1)).color(
+                if page.bookmarked {
                     egui::Color32::from_rgb(255, 210, 90)
                 } else {
                     egui::Color32::from_gray(130)
-                })
-            }
+                },
+            ),
         };
         let response = ui.add_sized(
             [ui.available_width(), 32.0],

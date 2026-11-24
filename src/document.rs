@@ -781,6 +781,8 @@ pub struct Page {
     pub title: Option<String>,
     /// Ob die Seite als Lesezeichen markiert ist (auch im Manifest gespeichert)
     pub bookmarked: bool,
+    /// Gliederungsebene im Inhaltsverzeichnis (0 = Kapitel, 1 = Unterkapitel, …)
+    pub outline_level: u8,
     pub vertex_cache: Vec<InkVertex>,
     pub stroke_ranges: Vec<Range<u32>>,
     pub is_dirty: bool,
@@ -801,6 +803,7 @@ impl Page {
             pdf_background: None,
             title: None,
             bookmarked: false,
+            outline_level: 0,
             vertex_cache: Vec::new(),
             stroke_ranges: Vec::new(),
             is_dirty: false,
@@ -821,6 +824,7 @@ impl Page {
             pdf_background: None,
             title: None,
             bookmarked: false,
+            outline_level: 0,
             vertex_cache: Vec::new(),
             stroke_ranges: Vec::new(),
             is_dirty: false,
@@ -1557,6 +1561,7 @@ impl Notebook {
         copy.pdf_background = src.pdf_background;
         copy.title = src.title;
         copy.bookmarked = src.bookmarked;
+        copy.outline_level = src.outline_level;
         for mut stroke in src.strokes {
             stroke.id = self.next_stroke_id();
             copy.strokes.push(stroke);
