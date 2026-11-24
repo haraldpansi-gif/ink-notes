@@ -1,12 +1,26 @@
-//! Volltext-Suche über Notizbuch-Titel, Seitentitel und Textfelder (inkl. LaTeX-Code).
+//! Volltext-Suche über Notizbuch-Titel, Seitentitel, Textfelder (inkl. LaTeX-Code) und den Text
+//! importierter PDF-Seiten.
 //!
 //! Durchsucht wahlweise das aktuelle Notizbuch (direkt im Speicher, inkl. ungespeicherter
-//! Änderungen) oder alle gespeicherten Notizbücher im Speicherordner.
+//! Änderungen) oder alle gespeicherten Notizbücher im Speicherordner. PDF-Text wird pro PDF-Datei
+//! einmalig mit `lopdf` extrahiert und im Speicher gecacht.
 
-use std::path::Path;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 
-use crate::document::Notebook;
+use crate::assets::AssetStore;
+use crate::document::{Notebook, PdfBackground};
 use crate::storage;
+
+/// Größte PDF-Datei, aus der Text für die Suche extrahiert wird (128 MiB).
+const MAX_PDF_SEARCH_BYTES: u64 = 128 * 1024 * 1024;
+/// Maximale dekomprimierte Stream-Größe pro PDF-Seite bei der Text-Extraktion (4 MiB).
+const MAX_PDF_PAGE_DECOMPRESSED_BYTES: usize = 4 * 1024 * 1024;
+/// Höchstzahl gleichzeitig im Speicher gecachter PDF-Texte.
+const MAX_CACHED_PDFS: usize = 32;
+
+static PDF_TEXT_CACHE: OnceLock<Mutex<HashMap<PathBuf, Vec<String>>>> = OnceLock::new();
 
 /// Suchbereich im Such-Dialog.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -46,8 +60,91 @@ fn make_snippet(haystack: &str, needle_lower: &str) -> Option<String> {
     Some(out.trim().to_string())
 }
 
-/// Durchsucht das aktuell geöffnete Notizbuch (Seitentitel + Textfelder, für ungeladene Seiten
-/// direkt aus `page_<id>.json`).
+/// Extrahiert den Text aller Seiten einer PDF-Datei (0-basiert) sicher mit Größenlimit und
+/// Panic-Schutz. Bei Fehlern wird ein leerer Vektor zurückgegeben.
+fn extract_pdf_pages_text(path: &Path) -> Vec<String> {
+    if std::fs::metadata(path)
+        .map(|m| m.len() > MAX_PDF_SEARCH_BYTES)
+        .unwrap_or(true)
+    {
+        return Vec::new();
+    }
+    let path_owned = path.to_path_buf();
+    std::panic::catch_unwind(move || {
+        let Ok(doc) = lopdf::Document::load(&path_owned) else {
+            return Vec::new();
+        };
+        let page_count = doc.get_pages().len() as u32;
+        (1..=page_count)
+            .map(|page_num| {
+                doc.extract_text_with_limit(&[page_num], MAX_PDF_PAGE_DECOMPRESSED_BYTES)
+                    .unwrap_or_default()
+            })
+            .collect()
+    })
+    .unwrap_or_default()
+}
+
+/// Liefert den gecachten Text einer einzelnen 0-basierten PDF-Seite im Asset-Ordner von `nb_dir`.
+fn pdf_page_text(nb_dir: &Path, pdf: &PdfBackground) -> Option<String> {
+    let path = AssetStore::new(nb_dir).path_of(&pdf.asset).ok()?;
+    let cache = PDF_TEXT_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Ok(guard) = cache.lock() {
+        if let Some(pages) = guard.get(&path) {
+            return pages
+                .get(pdf.page as usize)
+                .filter(|s| !s.is_empty())
+                .cloned();
+        }
+    }
+    let extracted = extract_pdf_pages_text(&path);
+    let result = extracted
+        .get(pdf.page as usize)
+        .filter(|s| !s.is_empty())
+        .cloned();
+    if let Ok(mut guard) = cache.lock() {
+        if guard.len() >= MAX_CACHED_PDFS {
+            guard.clear();
+        }
+        guard.insert(path, extracted);
+    }
+    result
+}
+
+/// Durchsucht den Text einer optionalen PDF-Hintergrundseite und ergänzt ggf. einen Treffer.
+#[allow(clippy::too_many_arguments)]
+fn search_pdf_background(
+    hits: &mut Vec<SearchHit>,
+    max_hits: usize,
+    nb_dir: &Path,
+    notebook_id: &str,
+    notebook_title: &str,
+    page_index: usize,
+    page_id: u64,
+    pdf: Option<&PdfBackground>,
+    needle: &str,
+) {
+    if hits.len() >= max_hits {
+        return;
+    }
+    let Some(pdf) = pdf else {
+        return;
+    };
+    if let Some(text) = pdf_page_text(nb_dir, pdf) {
+        if let Some(snippet) = make_snippet(&text, needle) {
+            hits.push(SearchHit {
+                notebook_id: notebook_id.to_string(),
+                notebook_title: notebook_title.to_string(),
+                page_index,
+                page_id,
+                snippet: format!("PDF: {snippet}"),
+            });
+        }
+    }
+}
+
+/// Durchsucht das aktuell geöffnete Notizbuch (Seitentitel, Textfelder und PDF-Hintergründe;
+/// für ungeladene Seiten direkt aus `page_<id>.json`).
 pub fn search_notebook(
     notebook_id: &str,
     notebook_title: &str,
@@ -97,6 +194,17 @@ pub fn search_notebook(
                     }
                 }
             }
+            search_pdf_background(
+                &mut hits,
+                max_hits,
+                storage_dir,
+                notebook_id,
+                notebook_title,
+                page_index,
+                page.id,
+                page.pdf_background.as_ref(),
+                &needle,
+            );
         } else if let Ok(data) = storage::load_page(storage_dir, page.id) {
             for stroke in &data.strokes {
                 if let Some(text) = &stroke.text {
@@ -114,6 +222,17 @@ pub fn search_notebook(
                     }
                 }
             }
+            search_pdf_background(
+                &mut hits,
+                max_hits,
+                storage_dir,
+                notebook_id,
+                notebook_title,
+                page_index,
+                page.id,
+                data.pdf_background.as_ref(),
+                &needle,
+            );
         }
     }
 
@@ -214,6 +333,17 @@ pub fn search_all_notebooks(
                         }
                     }
                 }
+                search_pdf_background(
+                    &mut hits,
+                    max_hits,
+                    &nb_dir,
+                    &summary.id,
+                    &manifest.title,
+                    page_index,
+                    page_id,
+                    data.pdf_background.as_ref(),
+                    &needle,
+                );
             }
         }
     }
@@ -280,5 +410,77 @@ mod tests {
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].notebook_id, m_a.id);
         assert_eq!(hits[0].page_index, 0);
+    }
+
+    #[test]
+    fn test_search_finds_text_in_imported_pdf_background() {
+        use lopdf::dictionary;
+
+        let dir = tempfile::tempdir().unwrap();
+        // Minimales echtes PDF mit Text über lopdf erzeugen
+        let mut doc = lopdf::Document::with_version("1.5");
+        let pages_id = doc.new_object_id();
+        let font_id = doc.add_object(dictionary! {
+            "Type" => "Font",
+            "Subtype" => "Type1",
+            "BaseFont" => "Helvetica",
+        });
+        let resources_id = doc.add_object(dictionary! {
+            "Font" => dictionary! { "F1" => font_id },
+        });
+        let content = lopdf::content::Content {
+            operations: vec![
+                lopdf::content::Operation::new("BT", vec![]),
+                lopdf::content::Operation::new("Tf", vec!["F1".into(), 12.into()]),
+                lopdf::content::Operation::new("Td", vec![50.into(), 700.into()]),
+                lopdf::content::Operation::new(
+                    "Tj",
+                    vec![lopdf::Object::string_literal("Kirchhoffsche Maschenregel")],
+                ),
+                lopdf::content::Operation::new("ET", vec![]),
+            ],
+        };
+        let content_id = doc.add_object(lopdf::Stream::new(
+            dictionary! {},
+            content.encode().unwrap(),
+        ));
+        let page_id = doc.add_object(dictionary! {
+            "Type" => "Page",
+            "Parent" => pages_id,
+            "Contents" => content_id,
+            "Resources" => resources_id,
+            "MediaBox" => vec![0.into(), 0.into(), 595.into(), 842.into()],
+        });
+        doc.objects.insert(
+            pages_id,
+            lopdf::Object::Dictionary(dictionary! {
+                "Type" => "Pages",
+                "Kids" => vec![page_id.into()],
+                "Count" => 1,
+            }),
+        );
+        let catalog_id = doc.add_object(dictionary! {
+            "Type" => "Catalog",
+            "Pages" => pages_id,
+        });
+        doc.trailer.set("Root", catalog_id);
+
+        let mut pdf_bytes = Vec::new();
+        doc.save_to(&mut pdf_bytes).unwrap();
+        let asset_name = AssetStore::new(dir.path()).import_pdf(&pdf_bytes).unwrap();
+
+        let mut nb = Notebook::new();
+        nb.pages[0].pdf_background = Some(PdfBackground {
+            asset: asset_name,
+            page: 0,
+            width_pt: 595.0,
+            height_pt: 842.0,
+        });
+
+        let hits = search_notebook("nb1", "ET", &nb, dir.path(), "maschenregel", 20);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].page_index, 0);
+        assert!(hits[0].snippet.starts_with("PDF: "));
+        assert!(hits[0].snippet.contains("Maschenregel"));
     }
 }

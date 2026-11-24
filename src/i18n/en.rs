@@ -405,7 +405,7 @@ pub const EN: &[(&str, &str)] = &[
     ("Keine Treffer gefunden.", "No matches found."),
     ("Suchbegriff eingeben (Strg+F).", "Enter search term (Ctrl+F)."),
     ("Suchen", "Search"),
-    ("Titel, Text oder LaTeX suchen …", "Search titles, text or LaTeX …"),
+    ("Titel, Text, LaTeX oder PDF suchen …", "Search titles, text, LaTeX or PDF …"),
     ("🔍 Suchen", "🔍 Search"),
     ("🔍 Suchen (Strg+F)", "🔍 Search (Ctrl+F)"),
     ("Wähle Objekte mit dem Lasso aus und speichere sie als Stempel.", "Select objects with the lasso and save them as a stamp."),

@@ -28,7 +28,7 @@ pub(super) fn render_dialogs(
             }
             let edit = ui.add(
                 egui::TextEdit::singleline(&mut state.search_query)
-                    .hint_text(t!("Titel, Text oder LaTeX suchen …"))
+                    .hint_text(t!("Titel, Text, LaTeX oder PDF suchen …"))
                     .desired_width(f32::INFINITY)
                     .margin(egui::vec2(8.0, 8.0)),
             );
