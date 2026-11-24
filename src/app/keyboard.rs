@@ -596,6 +596,28 @@ impl AppState {
                 self.window.request_redraw();
             }
 
+            // Zwischen offenen Notizbuch-Tabs wechseln: Strg+Tab / Strg+Umschalt+Tab
+            Key::Named(NamedKey::Tab) if ctrl => {
+                let delta = if shift { -1 } else { 1 };
+                if let Some(next_id) = self.ui_state.adjacent_tab(delta) {
+                    self.ui_state
+                        .queued_actions
+                        .push(ui::UiAction::OpenNotebook(next_id));
+                    self.window.request_redraw();
+                }
+            }
+
+            // Aktuellen Notizbuch-Tab schließen: Strg+W (ab 2 offenen Tabs)
+            Key::Character(c) if c.eq_ignore_ascii_case("w") && ctrl => {
+                if self.ui_state.open_tabs.len() >= 2 {
+                    let current = self.manifest.id.clone();
+                    self.ui_state
+                        .queued_actions
+                        .push(ui::UiAction::CloseTab(current));
+                    self.window.request_redraw();
+                }
+            }
+
             // Beenden: Strg + Q
             Key::Character(c) if c.eq_ignore_ascii_case("q") && ctrl => {
                 finish_text_edit(

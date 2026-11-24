@@ -221,6 +221,9 @@ pub const MAX_STYLUS_BUTTONS: usize = 4;
 /// How many own colors fit under the presets of the color popovers (two rows)
 pub const MAX_SAVED_COLORS: usize = 12;
 
+/// Höchstens so viele geöffnete Notizbuch-Tabs werden gemerkt.
+pub const MAX_OPEN_TABS: usize = 8;
+
 /// Benutzereinstellungen der Oberfläche.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -266,6 +269,8 @@ pub struct UiSettings {
     /// Background of new pages and notebooks: the one chosen last (Issue #60). Until one is
     /// chosen, a new page takes the background of the current one.
     pub page_background: Option<PageBackground>,
+    /// Geöffnete Notizbuch-Tabs für den Schnellwechsel (Notizbuch-Kennungen).
+    pub open_tabs: Vec<String>,
 }
 
 impl Default for UiSettings {
@@ -297,6 +302,7 @@ impl Default for UiSettings {
             touch_draw: cfg!(target_os = "android"),
             saved_colors: Vec::new(),
             page_background: None,
+            open_tabs: Vec::new(),
         }
     }
 }
@@ -450,6 +456,7 @@ mod tests {
             touch_draw: true,
             saved_colors: vec![[0.2, 0.4, 0.6], [1.0, 0.5, 0.0]],
             page_background: Some(PageBackground::DotGrid),
+            open_tabs: vec!["nb_1".to_string(), "nb_2".to_string()],
         };
         settings.save_to(&path).unwrap();
         assert_eq!(UiSettings::load_from(&path), settings);

@@ -18,6 +18,7 @@ pub(super) struct SidebarAnchors {
     pub eraser_btn_rect: Option<egui::Rect>,
     pub high_btn_rect: Option<egui::Rect>,
     pub text_color_btn_rect: Option<egui::Rect>,
+    pub stamps_btn_rect: Option<egui::Rect>,
     pub more_btn_rect: Option<egui::Rect>,
     pub page_btn_rect: Option<egui::Rect>,
 }
@@ -34,6 +35,7 @@ pub(super) fn render_sidebar(
     let mut eraser_btn_rect = None;
     let mut high_btn_rect = None;
     let mut text_color_btn_rect = None;
+    let mut stamps_btn_rect = None;
     let mut more_btn_rect = None;
     let mut page_btn_rect = None;
 
@@ -275,6 +277,23 @@ pub(super) fn render_sidebar(
                                     .clicked()
                                     {
                                         state.toggle_ruler();
+                                    }
+
+                                    // --- Stempel / wiederverwendbare Elemente ---
+                                    let stamps_resp = sidebar_button(
+                                        ui,
+                                        btn,
+                                        SidebarIcon::Glyph("📌"),
+                                        state.is_stamps_menu_open,
+                                        true,
+                                        None,
+                                        t!("Stempel & wiederverwendbare Elemente"),
+                                    );
+                                    stamps_btn_rect = Some(stamps_resp.rect);
+                                    if stamps_resp.clicked() {
+                                        let open = !state.is_stamps_menu_open;
+                                        state.close_overlays();
+                                        state.is_stamps_menu_open = open;
                                     }
 
                                     // --- Stifte bzw. Farben des aktiven Werkzeugs ---
@@ -674,6 +693,7 @@ pub(super) fn render_sidebar(
         eraser_btn_rect,
         high_btn_rect,
         text_color_btn_rect,
+        stamps_btn_rect,
         more_btn_rect,
         page_btn_rect,
     }

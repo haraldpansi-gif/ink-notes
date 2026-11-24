@@ -628,7 +628,10 @@ impl AppState {
         ui_state.current_notebook_id = manifest.id.clone();
         ui_state.document_title = manifest.title.clone();
         ui_state.available_notebooks = available_notebooks;
+        ui_state.open_tabs = ui_settings.open_tabs.clone();
+        ui_state.prune_tabs();
         ui_state.library = Library::load(&storage_base_dir);
+        ui_state.stamps = crate::stamps::StampLibrary::load(&storage_base_dir);
         ui_state.storage_dir = storage_base_dir.clone();
         ui_state.storage_dir_custom = ui_settings.storage_dir.is_some();
         // Built-in Nextcloud sync of the storage folder (Issue #49, stage 2)

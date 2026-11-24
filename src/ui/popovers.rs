@@ -387,6 +387,183 @@ pub(super) fn render_popovers(
         }
     }
 
+    // 2a. STEMPEL-POPOVER (wiederverwendbare Elemente)
+    if state.is_stamps_menu_open {
+        if let Some(btn_rect) = anchors.stamps_btn_rect {
+            let (popover_pos, pivot) =
+                popover_placement(state.sidebar_side, anchors.toolbar_rect, btn_rect);
+            let mut close_after = false;
+            let pop_response = egui::Area::new(egui::Id::unique("stamps_popover"))
+                .fixed_pos(popover_pos)
+                .pivot(pivot)
+                .constrain(true)
+                .order(egui::Order::Foreground)
+                .show(ctx, |ui| {
+                    let frame = popover_frame().show(ui, |ui| {
+                        ui.set_width(310.0);
+                        touch_friendly_spacing(ui);
+
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                egui::RichText::new(t!("Stempel"))
+                                    .strong()
+                                    .color(egui::Color32::WHITE)
+                                    .size(13.0),
+                            );
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if close_button(ui).clicked() {
+                                        close_after = true;
+                                    }
+                                },
+                            );
+                        });
+
+                        ui.add_space(6.0);
+
+                        if state.selection_aspect_lock.is_some() {
+                            ui.horizontal(|ui| {
+                                let edit = ui.add_sized(
+                                    egui::vec2(175.0, 28.0),
+                                    egui::TextEdit::singleline(&mut state.stamp_name_input)
+                                        .hint_text(t!("Name (optional)")),
+                                );
+                                let enter = edit.lost_focus()
+                                    && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                                if ui
+                                    .button(t!("Speichern"))
+                                    .on_hover_text(t!("Auswahl als Stempel speichern"))
+                                    .clicked()
+                                    || enter
+                                {
+                                    let name = std::mem::take(&mut state.stamp_name_input);
+                                    let opt = (!name.trim().is_empty()).then_some(name);
+                                    actions.push(UiAction::SaveSelectionAsStamp(opt));
+                                }
+                            });
+                            ui.add_space(6.0);
+                        }
+
+                        if state.stamps.stamps.is_empty() {
+                            ui.label(
+                                egui::RichText::new(t!(
+                                    "Wähle Objekte mit dem Lasso aus und speichere sie als Stempel."
+                                ))
+                                .size(12.0)
+                                .color(egui::Color32::from_gray(175)),
+                            );
+                        } else {
+                            let stamps_snapshot: Vec<_> = state.stamps.stamps.clone();
+                            let paper = state.paper_theme;
+                            let adapt = state.adapt_ink_colors;
+                            egui::ScrollArea::vertical()
+                                .id_salt("stamps_popover_scroll")
+                                .max_height(320.0)
+                                .show(ui, |ui| {
+                                    egui::Grid::new("stamps_grid")
+                                        .num_columns(3)
+                                        .spacing(egui::vec2(8.0, 8.0))
+                                        .show(ui, |ui| {
+                                            for (idx, stamp) in stamps_snapshot.iter().enumerate() {
+                                                ui.vertical(|ui| {
+                                                    ui.set_width(90.0);
+                                                    let (rect, resp) = ui.allocate_exact_size(
+                                                        egui::vec2(90.0, 62.0),
+                                                        egui::Sense::click(),
+                                                    );
+                                                    let shapes =
+                                                        crate::stamps::stamp_thumbnail_shapes(
+                                                            stamp, rect, paper, adapt,
+                                                        );
+                                                    ui.painter().extend(shapes);
+                                                    let stroke_color = if resp.hovered() {
+                                                        egui::Color32::from_rgb(120, 175, 255)
+                                                    } else {
+                                                        egui::Color32::from_rgba_unmultiplied(
+                                                            255, 255, 255, 45,
+                                                        )
+                                                    };
+                                                    ui.painter().rect_stroke(
+                                                        rect,
+                                                        egui::CornerRadius::same(4),
+                                                        egui::Stroke::new(1.2, stroke_color),
+                                                        egui::StrokeKind::Inside,
+                                                    );
+                                                    if resp
+                                                        .on_hover_text(t!(
+                                                            "Stempel '{name}' einfügen",
+                                                            name = stamp.name
+                                                        ))
+                                                        .clicked()
+                                                    {
+                                                        actions.push(UiAction::InsertStamp(
+                                                            stamp.id.clone(),
+                                                        ));
+                                                        close_after = true;
+                                                    }
+
+                                                    ui.horizontal(|ui| {
+                                                        ui.spacing_mut().item_spacing.x = 2.0;
+                                                        let short = super::tabs::truncate_tab_title(
+                                                            &stamp.name,
+                                                            10,
+                                                        );
+                                                        ui.label(
+                                                            egui::RichText::new(short)
+                                                                .size(11.0)
+                                                                .color(egui::Color32::from_gray(
+                                                                    220,
+                                                                )),
+                                                        )
+                                                        .on_hover_text(&stamp.name);
+                                                        ui.with_layout(
+                                                            egui::Layout::right_to_left(
+                                                                egui::Align::Center,
+                                                            ),
+                                                            |ui| {
+                                                                if ui
+                                                                    .add(
+                                                                        egui::Button::new(
+                                                                            egui::RichText::new(
+                                                                                "🗑",
+                                                                            )
+                                                                            .size(11.0),
+                                                                        )
+                                                                        .frame(false),
+                                                                    )
+                                                                    .on_hover_text(t!(
+                                                                        "Stempel löschen"
+                                                                    ))
+                                                                    .clicked()
+                                                                {
+                                                                    actions.push(
+                                                                        UiAction::DeleteStamp(
+                                                                            stamp.id.clone(),
+                                                                        ),
+                                                                    );
+                                                                }
+                                                            },
+                                                        );
+                                                    });
+                                                });
+                                                if (idx + 1) % 3 == 0 {
+                                                    ui.end_row();
+                                                }
+                                            }
+                                        });
+                                });
+                        }
+                    });
+                    frame.response.rect
+                });
+            popover_rect = Some(pop_response.inner);
+            if close_after {
+                state.is_stamps_menu_open = false;
+            }
+        }
+    }
+
     // 2b. ☰-MENÜ (selten genutzte Funktionen), öffnet sich nach oben zur Blattseite hin
     if state.is_more_menu_open {
         if let Some(btn_rect) = anchors.more_btn_rect {
@@ -920,6 +1097,7 @@ pub(super) fn render_popovers(
         || state.is_eraser_menu_open
         || state.is_highlighter_menu_open
         || state.is_text_color_menu_open
+        || state.is_stamps_menu_open
         || state.is_more_menu_open
         || state.show_page_jump_popup)
         && ctx.input(|i| i.pointer.any_pressed())
@@ -932,6 +1110,7 @@ pub(super) fn render_popovers(
                 state.is_eraser_menu_open = false;
                 state.is_highlighter_menu_open = false;
                 state.is_text_color_menu_open = false;
+                state.is_stamps_menu_open = false;
                 state.is_more_menu_open = false;
                 state.show_page_jump_popup = false;
             }

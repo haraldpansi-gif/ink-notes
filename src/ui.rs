@@ -28,6 +28,7 @@ mod dialogs;
 mod overlays;
 mod popovers;
 mod sidebar;
+mod tabs;
 mod widgets;
 
 pub use overlays::page_thumbnail_shapes;
@@ -277,8 +278,16 @@ pub enum UiAction {
     RotateSelected,
     /// Seitenverhältnis beim Skalieren der Auswahl sperren bzw. freigeben
     ToggleAspectLock,
+    /// Aktuelle Auswahl als wiederverwendbaren Stempel speichern (optionaler Name)
+    SaveSelectionAsStamp(Option<String>),
+    /// Gespeicherten Stempel per ID in der Blattmitte einfügen
+    InsertStamp(String),
+    /// Gespeicherten Stempel per ID löschen
+    DeleteStamp(String),
     // Dokumenten- & Notizbuch-Verwaltung
     OpenNotebook(String),
+    /// Einen geöffneten Notizbuch-Tab schließen (wechselt bei aktivem Tab zum Nachbar-Tab)
+    CloseTab(String),
     /// Neues Notizbuch im Ordner `folder` anlegen und öffnen
     CreateNotebook {
         title: String,
@@ -401,12 +410,20 @@ pub struct UiState {
     pub current_zoom: f32,
     /// Bildschirm-Rechteck der schwebenden Toolbar für pixelgenaues Hit-Testing
     pub toolbar_rect: Option<egui::Rect>,
+    /// Geöffnete Notizbuch-Tabs (Notizbuch-IDs) und Bildschirm-Rechteck der Tab-Leiste
+    pub open_tabs: Vec<String>,
+    pub tab_bar_rect: Option<egui::Rect>,
     /// Öffnungszustand des Einstellungs-Popovers für den Stift
     pub is_pen_menu_open: bool,
     /// Eraser size menu next to the size button (Issue #38)
     pub is_eraser_menu_open: bool,
     /// Öffnungszustand des Einstellungs-Popovers für den Textmarker
     pub is_highlighter_menu_open: bool,
+    /// Öffnungszustand des Stempel-Popovers (wiederverwendbare Elemente)
+    pub is_stamps_menu_open: bool,
+    /// Gespeicherte Stempel und Namensfeld im Stempel-Popover
+    pub stamps: crate::stamps::StampLibrary,
+    pub stamp_name_input: String,
     /// Bildschirm-Rechteck des geöffneten Einstellungs-Popovers
     pub popover_rect: Option<egui::Rect>,
     /// Dokumenten-Manager Zustand
@@ -553,9 +570,14 @@ impl Default for UiState {
             show_page_jump_popup: false,
             current_zoom: 1.0,
             toolbar_rect: None,
+            open_tabs: vec!["default".to_string()],
+            tab_bar_rect: None,
             is_pen_menu_open: false,
             is_eraser_menu_open: false,
             is_highlighter_menu_open: false,
+            is_stamps_menu_open: false,
+            stamps: crate::stamps::StampLibrary::default(),
+            stamp_name_input: String::new(),
             popover_rect: None,
             is_document_menu_open: false,
             current_notebook_id: "default".to_string(),
@@ -666,6 +688,7 @@ impl UiState {
         self.is_pen_menu_open = false;
         self.is_eraser_menu_open = false;
         self.is_highlighter_menu_open = false;
+        self.is_stamps_menu_open = false;
         self.is_more_menu_open = false;
         self.show_page_jump_popup = false;
         self.is_document_menu_open = false;
@@ -749,10 +772,10 @@ impl UiState {
     /// Blätterpfeile).
     pub fn sidebar_button_size(tool: ActiveTool, max_height: f32, continuous: bool) -> f32 {
         let select = matches!(tool, ActiveTool::Select | ActiveTool::Text);
-        // Notizbücher, Nur ansehen, 7 Werkzeuge, Lineal, Undo/Redo, Seitenzahl und neue Seite
-        // (einzeln blättern: dazu zwei Pfeile), Menü (+ 4 Auswahl-Aktionen bzw. Schriftknöpfe)
+        // Notizbücher, Nur ansehen, 7 Werkzeuge, Lineal, Stempel, Undo/Redo, Seitenzahl und neue
+        // Seite (einzeln blättern: dazu zwei Pfeile), Menü (+ 4 Auswahl-Aktionen bzw. Schriftknöpfe)
         let page_buttons = if continuous { 2 } else { 4 };
-        let buttons = 12 + page_buttons + if select { 4 } else { 0 };
+        let buttons = 13 + page_buttons + if select { 4 } else { 0 };
         let dividers = 5 + usize::from(select);
         let spacing = Self::SIDEBAR_SPACING;
         let needed = |b: f32| {
@@ -762,10 +785,10 @@ impl UiState {
                 // frame, margins and the spacing egui adds (measured with the selection tool)
                 + 40.0
         };
-        [Self::SIDEBAR_BUTTON, 36.0, 32.0, 30.0, 28.0, 26.0]
+        [Self::SIDEBAR_BUTTON, 36.0, 32.0, 30.0, 28.0, 26.0, 24.0]
             .into_iter()
             .find(|&b| needed(b) <= max_height)
-            .unwrap_or(26.0)
+            .unwrap_or(24.0)
     }
 
     /// Von der Werkzeugleiste belegte Breite (logische Punkte, inkl. Randabstand),
@@ -856,6 +879,77 @@ impl UiState {
         self.export_message = Some((msg.into(), Instant::now()));
     }
 
+    /// Stellt sicher, dass das Notizbuch `id` als Tab geöffnet ist (bis höchstens `MAX_OPEN_TABS`).
+    pub fn ensure_tab_open(&mut self, id: &str) {
+        if id.is_empty() || self.open_tabs.iter().any(|t| t == id) {
+            return;
+        }
+        while self.open_tabs.len() >= crate::settings::MAX_OPEN_TABS {
+            if let Some(pos) = self
+                .open_tabs
+                .iter()
+                .position(|t| t != &self.current_notebook_id)
+            {
+                self.open_tabs.remove(pos);
+            } else {
+                break;
+            }
+        }
+        self.open_tabs.push(id.to_string());
+    }
+
+    /// Schließt den Tab `id`, sofern mehr als ein Tab offen ist.
+    ///
+    /// Gibt bei Schließen des aktiven Tabs die ID des Nachbar-Tabs zurück, zu dem gewechselt
+    /// werden soll (`None`, wenn ein anderer Tab geschlossen wurde oder nur noch ein Tab offen war).
+    pub fn close_tab(&mut self, id: &str) -> Option<String> {
+        if self.open_tabs.len() <= 1 {
+            return None;
+        }
+        let pos = self.open_tabs.iter().position(|t| t == id)?;
+        self.open_tabs.remove(pos);
+        if id == self.current_notebook_id {
+            let next_idx = pos.min(self.open_tabs.len().saturating_sub(1));
+            self.open_tabs.get(next_idx).cloned()
+        } else {
+            None
+        }
+    }
+
+    /// Entfernt doppelte oder nicht mehr vorhandene Notizbuch-Tabs und stellt sicher, dass das
+    /// aktuelle Notizbuch enthalten ist.
+    pub fn prune_tabs(&mut self) {
+        let mut seen = std::collections::HashSet::new();
+        let has_list = !self.available_notebooks.is_empty();
+        self.open_tabs.retain(|id| {
+            if id.is_empty() || !seen.insert(id.clone()) {
+                return false;
+            }
+            if id == &self.current_notebook_id {
+                return true;
+            }
+            !has_list || self.available_notebooks.iter().any(|n| n.id == *id)
+        });
+        let current = self.current_notebook_id.clone();
+        self.ensure_tab_open(&current);
+    }
+
+    /// Liefert den nächsten (`delta = 1`) oder vorherigen (`delta = -1`) Tab relativ zum aktuellen.
+    pub fn adjacent_tab(&self, delta: isize) -> Option<String> {
+        if self.open_tabs.len() < 2 {
+            return None;
+        }
+        let pos = self
+            .open_tabs
+            .iter()
+            .position(|t| t == &self.current_notebook_id)
+            .unwrap_or(0) as isize;
+        let len = self.open_tabs.len() as isize;
+        let next = (pos + delta).rem_euclid(len) as usize;
+        let id = &self.open_tabs[next];
+        (id != &self.current_notebook_id).then(|| id.clone())
+    }
+
     /// Exaktes Hit-Testing: Prüft, ob ein Bildschirmpunkt (px, py) innerhalb der
     /// abgerundeten Pill-Toolbar liegt (unter Berücksichtigung der 4 Eckradien).
     pub fn is_point_inside_toolbar(&self, px: f32, py: f32) -> bool {
@@ -905,6 +999,11 @@ impl UiState {
         // Offenes Kontextmenü: ein Tippen daneben schließt es nur
         if self.context_menu.is_some() || self.is_point_inside_toolbar(px, py) {
             return true;
+        }
+        if let Some(tab_rect) = self.tab_bar_rect {
+            if tab_rect.contains(egui::pos2(px, py)) {
+                return true;
+            }
         }
         // Lineal: Fläche und Dreh-Griff bedient die Oberfläche, die Kanten bleiben zum Zeichnen
         if self.ruler_drag.is_some() {
@@ -969,15 +1068,17 @@ pub fn configure_context(ctx: &egui::Context) {
 pub fn key_allowed_in_view_mode(key: &winit::keyboard::Key, ctrl: bool) -> bool {
     use winit::keyboard::{Key, NamedKey};
     match key {
-        Key::Named(named) => matches!(
-            named,
-            NamedKey::Escape
-                | NamedKey::Space
-                | NamedKey::PageUp
-                | NamedKey::PageDown
-                | NamedKey::Home
-                | NamedKey::End
-        ),
+        Key::Named(named) => {
+            matches!(
+                named,
+                NamedKey::Escape
+                    | NamedKey::Space
+                    | NamedKey::PageUp
+                    | NamedKey::PageDown
+                    | NamedKey::Home
+                    | NamedKey::End
+            ) || (ctrl && named == &NamedKey::Tab)
+        }
         Key::Character(c) => {
             ctrl && ["0", "+", "=", "-", "_", "s", "e", "q"]
                 .iter()
@@ -1004,6 +1105,7 @@ pub fn render_ui(
     let anchors =
         sidebar::render_sidebar(ctx, state, notebook, autosave_status, updater, &mut actions);
     state.toolbar_rect = Some(anchors.toolbar_rect);
+    state.tab_bar_rect = tabs::render_tab_bar(ctx, state, &anchors, &mut actions);
 
     popovers::render_popovers(
         ctx,
@@ -2458,5 +2560,53 @@ mod tests {
             let requested = actions.iter().any(|a| matches!(a, UiAction::LoadAllPages));
             assert_eq!(requested, expected, "ungeladene Seite: {unloaded}");
         }
+    }
+
+    #[test]
+    fn test_notebook_tabs_open_close_prune_and_cycle() {
+        let mut state = UiState::new();
+        assert_eq!(state.open_tabs, vec!["default".to_string()]);
+        // Einzelner Tab wird nicht geschlossen
+        assert_eq!(state.close_tab("default"), None);
+        assert_eq!(state.open_tabs.len(), 1);
+
+        state.ensure_tab_open("nb_a");
+        state.ensure_tab_open("nb_b");
+        state.ensure_tab_open("nb_a"); // kein Duplikat
+        assert_eq!(state.open_tabs, vec!["default", "nb_a", "nb_b"]);
+
+        assert_eq!(state.adjacent_tab(1).as_deref(), Some("nb_a"));
+        assert_eq!(state.adjacent_tab(-1).as_deref(), Some("nb_b"));
+
+        // Nicht-aktiven Tab schließen liefert keinen Wechsel
+        assert_eq!(state.close_tab("nb_a"), None);
+        assert_eq!(state.open_tabs, vec!["default", "nb_b"]);
+
+        // Aktiven Tab schließen liefert Nachbar-Tab
+        assert_eq!(state.close_tab("default").as_deref(), Some("nb_b"));
+        assert_eq!(state.open_tabs, vec!["nb_b"]);
+
+        // Maximalanzahl MAX_OPEN_TABS einhalten
+        state.current_notebook_id = "nb_b".to_string();
+        for i in 0..12 {
+            state.ensure_tab_open(&format!("nb_{i}"));
+        }
+        assert_eq!(state.open_tabs.len(), crate::settings::MAX_OPEN_TABS);
+        assert!(state.open_tabs.contains(&"nb_b".to_string()));
+    }
+
+    #[test]
+    fn test_tab_bar_only_shown_with_two_or_more_tabs() {
+        let notebook = Notebook::new();
+        let mut state = UiState::new();
+        let _ = render_frames(&mut state, &notebook, 2);
+        assert!(state.tab_bar_rect.is_none());
+
+        state.ensure_tab_open("second");
+        let _ = render_frames(&mut state, &notebook, 2);
+        let rect = state
+            .tab_bar_rect
+            .expect("Tab-Leiste muss ab 2 offenen Tabs sichtbar sein");
+        assert!(state.is_point_in_ui(rect.center().x, rect.center().y));
     }
 }

@@ -117,6 +117,76 @@ impl AppState {
                     }
                 }
             }
+            UiAction::SaveSelectionAsStamp(requested_name) => {
+                if !self.selection_state.is_empty() {
+                    let selected = self
+                        .notebook
+                        .current_page()
+                        .get_strokes(&self.selection_state.selected_ids);
+                    match self
+                        .ui_state
+                        .stamps
+                        .add_from_strokes(requested_name.as_deref(), &selected)
+                    {
+                        Ok(stamp) => {
+                            let name = stamp.name.clone();
+                            if let Err(err) = self.ui_state.stamps.save(&self.storage_base_dir) {
+                                eprintln!("[Stempel] Konnte stamps.json nicht speichern: {err}");
+                                self.ui_state.set_export_message(t!(
+                                    "Stempel nicht gespeichert: {err}",
+                                    err = err
+                                ));
+                            } else {
+                                self.ui_state.set_export_message(t!(
+                                    "Stempel '{name}' gespeichert",
+                                    name = name
+                                ));
+                            }
+                        }
+                        Err(msg) => {
+                            self.ui_state.set_export_message(msg);
+                        }
+                    }
+                    self.window.request_redraw();
+                }
+            }
+            UiAction::InsertStamp(id) => {
+                if let Some(stamp) = self.ui_state.stamps.get(&id).cloned() {
+                    let center = visible_page_center(&self.canvas);
+                    let mut next_id = || self.notebook.next_stroke_id();
+                    let strokes = stamp.instantiate(center, &mut next_id);
+                    if !strokes.is_empty() {
+                        let new_ids: Vec<u64> = strokes.iter().map(|s| s.id).collect();
+                        self.notebook.current_page_mut().add_strokes(strokes);
+                        self.selection_state.selected_ids = new_ids;
+                        activate_tool(ActiveTool::Select, &mut self.ui_state, &mut self.canvas);
+                        self.canvas.sync_page(self.notebook.current_page_mut());
+                        self.autosave.mark_dirty(&self.notebook, &mut self.manifest);
+                        update_window_title(
+                            &self.window,
+                            &self.notebook,
+                            &self.manifest,
+                            self.ui_state.active_tool,
+                            self.autosave.status(),
+                        );
+                        self.ui_state.set_export_message(t!(
+                            "Stempel '{name}' eingefügt",
+                            name = stamp.name
+                        ));
+                        self.window.request_redraw();
+                    }
+                }
+            }
+            UiAction::DeleteStamp(id) => {
+                if let Some(removed) = self.ui_state.stamps.delete(&id) {
+                    if let Err(err) = self.ui_state.stamps.save(&self.storage_base_dir) {
+                        eprintln!("[Stempel] Konnte stamps.json nicht speichern: {err}");
+                    }
+                    self.ui_state
+                        .set_export_message(t!("Stempel '{name}' gelöscht", name = removed.name));
+                    self.window.request_redraw();
+                }
+            }
             UiAction::CopySelected => {
                 let count = self
                     .selection_state
@@ -619,7 +689,14 @@ impl AppState {
                             self.selection_state.clear();
                             self.ui_state.current_notebook_id = self.manifest.id.clone();
                             self.ui_state.document_title = self.manifest.title.clone();
+                            self.ui_state.ensure_tab_open(&self.manifest.id);
                             refresh_notebooks(&self.storage_base_dir, &mut self.ui_state);
+                            self.ui_settings.open_tabs = self.ui_state.open_tabs.clone();
+                            save_ui_settings(
+                                &self.ui_settings,
+                                self.ui_settings_path.as_deref(),
+                                &mut self.ui_state,
+                            );
                             self.ui_state.is_document_menu_open = false;
                             self.canvas.sync_page(self.notebook.current_page_mut());
                             update_window_title(
@@ -645,6 +722,45 @@ impl AppState {
                             self.ui_state
                                 .set_export_message(t!("Fehler beim Öffnen: {err}", err = err));
                         }
+                    }
+                }
+            }
+            UiAction::CloseTab(id) => {
+                if id != self.manifest.id {
+                    self.ui_state.close_tab(&id);
+                    self.ui_settings.open_tabs = self.ui_state.open_tabs.clone();
+                    save_ui_settings(
+                        &self.ui_settings,
+                        self.ui_settings_path.as_deref(),
+                        &mut self.ui_state,
+                    );
+                    self.window.request_redraw();
+                } else if self.ui_state.open_tabs.len() > 1 {
+                    let pos = self
+                        .ui_state
+                        .open_tabs
+                        .iter()
+                        .position(|t| t == &id)
+                        .unwrap_or(0);
+                    let next_id = if pos + 1 < self.ui_state.open_tabs.len() {
+                        self.ui_state.open_tabs[pos + 1].clone()
+                    } else {
+                        self.ui_state.open_tabs[pos.saturating_sub(1)].clone()
+                    };
+                    self.handle_ui_action(
+                        UiAction::OpenNotebook(next_id),
+                        pdf_thumbnails_wanted,
+                        target,
+                    );
+                    if self.manifest.id != id {
+                        self.ui_state.close_tab(&id);
+                        self.ui_settings.open_tabs = self.ui_state.open_tabs.clone();
+                        save_ui_settings(
+                            &self.ui_settings,
+                            self.ui_settings_path.as_deref(),
+                            &mut self.ui_state,
+                        );
+                        self.window.request_redraw();
                     }
                 }
             }
@@ -681,7 +797,14 @@ impl AppState {
                             self.selection_state.clear();
                             self.ui_state.current_notebook_id = self.manifest.id.clone();
                             self.ui_state.document_title = self.manifest.title.clone();
+                            self.ui_state.ensure_tab_open(&self.manifest.id);
                             refresh_notebooks(&self.storage_base_dir, &mut self.ui_state);
+                            self.ui_settings.open_tabs = self.ui_state.open_tabs.clone();
+                            save_ui_settings(
+                                &self.ui_settings,
+                                self.ui_settings_path.as_deref(),
+                                &mut self.ui_state,
+                            );
                             self.canvas.reset_view();
                             self.canvas.sync_page(self.notebook.current_page_mut());
                             update_window_title(
@@ -755,7 +878,14 @@ impl AppState {
                             self.selection_state.clear();
                             self.ui_state.current_notebook_id = self.manifest.id.clone();
                             self.ui_state.document_title = self.manifest.title.clone();
+                            self.ui_state.ensure_tab_open(&self.manifest.id);
                             refresh_notebooks(&self.storage_base_dir, &mut self.ui_state);
+                            self.ui_settings.open_tabs = self.ui_state.open_tabs.clone();
+                            save_ui_settings(
+                                &self.ui_settings,
+                                self.ui_settings_path.as_deref(),
+                                &mut self.ui_state,
+                            );
                             self.ui_state.is_document_menu_open = false;
                             self.canvas.sync_page(self.notebook.current_page_mut());
                             update_window_title(
@@ -865,15 +995,27 @@ impl AppState {
                 match storage::delete_notebook(&target_dir, &self.storage_base_dir) {
                     Ok(trash_path) => {
                         self.ui_state.last_deleted_notebook = Some((trash_path, deleted_title));
+                        self.ui_state.open_tabs.retain(|t| t != &id);
                         refresh_notebooks(&self.storage_base_dir, &mut self.ui_state);
                         if is_current {
-                            if let Some(first) = self
+                            let next_candidate = self
                                 .ui_state
-                                .available_notebooks
+                                .open_tabs
                                 .iter()
-                                .find(|s| s.status != storage::NotebookStatus::Damaged)
-                                .cloned()
-                            {
+                                .find_map(|tab_id| {
+                                    self.ui_state.available_notebooks.iter().find(|s| {
+                                        s.id == *tab_id
+                                            && s.status != storage::NotebookStatus::Damaged
+                                    })
+                                })
+                                .or_else(|| {
+                                    self.ui_state
+                                        .available_notebooks
+                                        .iter()
+                                        .find(|s| s.status != storage::NotebookStatus::Damaged)
+                                })
+                                .cloned();
+                            if let Some(first) = next_candidate {
                                 let new_notebook_dir = self.storage_base_dir.join(&first.id);
                                 match storage::load_notebook(&new_notebook_dir) {
                                     Ok((loaded_nb, loaded_manifest)) => {
@@ -888,6 +1030,14 @@ impl AppState {
                                         self.ui_state.current_notebook_id =
                                             self.manifest.id.clone();
                                         self.ui_state.document_title = self.manifest.title.clone();
+                                        self.ui_state.ensure_tab_open(&self.manifest.id);
+                                        self.ui_settings.open_tabs =
+                                            self.ui_state.open_tabs.clone();
+                                        save_ui_settings(
+                                            &self.ui_settings,
+                                            self.ui_settings_path.as_deref(),
+                                            &mut self.ui_state,
+                                        );
                                         self.canvas.sync_page(self.notebook.current_page_mut());
                                         update_window_title(
                                             &self.window,
@@ -924,7 +1074,14 @@ impl AppState {
                                 self.selection_state.clear();
                                 self.ui_state.current_notebook_id = self.manifest.id.clone();
                                 self.ui_state.document_title = self.manifest.title.clone();
+                                self.ui_state.ensure_tab_open(&self.manifest.id);
                                 refresh_notebooks(&self.storage_base_dir, &mut self.ui_state);
+                                self.ui_settings.open_tabs = self.ui_state.open_tabs.clone();
+                                save_ui_settings(
+                                    &self.ui_settings,
+                                    self.ui_settings_path.as_deref(),
+                                    &mut self.ui_state,
+                                );
                                 self.canvas.sync_page(self.notebook.current_page_mut());
                                 update_window_title(
                                     &self.window,

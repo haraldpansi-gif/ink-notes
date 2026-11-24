@@ -149,6 +149,7 @@ pub(super) fn activate_tool(tool: ActiveTool, ui_state: &mut UiState, canvas: &m
 pub(super) fn refresh_notebooks(base_dir: &Path, ui_state: &mut UiState) {
     ui_state.available_notebooks = storage::list_notebooks(base_dir);
     ui_state.library = Library::load(base_dir);
+    ui_state.prune_tabs();
 }
 
 /// Ändert die Ordner (`library.json`) und liest sie neu ein; Fehler erscheinen als Meldung.

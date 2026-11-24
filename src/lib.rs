@@ -38,6 +38,7 @@ pub mod saber;
 pub mod selection;
 pub mod settings;
 pub mod spline;
+pub mod stamps;
 pub mod storage;
 pub mod text;
 pub mod ui;
