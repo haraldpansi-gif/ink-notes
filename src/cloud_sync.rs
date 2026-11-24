@@ -55,7 +55,7 @@ fn is_notebook_name(name: &str) -> bool {
 pub fn is_synced_file(path: &str) -> bool {
     let parts: Vec<&str> = path.split('/').collect();
     match parts.as_slice() {
-        ["library.json"] => true,
+        ["library.json" | "stamps.json"] => true,
         [notebook, name] => {
             is_notebook_name(notebook)
                 && (*name == "manifest.json"
@@ -1530,6 +1530,7 @@ mod tests {
     #[test]
     fn filters_synced_files() {
         assert!(is_synced_file("library.json"));
+        assert!(is_synced_file("stamps.json"));
         assert!(is_synced_file("nb_1/manifest.json"));
         assert!(is_synced_file("nb_1/page_12.json"));
         assert!(is_synced_file("nb_1/.opened_by.json"));

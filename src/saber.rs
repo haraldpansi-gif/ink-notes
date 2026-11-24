@@ -235,11 +235,16 @@ fn unzip(bytes: &[u8], limit: usize) -> Result<HashMap<String, Vec<u8>>, String>
         let content = match method {
             0 => data.to_vec(),
             8 => {
-                let mut out = Vec::with_capacity(size);
+                // Header size is untrusted: cap initial allocation so a tiny ZIP can't pre-allocate
+                // hundreds of megabytes, and reject streams that expand beyond the declared size.
+                let mut out = Vec::with_capacity(size.min(64 * 1024));
                 flate2::read::DeflateDecoder::new(data)
-                    .take(size as u64)
+                    .take((size as u64).saturating_add(1))
                     .read_to_end(&mut out)
                     .map_err(|_| broken())?;
+                if out.len() > size {
+                    return Err(broken());
+                }
                 out
             }
             _ => return Err(broken()),
@@ -249,6 +254,9 @@ fn unzip(bytes: &[u8], limit: usize) -> Result<HashMap<String, Vec<u8>>, String>
     Ok(files)
 }
 
+/// Maximum size for Saber archives and uncompressed contents (256 MiB).
+const MAX_SABER_BYTES: usize = 256 * 1024 * 1024;
+
 /// The document and a way to get its assets (by index).
 struct Source {
     doc: Bson,
@@ -256,9 +264,15 @@ struct Source {
 }
 
 fn load(path: &Path) -> Result<Source, String> {
+    if std::fs::metadata(path)
+        .map(|m| m.len() > MAX_SABER_BYTES as u64)
+        .unwrap_or(false)
+    {
+        return Err(t!("Die Datei ist zu groß").to_string());
+    }
     let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
     if bytes.starts_with(&[0x50, 0x4b, 0x03, 0x04]) {
-        let files = unzip(&bytes, 1024 * 1024 * 1024)?;
+        let files = unzip(&bytes, MAX_SABER_BYTES)?;
         let main = files
             .iter()
             .find(|(name, _)| name.ends_with(".sbn2"))

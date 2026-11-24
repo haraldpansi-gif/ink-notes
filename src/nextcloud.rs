@@ -694,11 +694,7 @@ impl Remote for WebDav {
             .call()
             .map_err(|e| self.client.error(e))?;
         let etag = etag_of(&resp).unwrap_or_default();
-        let mut data = Vec::new();
-        resp.into_reader()
-            .take(MAX_DOWNLOAD)
-            .read_to_end(&mut data)
-            .map_err(|e| Error::Offline(e.to_string()))?;
+        let data = read_bounded(resp.into_reader(), MAX_DOWNLOAD)?;
         Ok((data, etag))
     }
 
@@ -741,6 +737,20 @@ impl Remote for WebDav {
             Err(err) => Err(self.client.error(err)),
         }
     }
+}
+
+/// Reads up to `max_bytes` from `reader` and returns an error instead of silently truncating
+/// when the response exceeds the limit.
+fn read_bounded(reader: impl Read, max_bytes: u64) -> Result<Vec<u8>, Error> {
+    let mut data = Vec::new();
+    reader
+        .take(max_bytes.saturating_add(1))
+        .read_to_end(&mut data)
+        .map_err(|e| Error::Offline(e.to_string()))?;
+    if data.len() as u64 > max_bytes {
+        return Err(Error::Other(t!("Die Datei ist zu groß").to_string()));
+    }
+    Ok(data)
 }
 
 #[cfg(test)]
@@ -849,5 +859,12 @@ mod tests {
             let mode = std::fs::metadata(&path).unwrap().permissions().mode();
             assert_eq!(mode & 0o777, 0o600);
         }
+    }
+
+    #[test]
+    fn read_bounded_rejects_oversized_response() {
+        assert_eq!(read_bounded(&b"abcd"[..], 4).unwrap(), b"abcd");
+        let err = read_bounded(&b"abcde"[..], 4).unwrap_err();
+        assert!(matches!(err, Error::Other(_)));
     }
 }

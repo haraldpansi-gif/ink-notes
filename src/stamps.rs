@@ -18,6 +18,9 @@ use crate::t;
 /// Höchstens so viele Stempel werden gespeichert.
 pub const MAX_STAMPS: usize = 64;
 
+/// Maximale Dateigröße von `stamps.json` beim Laden (16 MiB).
+const MAX_STAMPS_FILE_BYTES: u64 = 16 * 1024 * 1024;
+
 /// Dateiname im gemeinsamen Notizbuch-Ordner (neben `library.json`).
 const STAMPS_FILE: &str = "stamps.json";
 
@@ -104,10 +107,16 @@ impl StampLibrary {
         base_dir.join(STAMPS_FILE)
     }
 
-    /// Lädt die Stempel-Bibliothek; bei fehlender oder beschädigter Datei wird eine leere
-    /// Bibliothek zurückgegeben.
+    /// Lädt die Stempel-Bibliothek; bei fehlender, zu großer oder beschädigter Datei wird eine
+    /// leere Bibliothek zurückgegeben. Bildverweise werden beim Laden herausgefiltert.
     pub fn load(base_dir: &Path) -> Self {
         let path = Self::path(base_dir);
+        if std::fs::metadata(&path)
+            .map(|m| m.len() > MAX_STAMPS_FILE_BYTES)
+            .unwrap_or(false)
+        {
+            return Self::default();
+        }
         let Ok(content) = std::fs::read_to_string(&path) else {
             return Self::default();
         };
@@ -115,16 +124,18 @@ impl StampLibrary {
         let mut stamps: Vec<Stamp> = file
             .stamps
             .into_iter()
-            .filter(|r| !r.id.is_empty() && !r.strokes.is_empty())
+            .filter(|r| !r.id.is_empty())
             .map(|r| Stamp {
                 id: r.id,
                 name: r.name,
                 strokes: r
                     .strokes
                     .iter()
+                    .filter(|s| s.image.is_none())
                     .map(storage::StrokeData::to_stroke)
                     .collect(),
             })
+            .filter(|s| !s.strokes.is_empty())
             .collect();
         stamps.truncate(MAX_STAMPS);
         Self { stamps }
@@ -339,5 +350,34 @@ mod tests {
         assert!(lib.get(&id).is_some());
         assert!(lib.delete(&id).is_some());
         assert!(lib.stamps.is_empty());
+    }
+
+    #[test]
+    fn test_stamp_load_filters_image_references() {
+        let dir = tempfile::tempdir().unwrap();
+        let img = Stroke::new_image(
+            1,
+            "evil.png".to_string(),
+            [
+                Vec2::new(0.0, 0.0),
+                Vec2::new(100.0, 0.0),
+                Vec2::new(100.0, 100.0),
+                Vec2::new(0.0, 100.0),
+            ],
+        );
+        let file = StampFile {
+            stamps: vec![StampRecord {
+                id: "s1".to_string(),
+                name: "Bild".to_string(),
+                strokes: vec![storage::StrokeData::from(&img)],
+            }],
+        };
+        std::fs::write(
+            StampLibrary::path(dir.path()),
+            serde_json::to_string(&file).unwrap(),
+        )
+        .unwrap();
+        let loaded = StampLibrary::load(dir.path());
+        assert!(loaded.stamps.is_empty());
     }
 }
