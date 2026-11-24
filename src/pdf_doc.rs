@@ -111,7 +111,7 @@ pub fn render_file_page(
     max_pixels: u32,
 ) -> Result<RgbaImage, String> {
     let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
-    render_page(&open(bytes)?, index, max_pixels)
+    guarded(|| render_page(&open(bytes)?, index, max_pixels))
 }
 
 struct RenderRequest {

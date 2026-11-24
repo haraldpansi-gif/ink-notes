@@ -548,17 +548,24 @@ pub fn atomic_write_file(path: &Path, content: &[u8]) -> Result<(), io::Error> {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos() as u64;
-    let temp_filename = format!("{filename}.tmp.{}.{random_suffix}", std::process::id());
+    static TEMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = TEMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let temp_filename = format!(
+        "{filename}.tmp.{}.{random_suffix}.{seq}",
+        std::process::id()
+    );
     let temp_path = dir.join(temp_filename);
 
-    // In temporäre Datei schreiben, Rechte 0600 setzen und auf Datenträger flushen
+    // Temporäre Datei direkt mit 0600-Rechten anlegen (kein TOCTOU-Fenster) und auf Datenträger flushen
     {
-        let mut file = File::create(&temp_path)?;
+        let mut opts = fs::OpenOptions::new();
+        opts.write(true).create_new(true);
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = fs::set_permissions(&temp_path, fs::Permissions::from_mode(0o600));
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
         }
+        let mut file = opts.open(&temp_path)?;
         // On a full disk every retry would otherwise leave another partial file behind
         if let Err(e) = file.write_all(content).and_then(|_| file.sync_all()) {
             drop(file);

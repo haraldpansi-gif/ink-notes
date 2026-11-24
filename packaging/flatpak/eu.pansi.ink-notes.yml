@@ -22,6 +22,8 @@ finish-args:
   - --socket=fallback-x11
   - --share=ipc
   - --device=dri
+  # Needed for the built-in Nextcloud sync (the in-app updater stays disabled in Flatpak).
+  - --share=network
   # The built-in file picker (inserting images and PDFs) works without a desktop portal and
   # offers Pictures, Downloads and Desktop; exports (PDF, PNG, SVG) go to the Documents folder.
   # Dragging from the file manager works from other folders too, via the document portal.

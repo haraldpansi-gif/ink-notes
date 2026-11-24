@@ -550,4 +550,9 @@ pub const EN: &[(&str, &str)] = &[
     ("Konnte Backup ({path}) nicht anlegen: {e}. Update abgebrochen, altes Programm unverändert.", "Could not create backup ({path}): {e}. Update cancelled, old program unchanged."),
     ("Konnte Programm nicht ersetzen: {e}. Altes Programm bleibt unverändert.", "Could not replace the program: {e}. The old program stays unchanged."),
     ("Ungültiger Programmpfad.", "Invalid program path."),
+    (
+        "Update-Datei überschreitet die maximale Größe.",
+        "Update file exceeds the maximum size.",
+    ),
+    ("Die Datei ist zu groß", "The file is too large"),
 ];

@@ -61,14 +61,24 @@ pub fn import_file(
 
 /// Decompresses gzip data; other data is returned unchanged.
 pub fn gunzip(bytes: &[u8]) -> Result<Vec<u8>, String> {
+    gunzip_with_limit(bytes, MAX_UNCOMPRESSED_BYTES)
+}
+
+fn gunzip_with_limit(bytes: &[u8], max_bytes: u64) -> Result<Vec<u8>, String> {
     if !bytes.starts_with(&[0x1f, 0x8b]) {
+        if bytes.len() as u64 > max_bytes {
+            return Err(t!("Die Datei ist zu groß").to_string());
+        }
         return Ok(bytes.to_vec());
     }
     let mut data = Vec::new();
     flate2::read::MultiGzDecoder::new(bytes)
-        .take(MAX_UNCOMPRESSED_BYTES)
+        .take(max_bytes.saturating_add(1))
         .read_to_end(&mut data)
         .map_err(|e| t!("Datei nicht lesbar: {err}", err = e))?;
+    if data.len() as u64 > max_bytes {
+        return Err(t!("Die Datei ist zu groß").to_string());
+    }
     Ok(data)
 }
 
@@ -360,5 +370,19 @@ mod tests {
         );
         let (_, _, pixels) = rasterize_svg(&svg, glam::Vec2::new(80.0, 80.0)).unwrap();
         assert!(pixels.iter().all(|&b| b == 0), "the local image was drawn");
+    }
+
+    #[test]
+    fn test_gunzip_rejects_oversized_payload() {
+        use std::io::Write;
+        let payload = vec![b'A'; 1024];
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(&payload).unwrap();
+        let compressed = encoder.finish().unwrap();
+
+        assert_eq!(gunzip_with_limit(&compressed, 1024).unwrap(), payload);
+        assert!(gunzip_with_limit(&compressed, 1023).is_err());
+        assert_eq!(gunzip_with_limit(&payload, 1024).unwrap(), payload);
+        assert!(gunzip_with_limit(&payload, 1023).is_err());
     }
 }

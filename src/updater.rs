@@ -189,6 +189,9 @@ pub fn is_flatpak(flatpak_id: Option<&str>, info_file_exists: bool) -> bool {
     flatpak_id.is_some_and(|id| !id.trim().is_empty()) || info_file_exists
 }
 
+/// Größte akzeptierte Update-Datei (schützt die Festplatte vor endlosen oder manipulierten Streams).
+pub const MAX_UPDATE_DOWNLOAD_BYTES: u64 = 512 * 1024 * 1024;
+
 /// Bereinigt und validiert einen Asset-Dateinamen gegen Path Traversal Angriffe.
 pub fn sanitize_asset_name(raw_name: &str) -> Result<String, String> {
     let trimmed = raw_name.trim();
@@ -802,6 +805,12 @@ impl UpdaterController {
 
             let content_length: Option<u64> =
                 resp.header("Content-Length").and_then(|s| s.parse().ok());
+            if content_length.is_some_and(|total| total > MAX_UPDATE_DOWNLOAD_BYTES) {
+                let _ = tx.send(UpdaterEvent::DownloadError(
+                    t!("Update-Datei überschreitet die maximale Größe.").to_string(),
+                ));
+                return;
+            }
             let mut reader = resp.into_reader();
             let mut file = match std::fs::File::create(&target_file) {
                 Ok(f) => f,
@@ -834,6 +843,16 @@ impl UpdaterController {
                     }
                 };
 
+                downloaded = downloaded.saturating_add(n as u64);
+                if downloaded > MAX_UPDATE_DOWNLOAD_BYTES {
+                    drop(file);
+                    let _ = std::fs::remove_file(&target_file);
+                    let _ = tx.send(UpdaterEvent::DownloadError(
+                        t!("Update-Datei überschreitet die maximale Größe.").to_string(),
+                    ));
+                    return;
+                }
+
                 if let Err(e) = file.write_all(&buffer[..n]) {
                     let _ = std::fs::remove_file(&target_file);
                     let _ = tx.send(UpdaterEvent::DownloadError(t!(
@@ -842,8 +861,6 @@ impl UpdaterController {
                     )));
                     return;
                 }
-
-                downloaded += n as u64;
 
                 if last_progress_time.elapsed() >= throttle {
                     let percent = match content_length {
