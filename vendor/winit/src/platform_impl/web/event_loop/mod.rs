@@ -3,7 +3,8 @@ use std::sync::mpsc::{self, Receiver, Sender};
 
 use crate::error::EventLoopError;
 use crate::event::Event;
-use crate::event_loop::EventLoopWindowTarget as RootEventLoopWindowTarget;
+use crate::event_loop::ActiveEventLoop as RootActiveEventLoop;
+use crate::platform::web::{ActiveEventLoopExtWebSys, PollStrategy, WaitUntilStrategy};
 
 use super::{backend, device, window};
 
@@ -12,11 +13,11 @@ pub(crate) mod runner;
 mod state;
 mod window_target;
 
-pub use proxy::EventLoopProxy;
-pub use window_target::EventLoopWindowTarget;
+pub(crate) use proxy::EventLoopProxy;
+pub(crate) use window_target::{ActiveEventLoop, OwnedDisplayHandle};
 
 pub struct EventLoop<T: 'static> {
-    elw: RootEventLoopWindowTarget<T>,
+    elw: RootActiveEventLoop,
     user_event_sender: Sender<T>,
     user_event_receiver: Receiver<T>,
 }
@@ -27,25 +28,15 @@ pub(crate) struct PlatformSpecificEventLoopAttributes {}
 impl<T> EventLoop<T> {
     pub(crate) fn new(_: &PlatformSpecificEventLoopAttributes) -> Result<Self, EventLoopError> {
         let (user_event_sender, user_event_receiver) = mpsc::channel();
-        let elw = RootEventLoopWindowTarget {
-            p: EventLoopWindowTarget::new(),
-            _marker: PhantomData,
-        };
-        Ok(EventLoop {
-            elw,
-            user_event_sender,
-            user_event_receiver,
-        })
+        let elw = RootActiveEventLoop { p: ActiveEventLoop::new(), _marker: PhantomData };
+        Ok(EventLoop { elw, user_event_sender, user_event_receiver })
     }
 
     pub fn run<F>(self, mut event_handler: F) -> !
     where
-        F: FnMut(Event<T>, &RootEventLoopWindowTarget<T>),
+        F: FnMut(Event<T>, &RootActiveEventLoop),
     {
-        let target = RootEventLoopWindowTarget {
-            p: self.elw.p.clone(),
-            _marker: PhantomData,
-        };
+        let target = RootActiveEventLoop { p: self.elw.p.clone(), _marker: PhantomData };
 
         // SAFETY: Don't use `move` to make sure we leak the `event_handler` and `target`.
         let handler: Box<dyn FnMut(Event<()>)> = Box::new(|event| {
@@ -63,7 +54,11 @@ impl<T> EventLoop<T> {
         // SAFETY: The `transmute` is necessary because `run()` requires `'static`. This is safe
         // because this function will never return and all resources not cleaned up by the point we
         // `throw` will leak, making this actually `'static`.
-        let handler = unsafe { std::mem::transmute(handler) };
+        let handler = unsafe {
+            std::mem::transmute::<Box<dyn FnMut(Event<()>)>, Box<dyn FnMut(Event<()>) + 'static>>(
+                handler,
+            )
+        };
         self.elw.p.run(handler, false);
 
         // Throw an exception to break out of Rust execution and use unreachable to tell the
@@ -77,12 +72,9 @@ impl<T> EventLoop<T> {
 
     pub fn spawn<F>(self, mut event_handler: F)
     where
-        F: 'static + FnMut(Event<T>, &RootEventLoopWindowTarget<T>),
+        F: 'static + FnMut(Event<T>, &RootActiveEventLoop),
     {
-        let target = RootEventLoopWindowTarget {
-            p: self.elw.p.clone(),
-            _marker: PhantomData,
-        };
+        let target = RootActiveEventLoop { p: self.elw.p.clone(), _marker: PhantomData };
 
         self.elw.p.run(
             Box::new(move |event| {
@@ -105,7 +97,23 @@ impl<T> EventLoop<T> {
         EventLoopProxy::new(self.elw.p.waker(), self.user_event_sender.clone())
     }
 
-    pub fn window_target(&self) -> &RootEventLoopWindowTarget<T> {
+    pub fn window_target(&self) -> &RootActiveEventLoop {
         &self.elw
+    }
+
+    pub fn set_poll_strategy(&self, strategy: PollStrategy) {
+        self.elw.set_poll_strategy(strategy);
+    }
+
+    pub fn poll_strategy(&self) -> PollStrategy {
+        self.elw.poll_strategy()
+    }
+
+    pub fn set_wait_until_strategy(&self, strategy: WaitUntilStrategy) {
+        self.elw.set_wait_until_strategy(strategy);
+    }
+
+    pub fn wait_until_strategy(&self) -> WaitUntilStrategy {
+        self.elw.wait_until_strategy()
     }
 }

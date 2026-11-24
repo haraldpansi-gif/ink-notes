@@ -160,25 +160,27 @@ impl ImageLayer {
         });
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Image Pipeline Layout"),
-            bind_group_layouts: &[camera_layout, &texture_layout],
-            push_constant_ranges: &[],
+            bind_group_layouts: &[Some(camera_layout), Some(&texture_layout)],
+            immediate_size: 0,
         });
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("Image Render Pipeline"),
             layout: Some(&layout),
             vertex: wgpu::VertexState {
                 module: shader,
-                entry_point: "vs_image",
-                buffers: &[ImageVertex::desc()],
+                entry_point: Some("vs_image"),
+                buffers: &[Some(ImageVertex::desc())],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
             },
             fragment: Some(wgpu::FragmentState {
                 module: shader,
-                entry_point: "fs_image",
+                entry_point: Some("fs_image"),
                 targets: &[Some(wgpu::ColorTargetState {
                     format,
                     blend: Some(wgpu::BlendState::ALPHA_BLENDING),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
             }),
             primitive: wgpu::PrimitiveState {
                 topology: wgpu::PrimitiveTopology::TriangleList,
@@ -189,7 +191,8 @@ impl ImageLayer {
                 count: sample_count,
                 ..Default::default()
             },
-            multiview: None,
+            multiview_mask: None,
+            cache: None,
         });
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("Image Sampler"),
@@ -197,7 +200,7 @@ impl ImageLayer {
             address_mode_v: wgpu::AddressMode::ClampToEdge,
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
-            mipmap_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Linear,
             ..Default::default()
         });
 
@@ -411,14 +414,14 @@ impl ImageLayer {
         });
         for (level, mip) in levels.iter().enumerate() {
             queue.write_texture(
-                wgpu::ImageCopyTexture {
+                wgpu::TexelCopyTextureInfo {
                     texture: &texture,
                     mip_level: level as u32,
                     origin: wgpu::Origin3d::ZERO,
                     aspect: wgpu::TextureAspect::All,
                 },
                 &mip.pixels,
-                wgpu::ImageDataLayout {
+                wgpu::TexelCopyBufferLayout {
                     offset: 0,
                     bytes_per_row: Some(4 * mip.width),
                     rows_per_image: Some(mip.height),

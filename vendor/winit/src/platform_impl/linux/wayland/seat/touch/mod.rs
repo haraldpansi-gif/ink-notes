@@ -1,14 +1,15 @@
 //! Touch handling.
 
+use std::time::Duration;
+
+use tracing::warn;
+
+use sctk::compositor::SurfaceData;
 use sctk::reexports::client::protocol::wl_seat::WlSeat;
 use sctk::reexports::client::protocol::wl_surface::WlSurface;
 use sctk::reexports::client::protocol::wl_touch::{self, WlTouch};
 use sctk::reexports::client::{Connection, Dispatch, Proxy, QueueHandle};
 use sctk::reexports::csd_frame::FrameClick;
-
-use std::time::Duration;
-
-use sctk::compositor::SurfaceData;
 use sctk::seat::touch::{TouchData, TouchHandler};
 use sctk::seat::SeatState;
 
@@ -31,7 +32,7 @@ impl TouchHandler for WinitState {
         position: (f64, f64),
     ) {
         // ink-notes patch: a touch on the client-side decorations acts like a left click, so
-        // the title bar buttons work with a finger and the window can be moved.
+        // the title bar buttons work with a finger and the window can be moved (Issue #36).
         let parent_surface = surface
             .data::<SurfaceData>()
             .and_then(|data| data.parent_surface().cloned());
@@ -57,15 +58,16 @@ impl TouchHandler for WinitState {
                 &mut self.window_compositor_updates,
             );
             drop(window);
-            let seat_state = self.seats.get_mut(&touch.seat().id()).unwrap();
-            seat_state.touch_map.insert(
-                id,
-                TouchPoint {
-                    surface,
-                    location: LogicalPosition::<f64>::from(position),
-                    frame_of: Some(window_id),
-                },
-            );
+            if let Some(seat_state) = self.seats.get_mut(&touch.seat().id()) {
+                seat_state.touch_map.insert(
+                    id,
+                    TouchPoint {
+                        surface,
+                        location: LogicalPosition::<f64>::from(position),
+                        frame_of: Some(window_id),
+                    },
+                );
+            }
             return;
         }
 
@@ -75,14 +77,17 @@ impl TouchHandler for WinitState {
             None => return,
         };
 
-        let location = LogicalPosition::<f64>::from(position);
-
-        let seat_state = self.seats.get_mut(&touch.seat().id()).unwrap();
+        let seat_state = match self.seats.get_mut(&touch.seat().id()) {
+            Some(seat_state) => seat_state,
+            None => {
+                warn!("Received wl_touch::down without seat");
+                return;
+            },
+        };
 
         // Update the state of the point.
-        seat_state
-            .touch_map
-            .insert(id, TouchPoint { surface, location, frame_of: None });
+        let location = LogicalPosition::<f64>::from(position);
+        seat_state.touch_map.insert(id, TouchPoint { surface, location, frame_of: None });
 
         // ink-notes patch: keep the event time for `take_touch_time`
         crate::platform::wayland::push_touch_time(id as u64, TouchPhase::Started, time);
@@ -110,7 +115,13 @@ impl TouchHandler for WinitState {
         time: u32,
         id: i32,
     ) {
-        let seat_state = self.seats.get_mut(&touch.seat().id()).unwrap();
+        let seat_state = match self.seats.get_mut(&touch.seat().id()) {
+            Some(seat_state) => seat_state,
+            None => {
+                warn!("Received wl_touch::up without seat");
+                return;
+            },
+        };
 
         // Remove the touch point.
         let touch_point = match seat_state.touch_map.remove(&id) {
@@ -144,6 +155,7 @@ impl TouchHandler for WinitState {
 
         // ink-notes patch: keep the event time for `take_touch_time`
         crate::platform::wayland::push_touch_time(id as u64, TouchPhase::Ended, time);
+
         self.events_sink.push_window_event(
             WindowEvent::Touch(Touch {
                 device_id: crate::event::DeviceId(crate::platform_impl::DeviceId::Wayland(
@@ -167,7 +179,13 @@ impl TouchHandler for WinitState {
         id: i32,
         position: (f64, f64),
     ) {
-        let seat_state = self.seats.get_mut(&touch.seat().id()).unwrap();
+        let seat_state = match self.seats.get_mut(&touch.seat().id()) {
+            Some(seat_state) => seat_state,
+            None => {
+                warn!("Received wl_touch::motion without seat");
+                return;
+            },
+        };
 
         // Remove the touch point.
         let touch_point = match seat_state.touch_map.get_mut(&id) {
@@ -216,7 +234,13 @@ impl TouchHandler for WinitState {
     }
 
     fn cancel(&mut self, _: &Connection, _: &QueueHandle<Self>, touch: &WlTouch) {
-        let seat_state = self.seats.get_mut(&touch.seat().id()).unwrap();
+        let seat_state = match self.seats.get_mut(&touch.seat().id()) {
+            Some(seat_state) => seat_state,
+            None => {
+                warn!("Received wl_touch::cancel without seat");
+                return;
+            },
+        };
 
         for (id, touch_point) in seat_state.touch_map.drain() {
             if touch_point.frame_of.is_some() {
@@ -281,9 +305,7 @@ pub trait TouchDataExt {
 
 impl TouchDataExt for WlTouch {
     fn seat(&self) -> &WlSeat {
-        self.data::<TouchData>()
-            .expect("failed to get touch data.")
-            .seat()
+        self.data::<TouchData>().expect("failed to get touch data.").seat()
     }
 }
 

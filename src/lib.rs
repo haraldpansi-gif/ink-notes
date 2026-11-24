@@ -64,7 +64,7 @@ fn android_main(app: winit::platform::android::activity::AndroidApp) {
     if let Some(dir) = app.internal_data_path() {
         paths::set_app_dir(dir);
     }
-    let event_loop = match winit::event_loop::EventLoopBuilder::new()
+    let event_loop = match winit::event_loop::EventLoop::builder()
         .with_android_app(app)
         .build()
     {

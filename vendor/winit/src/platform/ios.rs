@@ -1,13 +1,87 @@
+//! # iOS / UIKit
+//!
+//! Winit has an OS requirement of iOS 8 or higher, and is regularly tested on
+//! iOS 9.3.
+//!
+//! ## Window initialization
+//!
+//! iOS's main `UIApplicationMain` does some init work that's required by all
+//! UI-related code (see issue [#1705]). It is best to create your windows
+//! inside [`ApplicationHandler::resumed`].
+//!
+//! [#1705]: https://github.com/rust-windowing/winit/issues/1705
+//! [`ApplicationHandler::resumed`]: crate::application::ApplicationHandler::resumed
+//!
+//! ## Building app
+//!
+//! To build ios app you will need rustc built for this targets:
+//!
+//!  - armv7-apple-ios
+//!  - armv7s-apple-ios
+//!  - i386-apple-ios
+//!  - aarch64-apple-ios
+//!  - x86_64-apple-ios
+//!
+//! Then
+//!
+//! ```
+//! cargo build --target=...
+//! ```
+//! The simplest way to integrate your app into xcode environment is to build it
+//! as a static library. Wrap your main function and export it.
+//!
+//! ```rust, ignore
+//! #[no_mangle]
+//! pub extern fn start_winit_app() {
+//!     start_inner()
+//! }
+//!
+//! fn start_inner() {
+//!    ...
+//! }
+//! ```
+//!
+//! Compile project and then drag resulting .a into Xcode project. Add winit.h to xcode.
+//!
+//! ```ignore
+//! void start_winit_app();
+//! ```
+//!
+//! Use start_winit_app inside your xcode's main function.
+//!
+//!
+//! ## App lifecycle and events
+//!
+//! iOS environment is very different from other platforms and you must be very
+//! careful with it's events. Familiarize yourself with
+//! [app lifecycle](https://developer.apple.com/library/ios/documentation/UIKit/Reference/UIApplicationDelegate_Protocol/).
+//!
+//! This is how those event are represented in winit:
+//!
+//!  - applicationDidBecomeActive is Resumed
+//!  - applicationWillResignActive is Suspended
+//!  - applicationWillTerminate is LoopExiting
+//!
+//! Keep in mind that after LoopExiting event is received every attempt to draw with
+//! opengl will result in segfault.
+//!
+//! Also note that app may not receive the LoopExiting event if suspended; it might be SIGKILL'ed.
+//!
+//! ## Custom `UIApplicationDelegate`
+//!
+//! Winit usually handles everything related to the lifecycle events of the application. Sometimes,
+//! though, you might want to access some of the more niche stuff that [the application
+//! delegate][app-delegate] provides. This functionality is not exposed directly in Winit, since it
+//! would increase the API surface by quite a lot. Instead, Winit guarantees that it will not
+//! register an application delegate, so you can set up a custom one in a nib file instead.
+//!
+//! [app-delegate]: https://developer.apple.com/documentation/uikit/uiapplicationdelegate?language=objc
+
 use std::os::raw::c_void;
 
-use icrate::Foundation::MainThreadMarker;
-use objc2::rc::Id;
-
-use crate::{
-    event_loop::EventLoop,
-    monitor::{MonitorHandle, VideoMode},
-    window::{Window, WindowBuilder},
-};
+use crate::event_loop::EventLoop;
+use crate::monitor::{MonitorHandle, VideoModeHandle};
+use crate::window::{Window, WindowAttributes};
 
 /// Additional methods on [`EventLoop`] that are specific to iOS.
 pub trait EventLoopExtIOS {
@@ -88,25 +162,52 @@ pub trait WindowExtIOS {
     /// [`setNeedsStatusBarAppearanceUpdate()`](https://developer.apple.com/documentation/uikit/uiviewcontroller/1621354-setneedsstatusbarappearanceupdat?language=objc)
     /// is also called for you.
     fn set_preferred_status_bar_style(&self, status_bar_style: StatusBarStyle);
+
+    /// Sets whether the [`Window`] should recognize pinch gestures.
+    ///
+    /// The default is to not recognize gestures.
+    fn recognize_pinch_gesture(&self, should_recognize: bool);
+
+    /// Sets whether the [`Window`] should recognize pan gestures.
+    ///
+    /// The default is to not recognize gestures.
+    /// Installs [`UIPanGestureRecognizer`](https://developer.apple.com/documentation/uikit/uipangesturerecognizer) onto view
+    ///
+    /// Set the minimum number of touches required: [`minimumNumberOfTouches`](https://developer.apple.com/documentation/uikit/uipangesturerecognizer/1621208-minimumnumberoftouches)
+    ///
+    /// Set the maximum number of touches recognized: [`maximumNumberOfTouches`](https://developer.apple.com/documentation/uikit/uipangesturerecognizer/1621208-maximumnumberoftouches)
+    fn recognize_pan_gesture(
+        &self,
+        should_recognize: bool,
+        minimum_number_of_touches: u8,
+        maximum_number_of_touches: u8,
+    );
+
+    /// Sets whether the [`Window`] should recognize double tap gestures.
+    ///
+    /// The default is to not recognize gestures.
+    fn recognize_doubletap_gesture(&self, should_recognize: bool);
+
+    /// Sets whether the [`Window`] should recognize rotation gestures.
+    ///
+    /// The default is to not recognize gestures.
+    fn recognize_rotation_gesture(&self, should_recognize: bool);
 }
 
 impl WindowExtIOS for Window {
     #[inline]
     fn set_scale_factor(&self, scale_factor: f64) {
-        self.window
-            .maybe_queue_on_main(move |w| w.set_scale_factor(scale_factor))
+        self.window.maybe_queue_on_main(move |w| w.set_scale_factor(scale_factor))
     }
 
     #[inline]
     fn set_valid_orientations(&self, valid_orientations: ValidOrientations) {
-        self.window
-            .maybe_queue_on_main(move |w| w.set_valid_orientations(valid_orientations))
+        self.window.maybe_queue_on_main(move |w| w.set_valid_orientations(valid_orientations))
     }
 
     #[inline]
     fn set_prefers_home_indicator_hidden(&self, hidden: bool) {
-        self.window
-            .maybe_queue_on_main(move |w| w.set_prefers_home_indicator_hidden(hidden))
+        self.window.maybe_queue_on_main(move |w| w.set_prefers_home_indicator_hidden(hidden))
     }
 
     #[inline]
@@ -118,19 +219,48 @@ impl WindowExtIOS for Window {
 
     #[inline]
     fn set_prefers_status_bar_hidden(&self, hidden: bool) {
-        self.window
-            .maybe_queue_on_main(move |w| w.set_prefers_status_bar_hidden(hidden))
+        self.window.maybe_queue_on_main(move |w| w.set_prefers_status_bar_hidden(hidden))
     }
 
     #[inline]
     fn set_preferred_status_bar_style(&self, status_bar_style: StatusBarStyle) {
-        self.window
-            .maybe_queue_on_main(move |w| w.set_preferred_status_bar_style(status_bar_style))
+        self.window.maybe_queue_on_main(move |w| w.set_preferred_status_bar_style(status_bar_style))
+    }
+
+    #[inline]
+    fn recognize_pinch_gesture(&self, should_recognize: bool) {
+        self.window.maybe_queue_on_main(move |w| w.recognize_pinch_gesture(should_recognize));
+    }
+
+    #[inline]
+    fn recognize_pan_gesture(
+        &self,
+        should_recognize: bool,
+        minimum_number_of_touches: u8,
+        maximum_number_of_touches: u8,
+    ) {
+        self.window.maybe_queue_on_main(move |w| {
+            w.recognize_pan_gesture(
+                should_recognize,
+                minimum_number_of_touches,
+                maximum_number_of_touches,
+            )
+        });
+    }
+
+    #[inline]
+    fn recognize_doubletap_gesture(&self, should_recognize: bool) {
+        self.window.maybe_queue_on_main(move |w| w.recognize_doubletap_gesture(should_recognize));
+    }
+
+    #[inline]
+    fn recognize_rotation_gesture(&self, should_recognize: bool) {
+        self.window.maybe_queue_on_main(move |w| w.recognize_rotation_gesture(should_recognize));
     }
 }
 
-/// Additional methods on [`WindowBuilder`] that are specific to iOS.
-pub trait WindowBuilderExtIOS {
+/// Additional methods on [`WindowAttributes`] that are specific to iOS.
+pub trait WindowAttributesExtIOS {
     /// Sets the [`contentScaleFactor`] of the underlying [`UIWindow`] to `scale_factor`.
     ///
     /// The default value is device dependent, and it's recommended GLES or Metal applications set
@@ -184,7 +314,7 @@ pub trait WindowBuilderExtIOS {
     fn with_preferred_status_bar_style(self, status_bar_style: StatusBarStyle) -> Self;
 }
 
-impl WindowBuilderExtIOS for WindowBuilder {
+impl WindowAttributesExtIOS for WindowAttributes {
     #[inline]
     fn with_scale_factor(mut self, scale_factor: f64) -> Self {
         self.platform_specific.scale_factor = Some(scale_factor);
@@ -205,8 +335,7 @@ impl WindowBuilderExtIOS for WindowBuilder {
 
     #[inline]
     fn with_preferred_screen_edges_deferring_system_gestures(mut self, edges: ScreenEdge) -> Self {
-        self.platform_specific
-            .preferred_screen_edges_deferring_system_gestures = edges;
+        self.platform_specific.preferred_screen_edges_deferring_system_gestures = edges;
         self
     }
 
@@ -230,25 +359,23 @@ pub trait MonitorHandleExtIOS {
     /// [`UIScreen`]: https://developer.apple.com/documentation/uikit/uiscreen?language=objc
     fn ui_screen(&self) -> *mut c_void;
 
-    /// Returns the preferred [`VideoMode`] for this monitor.
+    /// Returns the preferred [`VideoModeHandle`] for this monitor.
     ///
     /// This translates to a call to [`-[UIScreen preferredMode]`](https://developer.apple.com/documentation/uikit/uiscreen/1617823-preferredmode?language=objc).
-    fn preferred_video_mode(&self) -> VideoMode;
+    fn preferred_video_mode(&self) -> VideoModeHandle;
 }
 
 impl MonitorHandleExtIOS for MonitorHandle {
     #[inline]
     fn ui_screen(&self) -> *mut c_void {
         // SAFETY: The marker is only used to get the pointer of the screen
-        let mtm = unsafe { MainThreadMarker::new_unchecked() };
-        Id::as_ptr(self.inner.ui_screen(mtm)) as *mut c_void
+        let mtm = unsafe { objc2_foundation::MainThreadMarker::new_unchecked() };
+        objc2::rc::Retained::as_ptr(self.inner.ui_screen(mtm)) as *mut c_void
     }
 
     #[inline]
-    fn preferred_video_mode(&self) -> VideoMode {
-        VideoMode {
-            video_mode: self.inner.preferred_video_mode(),
-        }
+    fn preferred_video_mode(&self) -> VideoModeHandle {
+        VideoModeHandle { video_mode: self.inner.preferred_video_mode() }
     }
 }
 
@@ -283,7 +410,7 @@ pub enum Idiom {
     CarPlay,
 }
 
-bitflags! {
+bitflags::bitflags! {
     /// The [edges] of a screen.
     ///
     /// [edges]: https://developer.apple.com/documentation/uikit/uirectedge?language=objc

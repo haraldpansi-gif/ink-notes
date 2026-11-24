@@ -1,6 +1,6 @@
-# winit 0.29.15 for ink-notes
+# winit 0.30.13 for ink-notes
 
-Copy of [winit 0.29.15](https://crates.io/crates/winit/0.29.15) (Apache-2.0, see
+Copy of [winit 0.30.13](https://crates.io/crates/winit/0.30.13) (Apache-2.0, see
 `LICENSE`), used through `[patch.crates-io]` in the top-level `Cargo.toml`. Examples, tests and
 docs of the original crate were removed.
 

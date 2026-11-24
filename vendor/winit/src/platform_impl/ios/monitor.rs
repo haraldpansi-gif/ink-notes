@@ -1,54 +1,48 @@
 #![allow(clippy::unnecessary_cast)]
 
-use std::{
-    collections::{BTreeSet, VecDeque},
-    fmt, hash, ptr,
-};
+use std::collections::{BTreeSet, VecDeque};
+use std::{fmt, hash, ptr};
 
-use icrate::Foundation::{MainThreadBound, MainThreadMarker, NSInteger};
 use objc2::mutability::IsRetainable;
-use objc2::rc::Id;
+use objc2::rc::Retained;
+use objc2::Message;
+use objc2_foundation::{run_on_main, MainThreadBound, MainThreadMarker, NSInteger};
+use objc2_ui_kit::{UIScreen, UIScreenMode};
 
-use super::uikit::{UIScreen, UIScreenMode};
-use crate::{
-    dpi::{PhysicalPosition, PhysicalSize},
-    monitor::VideoMode as RootVideoMode,
-    platform_impl::platform::app_state,
-};
+use crate::dpi::{PhysicalPosition, PhysicalSize};
+use crate::monitor::VideoModeHandle as RootVideoModeHandle;
+use crate::platform_impl::platform::app_state;
 
 // Workaround for `MainThreadBound` implementing almost no traits
 #[derive(Debug)]
-struct MainThreadBoundDelegateImpls<T>(MainThreadBound<Id<T>>);
+struct MainThreadBoundDelegateImpls<T>(MainThreadBound<Retained<T>>);
 
-impl<T: IsRetainable> Clone for MainThreadBoundDelegateImpls<T> {
+impl<T: IsRetainable + Message> Clone for MainThreadBoundDelegateImpls<T> {
     fn clone(&self) -> Self {
-        Self(
-            self.0
-                .get_on_main(|inner, mtm| MainThreadBound::new(Id::clone(inner), mtm)),
-        )
+        Self(run_on_main(|mtm| MainThreadBound::new(Retained::clone(self.0.get(mtm)), mtm)))
     }
 }
 
-impl<T: IsRetainable> hash::Hash for MainThreadBoundDelegateImpls<T> {
+impl<T: IsRetainable + Message> hash::Hash for MainThreadBoundDelegateImpls<T> {
     fn hash<H: hash::Hasher>(&self, state: &mut H) {
         // SAFETY: Marker only used to get the pointer
         let mtm = unsafe { MainThreadMarker::new_unchecked() };
-        Id::as_ptr(self.0.get(mtm)).hash(state);
+        Retained::as_ptr(self.0.get(mtm)).hash(state);
     }
 }
 
-impl<T: IsRetainable> PartialEq for MainThreadBoundDelegateImpls<T> {
+impl<T: IsRetainable + Message> PartialEq for MainThreadBoundDelegateImpls<T> {
     fn eq(&self, other: &Self) -> bool {
         // SAFETY: Marker only used to get the pointer
         let mtm = unsafe { MainThreadMarker::new_unchecked() };
-        Id::as_ptr(self.0.get(mtm)) == Id::as_ptr(other.0.get(mtm))
+        Retained::as_ptr(self.0.get(mtm)) == Retained::as_ptr(other.0.get(mtm))
     }
 }
 
-impl<T: IsRetainable> Eq for MainThreadBoundDelegateImpls<T> {}
+impl<T: IsRetainable + Message> Eq for MainThreadBoundDelegateImpls<T> {}
 
 #[derive(Debug, PartialEq, Eq, Hash, Clone)]
-pub struct VideoMode {
+pub struct VideoModeHandle {
     pub(crate) size: (u32, u32),
     pub(crate) bit_depth: u16,
     pub(crate) refresh_rate_millihertz: u32,
@@ -56,15 +50,15 @@ pub struct VideoMode {
     pub(crate) monitor: MonitorHandle,
 }
 
-impl VideoMode {
+impl VideoModeHandle {
     fn new(
-        uiscreen: Id<UIScreen>,
-        screen_mode: Id<UIScreenMode>,
+        uiscreen: Retained<UIScreen>,
+        screen_mode: Retained<UIScreenMode>,
         mtm: MainThreadMarker,
-    ) -> VideoMode {
+    ) -> VideoModeHandle {
         let refresh_rate_millihertz = refresh_rate_millihertz(&uiscreen);
         let size = screen_mode.size();
-        VideoMode {
+        VideoModeHandle {
             size: (size.width as u32, size.height as u32),
             bit_depth: 32,
             refresh_rate_millihertz,
@@ -89,34 +83,39 @@ impl VideoMode {
         self.monitor.clone()
     }
 
-    pub(super) fn screen_mode(&self, mtm: MainThreadMarker) -> &Id<UIScreenMode> {
+    pub(super) fn screen_mode(&self, mtm: MainThreadMarker) -> &Retained<UIScreenMode> {
         self.screen_mode.0.get(mtm)
     }
 }
 
 pub struct MonitorHandle {
-    ui_screen: MainThreadBound<Id<UIScreen>>,
+    ui_screen: MainThreadBound<Retained<UIScreen>>,
 }
 
 impl Clone for MonitorHandle {
     fn clone(&self) -> Self {
-        Self {
-            ui_screen: self
-                .ui_screen
-                .get_on_main(|inner, mtm| MainThreadBound::new(inner.clone(), mtm)),
-        }
+        run_on_main(|mtm| Self {
+            ui_screen: MainThreadBound::new(self.ui_screen.get(mtm).clone(), mtm),
+        })
     }
 }
 
 impl hash::Hash for MonitorHandle {
     fn hash<H: hash::Hasher>(&self, state: &mut H) {
-        (self as *const Self).hash(state);
+        // SAFETY: Only getting the pointer.
+        let mtm = unsafe { MainThreadMarker::new_unchecked() };
+        Retained::as_ptr(self.ui_screen.get(mtm)).hash(state);
     }
 }
 
 impl PartialEq for MonitorHandle {
     fn eq(&self, other: &Self) -> bool {
-        ptr::eq(self, other)
+        // SAFETY: Only getting the pointer.
+        let mtm = unsafe { MainThreadMarker::new_unchecked() };
+        ptr::eq(
+            Retained::as_ptr(self.ui_screen.get(mtm)),
+            Retained::as_ptr(other.ui_screen.get(mtm)),
+        )
     }
 }
 
@@ -130,94 +129,78 @@ impl PartialOrd for MonitorHandle {
 
 impl Ord for MonitorHandle {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        // SAFETY: Only getting the pointer.
         // TODO: Make a better ordering
-        (self as *const Self).cmp(&(other as *const Self))
+        let mtm = unsafe { MainThreadMarker::new_unchecked() };
+        Retained::as_ptr(self.ui_screen.get(mtm)).cmp(&Retained::as_ptr(other.ui_screen.get(mtm)))
     }
 }
 
 impl fmt::Debug for MonitorHandle {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // TODO: Do this using the proper fmt API
-        #[derive(Debug)]
-        #[allow(dead_code)]
-        struct MonitorHandle {
-            name: Option<String>,
-            size: PhysicalSize<u32>,
-            position: PhysicalPosition<i32>,
-            scale_factor: f64,
-        }
-
-        let monitor_id_proxy = MonitorHandle {
-            name: self.name(),
-            size: self.size(),
-            position: self.position(),
-            scale_factor: self.scale_factor(),
-        };
-
-        monitor_id_proxy.fmt(f)
+        f.debug_struct("MonitorHandle")
+            .field("name", &self.name())
+            .field("size", &self.size())
+            .field("position", &self.position())
+            .field("scale_factor", &self.scale_factor())
+            .field("refresh_rate_millihertz", &self.refresh_rate_millihertz())
+            .finish_non_exhaustive()
     }
 }
 
 impl MonitorHandle {
-    pub(crate) fn new(ui_screen: Id<UIScreen>) -> Self {
-        // Holding `Id<UIScreen>` implies we're on the main thread.
+    pub(crate) fn new(ui_screen: Retained<UIScreen>) -> Self {
+        // Holding `Retained<UIScreen>` implies we're on the main thread.
         let mtm = MainThreadMarker::new().unwrap();
-        Self {
-            ui_screen: MainThreadBound::new(ui_screen, mtm),
-        }
+        Self { ui_screen: MainThreadBound::new(ui_screen, mtm) }
     }
 
     pub fn name(&self) -> Option<String> {
-        self.ui_screen.get_on_main(|ui_screen, mtm| {
-            let main = UIScreen::main(mtm);
-            if *ui_screen == main {
+        run_on_main(|mtm| {
+            #[allow(deprecated)]
+            let main = UIScreen::mainScreen(mtm);
+            if *self.ui_screen(mtm) == main {
                 Some("Primary".to_string())
-            } else if *ui_screen == main.mirroredScreen() {
+            } else if Some(self.ui_screen(mtm)) == main.mirroredScreen().as_ref() {
                 Some("Mirrored".to_string())
             } else {
+                #[allow(deprecated)]
                 UIScreen::screens(mtm)
                     .iter()
-                    .position(|rhs| rhs == &**ui_screen)
+                    .position(|rhs| rhs == &**self.ui_screen(mtm))
                     .map(|idx| idx.to_string())
             }
         })
     }
 
     pub fn size(&self) -> PhysicalSize<u32> {
-        let bounds = self
-            .ui_screen
-            .get_on_main(|ui_screen, _| ui_screen.nativeBounds());
+        let bounds = self.ui_screen.get_on_main(|ui_screen| ui_screen.nativeBounds());
         PhysicalSize::new(bounds.size.width as u32, bounds.size.height as u32)
     }
 
     pub fn position(&self) -> PhysicalPosition<i32> {
-        let bounds = self
-            .ui_screen
-            .get_on_main(|ui_screen, _| ui_screen.nativeBounds());
+        let bounds = self.ui_screen.get_on_main(|ui_screen| ui_screen.nativeBounds());
         (bounds.origin.x as f64, bounds.origin.y as f64).into()
     }
 
     pub fn scale_factor(&self) -> f64 {
-        self.ui_screen
-            .get_on_main(|ui_screen, _| ui_screen.nativeScale()) as f64
+        self.ui_screen.get_on_main(|ui_screen| ui_screen.nativeScale()) as f64
     }
 
     pub fn refresh_rate_millihertz(&self) -> Option<u32> {
-        Some(
-            self.ui_screen
-                .get_on_main(|ui_screen, _| refresh_rate_millihertz(ui_screen)),
-        )
+        Some(self.ui_screen.get_on_main(|ui_screen| refresh_rate_millihertz(ui_screen)))
     }
 
-    pub fn video_modes(&self) -> impl Iterator<Item = VideoMode> {
-        self.ui_screen.get_on_main(|ui_screen, mtm| {
-            // Use Ord impl of RootVideoMode
+    pub fn video_modes(&self) -> impl Iterator<Item = VideoModeHandle> {
+        run_on_main(|mtm| {
+            let ui_screen = self.ui_screen(mtm);
+            // Use Ord impl of RootVideoModeHandle
 
             let modes: BTreeSet<_> = ui_screen
                 .availableModes()
                 .into_iter()
-                .map(|mode| RootVideoMode {
-                    video_mode: VideoMode::new(ui_screen.clone(), mode, mtm),
+                .map(|mode| RootVideoModeHandle {
+                    video_mode: VideoModeHandle::new(ui_screen.clone(), mode, mtm),
                 })
                 .collect();
 
@@ -225,13 +208,17 @@ impl MonitorHandle {
         })
     }
 
-    pub(crate) fn ui_screen(&self, mtm: MainThreadMarker) -> &Id<UIScreen> {
+    pub(crate) fn ui_screen(&self, mtm: MainThreadMarker) -> &Retained<UIScreen> {
         self.ui_screen.get(mtm)
     }
 
-    pub fn preferred_video_mode(&self) -> VideoMode {
-        self.ui_screen.get_on_main(|ui_screen, mtm| {
-            VideoMode::new(ui_screen.clone(), ui_screen.preferredMode().unwrap(), mtm)
+    pub fn preferred_video_mode(&self) -> VideoModeHandle {
+        run_on_main(|mtm| {
+            VideoModeHandle::new(
+                self.ui_screen(mtm).clone(),
+                self.ui_screen(mtm).preferredMode().unwrap(),
+                mtm,
+            )
         })
     }
 }
@@ -261,8 +248,30 @@ fn refresh_rate_millihertz(uiscreen: &UIScreen) -> u32 {
 }
 
 pub fn uiscreens(mtm: MainThreadMarker) -> VecDeque<MonitorHandle> {
-    UIScreen::screens(mtm)
-        .into_iter()
-        .map(MonitorHandle::new)
-        .collect()
+    #[allow(deprecated)]
+    UIScreen::screens(mtm).into_iter().map(MonitorHandle::new).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use objc2_foundation::NSSet;
+
+    use super::*;
+
+    // Test that UIScreen pointer comparisons are correct.
+    #[test]
+    #[allow(deprecated)]
+    fn screen_comparisons() {
+        // Test code, doesn't matter that it's not thread safe
+        let mtm = unsafe { MainThreadMarker::new_unchecked() };
+
+        assert!(ptr::eq(&*UIScreen::mainScreen(mtm), &*UIScreen::mainScreen(mtm)));
+
+        let main = UIScreen::mainScreen(mtm);
+        assert!(UIScreen::screens(mtm).iter().any(|screen| ptr::eq(screen, &*main)));
+
+        assert!(unsafe {
+            NSSet::setWithArray(&UIScreen::screens(mtm)).containsObject(&UIScreen::mainScreen(mtm))
+        });
+    }
 }

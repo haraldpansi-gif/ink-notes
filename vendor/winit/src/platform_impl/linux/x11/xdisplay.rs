@@ -1,25 +1,19 @@
-use std::{
-    collections::HashMap,
-    error::Error,
-    fmt, ptr,
-    sync::{
-        atomic::{AtomicU32, Ordering},
-        Arc, Mutex, RwLock, RwLockReadGuard,
-    },
-};
+use std::collections::HashMap;
+use std::error::Error;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, Mutex, RwLock, RwLockReadGuard};
+use std::{fmt, ptr};
 
 use crate::window::CursorIcon;
 
-use super::{atoms::Atoms, ffi, monitor::MonitorHandle};
-use x11rb::{
-    connection::Connection,
-    protocol::{
-        randr::ConnectionExt as _,
-        xproto::{self, ConnectionExt},
-    },
-    resource_manager,
-    xcb_ffi::XCBConnection,
-};
+use super::atoms::Atoms;
+use super::ffi;
+use super::monitor::MonitorHandle;
+use x11rb::connection::Connection;
+use x11rb::protocol::randr::ConnectionExt as _;
+use x11rb::protocol::xproto::{self, ConnectionExt};
+use x11rb::resource_manager;
+use x11rb::xcb_ffi::XCBConnection;
 
 /// A connection to an X server.
 pub struct XConnection {
@@ -121,7 +115,7 @@ impl XConnection {
 
         let xsettings_screen = Self::new_xsettings_screen(&xcb, default_screen);
         if xsettings_screen.is_none() {
-            log::warn!("error setting XSETTINGS; Xft options won't reload automatically")
+            tracing::warn!("error setting XSETTINGS; Xft options won't reload automatically")
         }
 
         // Fetch atoms.
@@ -151,21 +145,16 @@ impl XConnection {
     fn new_xsettings_screen(xcb: &XCBConnection, default_screen: usize) -> Option<xproto::Atom> {
         // Fetch the _XSETTINGS_S[screen number] atom.
         let xsettings_screen = xcb
-            .intern_atom(false, format!("_XSETTINGS_S{}", default_screen).as_bytes())
+            .intern_atom(false, format!("_XSETTINGS_S{default_screen}").as_bytes())
             .ok()?
             .reply()
             .ok()?
             .atom;
 
         // Get PropertyNotify events from the XSETTINGS window.
-        // TODO: The XSETTINGS window here can change. In the future, listen for DestroyNotify on this window
-        // in order to accomodate for a changed window here.
-        let selector_window = xcb
-            .get_selection_owner(xsettings_screen)
-            .ok()?
-            .reply()
-            .ok()?
-            .owner;
+        // TODO: The XSETTINGS window here can change. In the future, listen for DestroyNotify on
+        // this window in order to accommodate for a changed window here.
+        let selector_window = xcb.get_selection_owner(xsettings_screen).ok()?.reply().ok()?.owner;
 
         xcb.change_window_attributes(
             selector_window,
@@ -198,9 +187,7 @@ impl XConnection {
     /// Get the underlying XCB connection.
     #[inline]
     pub fn xcb_connection(&self) -> &XCBConnection {
-        self.xcb
-            .as_ref()
-            .expect("xcb_connection somehow called after drop?")
+        self.xcb.as_ref().expect("xcb_connection somehow called after drop?")
     }
 
     /// Get the list of atoms.
@@ -247,9 +234,7 @@ impl XConnection {
         // Store the timestamp in the slot if it's greater than the last one.
         let mut last_timestamp = self.timestamp.load(Ordering::Relaxed);
         loop {
-            let wrapping_sub = |a: xproto::Timestamp, b: xproto::Timestamp| (a as i32) - (b as i32);
-
-            if wrapping_sub(timestamp, last_timestamp) <= 0 {
+            if (timestamp as i32).wrapping_sub(last_timestamp as i32) <= 0 {
                 break;
             }
 

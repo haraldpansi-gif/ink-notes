@@ -364,7 +364,7 @@ pub fn render_selection_overlay(
 ) {
     let painter = ctx.layer_painter(egui::LayerId::new(
         egui::Order::Foreground,
-        egui::Id::new("selection_overlay_layer"),
+        egui::Id::unique("selection_overlay_layer"),
     ));
     // Fensterpixel sind physisch, egui zeichnet in logischen Punkten
     let ppp = ctx.pixels_per_point();
@@ -387,16 +387,17 @@ pub fn render_selection_overlay(
         // Halbtransparente Füllung & blauer Auswahlrand
         painter.rect_filled(
             rect,
-            egui::Rounding::same(4.0_f32),
+            egui::CornerRadius::same(4),
             egui::Color32::from_rgba_unmultiplied(40, 120, 240, 35),
         );
         painter.rect_stroke(
             rect,
-            egui::Rounding::same(4.0_f32),
+            egui::CornerRadius::same(4),
             egui::Stroke::new(
                 1.5_f32,
                 egui::Color32::from_rgba_unmultiplied(80, 160, 255, 220),
             ),
+            egui::StrokeKind::Middle,
         );
         return;
     }
@@ -417,8 +418,9 @@ pub fn render_selection_overlay(
     let border_color = egui::Color32::from_rgb(70, 150, 255);
     painter.rect_stroke(
         rect,
-        egui::Rounding::same(3.0_f32),
+        egui::CornerRadius::same(3),
         egui::Stroke::new(1.5_f32, border_color),
+        egui::StrokeKind::Middle,
     );
 
     // Dreh-Stängel (Stalk) und Drehgriff
@@ -451,13 +453,14 @@ pub fn render_selection_overlay(
         let handle_rect = egui::Rect::from_center_size(c, egui::vec2(handle_size, handle_size));
         painter.rect_filled(
             handle_rect,
-            egui::Rounding::same(1.5_f32),
+            egui::CornerRadius::same(2),
             egui::Color32::WHITE,
         );
         painter.rect_stroke(
             handle_rect,
-            egui::Rounding::same(1.5_f32),
+            egui::CornerRadius::same(2),
             egui::Stroke::new(1.2_f32, egui::Color32::from_rgb(30, 80, 170)),
+            egui::StrokeKind::Middle,
         );
     }
 

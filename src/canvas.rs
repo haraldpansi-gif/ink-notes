@@ -380,10 +380,9 @@ impl CanvasState {
             PageViewport::calculate(size.width as f32, size.height as f32, Self::VIEWPORT_MARGIN);
 
         // 1. WGPU Instance & Surface (Grafikschnittstelle per WGPU_BACKEND wählbar, z. B. "vulkan")
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::util::backend_bits_from_env().unwrap_or(wgpu::Backends::all()),
-            ..Default::default()
-        });
+        let instance = wgpu::Instance::new(
+            wgpu::InstanceDescriptor::new_with_display_handle_from_env(Box::new(window.clone())),
+        );
 
         let surface = instance.create_surface(window.clone())?;
 
@@ -392,11 +391,12 @@ impl CanvasState {
         //    anbietet – fehlt z. B. der Zugriff auf /dev/dri, ist die Liste leer.
         let mut chosen = None;
         for force_fallback_adapter in [false, true] {
-            let Some(adapter) = instance
+            let Ok(adapter) = instance
                 .request_adapter(&wgpu::RequestAdapterOptions {
                     power_preference: wgpu::PowerPreference::HighPerformance,
                     compatible_surface: Some(&surface),
                     force_fallback_adapter,
+                    apply_limit_buckets: false,
                 })
                 .await
             else {
@@ -424,14 +424,14 @@ impl CanvasState {
 
         // 3. Device & Queue erstellen
         let (device, queue) = adapter
-            .request_device(
-                &wgpu::DeviceDescriptor {
-                    label: Some("Ink Device"),
-                    required_features: wgpu::Features::empty(),
-                    required_limits: wgpu::Limits::default(),
-                },
-                None,
-            )
+            .request_device(&wgpu::DeviceDescriptor {
+                label: Some("Ink Device"),
+                required_features: wgpu::Features::empty(),
+                required_limits: wgpu::Limits::default(),
+                experimental_features: wgpu::ExperimentalFeatures::disabled(),
+                memory_hints: wgpu::MemoryHints::default(),
+                trace: wgpu::Trace::Off,
+            })
             .await?;
 
         // 4. Geringe Bildverzögerung (Mailbox, sonst Fifo) & Frame-Latency 1.
@@ -452,6 +452,7 @@ impl CanvasState {
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format: surface_format,
+            color_space: wgpu::SurfaceColorSpace::Auto,
             width: size.width.max(1),
             height: size.height.max(1),
             present_mode,
@@ -522,8 +523,8 @@ impl CanvasState {
         // Pipeline Layout
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Ink Pipeline Layout"),
-            bind_group_layouts: &[&bind_group_layout],
-            push_constant_ranges: &[],
+            bind_group_layouts: &[Some(&bind_group_layout)],
+            immediate_size: 0,
         });
 
         // TriangleStrip-Pipeline (für Inking-Striche)
@@ -532,17 +533,19 @@ impl CanvasState {
             layout: Some(&pipeline_layout),
             vertex: wgpu::VertexState {
                 module: &shader,
-                entry_point: "vs_main",
-                buffers: &[InkVertex::desc()],
+                entry_point: Some("vs_main"),
+                buffers: &[Some(InkVertex::desc())],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
             },
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
-                entry_point: "fs_ink",
+                entry_point: Some("fs_ink"),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: render_format(&config),
                     blend: Some(wgpu::BlendState::ALPHA_BLENDING),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
             }),
             primitive: wgpu::PrimitiveState {
                 topology: wgpu::PrimitiveTopology::TriangleStrip,
@@ -558,7 +561,8 @@ impl CanvasState {
                 count: msaa_samples,
                 ..Default::default()
             },
-            multiview: None,
+            multiview_mask: None,
+            cache: None,
         });
 
         // Setzt den Stencil-Puffer zurück, wenn die Strichnummern überlaufen
@@ -568,17 +572,19 @@ impl CanvasState {
                 layout: Some(&pipeline_layout),
                 vertex: wgpu::VertexState {
                     module: &shader,
-                    entry_point: "vs_fullscreen",
+                    entry_point: Some("vs_fullscreen"),
                     buffers: &[],
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
                 },
                 fragment: Some(wgpu::FragmentState {
                     module: &shader,
-                    entry_point: "fs_none",
+                    entry_point: Some("fs_none"),
                     targets: &[Some(wgpu::ColorTargetState {
                         format: render_format(&config),
                         blend: None,
                         write_mask: wgpu::ColorWrites::empty(),
                     })],
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
                 }),
                 primitive: wgpu::PrimitiveState::default(),
                 depth_stencil: Some(stencil_reset()),
@@ -586,7 +592,8 @@ impl CanvasState {
                     count: msaa_samples,
                     ..Default::default()
                 },
-                multiview: None,
+                multiview_mask: None,
+                cache: None,
             });
 
         // TriangleList-Pipeline (für Hintergrundpapier und Muster)
@@ -595,17 +602,19 @@ impl CanvasState {
             layout: Some(&pipeline_layout),
             vertex: wgpu::VertexState {
                 module: &shader,
-                entry_point: "vs_main",
-                buffers: &[InkVertex::desc()],
+                entry_point: Some("vs_main"),
+                buffers: &[Some(InkVertex::desc())],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
             },
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
-                entry_point: "fs_main",
+                entry_point: Some("fs_main"),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: render_format(&config),
                     blend: Some(wgpu::BlendState::ALPHA_BLENDING),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
             }),
             primitive: wgpu::PrimitiveState {
                 topology: wgpu::PrimitiveTopology::TriangleList,
@@ -621,7 +630,8 @@ impl CanvasState {
                 count: msaa_samples,
                 ..Default::default()
             },
-            multiview: None,
+            multiview_mask: None,
+            cache: None,
         });
 
         // 6. Statische Buffer
@@ -655,17 +665,19 @@ impl CanvasState {
             layout: Some(&pipeline_layout),
             vertex: wgpu::VertexState {
                 module: &shader,
-                entry_point: "vs_pattern",
-                buffers: &[PatternVertex::desc()],
+                entry_point: Some("vs_pattern"),
+                buffers: &[Some(PatternVertex::desc())],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
             },
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
-                entry_point: "fs_pattern",
+                entry_point: Some("fs_pattern"),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: render_format(&config),
                     blend: Some(wgpu::BlendState::ALPHA_BLENDING),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
             }),
             primitive: wgpu::PrimitiveState::default(),
             depth_stencil: Some(passive_stencil()),
@@ -673,7 +685,8 @@ impl CanvasState {
                 count: msaa_samples,
                 ..Default::default()
             },
-            multiview: None,
+            multiview_mask: None,
+            cache: None,
         });
 
         // 7. GPU-Puffer für Live- und Committed-Geometrie
@@ -693,7 +706,11 @@ impl CanvasState {
         );
 
         // 8. egui Renderer für das schwebende UI initialisieren
-        let egui_renderer = egui_wgpu::Renderer::new(&device, render_format(&config), None, 1);
+        let egui_renderer = egui_wgpu::Renderer::new(
+            &device,
+            render_format(&config),
+            egui_wgpu::RendererOptions::default(),
+        );
 
         Ok(Self {
             surface: Some(surface),
@@ -1489,11 +1506,13 @@ impl CanvasState {
         clipped_primitives: &[egui::ClippedPrimitive],
         screen_descriptor: &egui_wgpu::ScreenDescriptor,
         textures_delta: &egui::TexturesDelta,
-    ) -> Result<(), wgpu::SurfaceError> {
+    ) -> Result<(), RenderError> {
         // Vor dem Renderpass: egui-Texturen aktualisieren
-        for (id, image_delta) in &textures_delta.set {
-            self.egui_renderer
-                .update_texture(&self.device, &self.queue, *id, image_delta);
+        for (id, image_deltas) in &textures_delta.set {
+            for image_delta in image_deltas {
+                self.egui_renderer
+                    .update_texture(&self.device, &self.queue, *id, image_delta);
+            }
         }
 
         let Some(surface) = &self.surface else {
@@ -1502,7 +1521,16 @@ impl CanvasState {
             }
             return Ok(());
         };
-        let output = surface.get_current_texture()?;
+        let output = match surface.get_current_texture() {
+            wgpu::CurrentSurfaceTexture::Success(tex)
+            | wgpu::CurrentSurfaceTexture::Suboptimal(tex) => tex,
+            wgpu::CurrentSurfaceTexture::Lost | wgpu::CurrentSurfaceTexture::Outdated => {
+                return Err(RenderError::LostOrOutdated);
+            }
+            wgpu::CurrentSurfaceTexture::Timeout => return Err(RenderError::Timeout),
+            wgpu::CurrentSurfaceTexture::Occluded => return Ok(()),
+            wgpu::CurrentSurfaceTexture::Validation => return Err(RenderError::LostOrOutdated),
+        };
         let view = output.texture.create_view(&wgpu::TextureViewDescriptor {
             format: Some(render_format(&self.config)),
             ..Default::default()
@@ -1530,6 +1558,7 @@ impl CanvasState {
                 // Mit Multisampling ins Zwischenbild zeichnen und in die Fensterfläche auflösen
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: self.msaa_view.as_ref().unwrap_or(&view),
+                    depth_slice: None,
                     resolve_target: self.msaa_view.as_ref().map(|_| &view),
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(self.paper_theme.desk_color()), // Tischhintergrund
@@ -1550,6 +1579,7 @@ impl CanvasState {
                 }),
                 timestamp_writes: None,
                 occlusion_query_set: None,
+                multiview_mask: None,
             });
             let mut stencil_ref = 0;
 
@@ -1614,27 +1644,31 @@ impl CanvasState {
 
         // PASS 2: egui UI (LoadOp::Load auf dieselbe Surface-Textur!)
         if !clipped_primitives.is_empty() {
-            let mut egui_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("egui UI Render Pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Load,
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-            });
+            let mut egui_pass = encoder
+                .begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("egui UI Render Pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &view,
+                        depth_slice: None,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                })
+                .forget_lifetime();
 
             self.egui_renderer
                 .render(&mut egui_pass, clipped_primitives, screen_descriptor);
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));
-        output.present();
+        self.queue.present(output);
 
         // egui Texturen freigeben
         for id in &textures_delta.free {
@@ -1659,7 +1693,7 @@ impl CanvasState {
     }
 
     /// Rendert nur die Canvas-Fläche ohne UI (z. B. für Headless-Tests).
-    pub fn render_canvas_only(&mut self) -> Result<(), wgpu::SurfaceError> {
+    pub fn render_canvas_only(&mut self) -> Result<(), RenderError> {
         let dummy_delta = egui::TexturesDelta::default();
         let dummy_screen = egui_wgpu::ScreenDescriptor {
             size_in_pixels: [self.size.width, self.size.height],
@@ -1667,6 +1701,13 @@ impl CanvasState {
         };
         self.render(&[], &dummy_screen, &dummy_delta)
     }
+}
+
+/// Fehler beim Anfordern der nächsten Fensterfläche.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RenderError {
+    LostOrOutdated,
+    Timeout,
 }
 
 /// Format, in das gezeichnet wird: ohne sRGB-Umrechnung. Die Farben werden also in sRGB
@@ -1746,8 +1787,8 @@ fn stencil_state(
     };
     wgpu::DepthStencilState {
         format: STENCIL_FORMAT,
-        depth_write_enabled: false,
-        depth_compare: wgpu::CompareFunction::Always,
+        depth_write_enabled: Some(false),
+        depth_compare: Some(wgpu::CompareFunction::Always),
         stencil: wgpu::StencilState {
             front: face,
             back: face,
@@ -1882,20 +1923,24 @@ mod tests {
             max_buffer_size: 40 * vertex_size,
             ..wgpu::Limits::default()
         };
-        let instance = wgpu::Instance::default();
+        let instance =
+            wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
         let mut found = None;
         for force_fallback_adapter in [false, true] {
             let options = wgpu::RequestAdapterOptions {
                 force_fallback_adapter,
                 ..Default::default()
             };
-            if let Some(adapter) = pollster::block_on(instance.request_adapter(&options)) {
+            if let Ok(adapter) = pollster::block_on(instance.request_adapter(&options)) {
                 let descriptor = wgpu::DeviceDescriptor {
                     label: None,
                     required_features: wgpu::Features::empty(),
                     required_limits: limits.clone(),
+                    experimental_features: wgpu::ExperimentalFeatures::disabled(),
+                    memory_hints: wgpu::MemoryHints::default(),
+                    trace: wgpu::Trace::Off,
                 };
-                if let Ok(pair) = pollster::block_on(adapter.request_device(&descriptor, None)) {
+                if let Ok(pair) = pollster::block_on(adapter.request_device(&descriptor)) {
                     found = Some(pair);
                     break;
                 }
@@ -1911,16 +1956,16 @@ mod tests {
         let ranges: Vec<Range<u32>> = (0..10).map(|i| i * 12..(i + 1) * 12).collect();
 
         // The limit is real: one buffer for everything is refused
-        device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
         let _ = device.create_buffer(&wgpu::BufferDescriptor {
             label: None,
             size: vertices.len() as u64 * vertex_size,
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        assert!(pollster::block_on(device.pop_error_scope()).is_some());
+        assert!(pollster::block_on(scope.pop()).is_some());
 
-        device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
         let mut strokes = StrokeBuffers::default();
         strokes.upload(&device, &queue, &vertices, &ranges, Some(16));
         assert_eq!(strokes.in_use().len(), 4);
@@ -1942,13 +1987,15 @@ mod tests {
             layout: None,
             vertex: wgpu::VertexState {
                 module: &shader,
-                entry_point: "vs",
-                buffers: &[InkVertex::desc()],
+                entry_point: Some("vs"),
+                buffers: &[Some(InkVertex::desc())],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
             },
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
-                entry_point: "fs",
+                entry_point: Some("fs"),
                 targets: &[Some(format.into())],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
             }),
             primitive: wgpu::PrimitiveState {
                 topology: wgpu::PrimitiveTopology::TriangleStrip,
@@ -1956,7 +2003,8 @@ mod tests {
             },
             depth_stencil: None,
             multisample: wgpu::MultisampleState::default(),
-            multiview: None,
+            multiview_mask: None,
+            cache: None,
         });
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: None,
@@ -1979,6 +2027,7 @@ mod tests {
                 label: None,
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &view,
+                    depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
@@ -1988,6 +2037,7 @@ mod tests {
                 depth_stencil_attachment: None,
                 timestamp_writes: None,
                 occlusion_query_set: None,
+                multiview_mask: None,
             });
             pass.set_pipeline(&pipeline);
             for chunk in strokes.in_use() {
@@ -1998,8 +2048,8 @@ mod tests {
             }
         }
         queue.submit(std::iter::once(encoder.finish()));
-        device.poll(wgpu::Maintain::Wait);
-        let error = pollster::block_on(device.pop_error_scope());
+        let _ = device.poll(wgpu::PollType::wait_indefinitely());
+        let error = pollster::block_on(scope.pop());
         assert!(error.is_none(), "{error:?}");
 
         // A smaller page afterwards uses one buffer again and frees the others

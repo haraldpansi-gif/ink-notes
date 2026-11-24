@@ -1,34 +1,35 @@
 use js_sys::{Array, Object};
+use tracing::warn;
 use wasm_bindgen::prelude::{wasm_bindgen, Closure};
 use wasm_bindgen::{JsCast, JsValue};
 use web_sys::{
-    CssStyleDeclaration, Document, HtmlCanvasElement, MediaQueryList, ResizeObserver,
-    ResizeObserverBoxOptions, ResizeObserverEntry, ResizeObserverOptions, ResizeObserverSize,
-    Window,
+    Document, HtmlCanvasElement, MediaQueryList, ResizeObserver, ResizeObserverBoxOptions,
+    ResizeObserverEntry, ResizeObserverOptions, ResizeObserverSize, Window,
 };
 
 use crate::dpi::{LogicalSize, PhysicalSize};
 
 use super::super::backend;
+use super::canvas::Style;
 use super::media_query_handle::MediaQueryListHandle;
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-pub struct ResizeScaleHandle(Rc<RefCell<ResizeScaleInternal>>);
+pub struct ResizeScaleHandle(Rc<ResizeScaleInternal>);
 
 impl ResizeScaleHandle {
     pub(crate) fn new<S, R>(
         window: Window,
         document: Document,
         canvas: HtmlCanvasElement,
-        style: CssStyleDeclaration,
+        style: Style,
         scale_handler: S,
         resize_handler: R,
     ) -> Self
     where
-        S: 'static + FnMut(PhysicalSize<u32>, f64),
-        R: 'static + FnMut(PhysicalSize<u32>),
+        S: 'static + Fn(PhysicalSize<u32>, f64),
+        R: 'static + Fn(PhysicalSize<u32>),
     {
         Self(ResizeScaleInternal::new(
             window,
@@ -41,7 +42,7 @@ impl ResizeScaleHandle {
     }
 
     pub(crate) fn notify_resize(&self) {
-        self.0.borrow_mut().notify()
+        self.0.notify()
     }
 }
 
@@ -51,12 +52,12 @@ struct ResizeScaleInternal {
     window: Window,
     document: Document,
     canvas: HtmlCanvasElement,
-    style: CssStyleDeclaration,
-    mql: MediaQueryListHandle,
+    style: Style,
+    mql: RefCell<MediaQueryListHandle>,
     observer: ResizeObserver,
     _observer_closure: Closure<dyn FnMut(Array, ResizeObserver)>,
-    scale_handler: Box<dyn FnMut(PhysicalSize<u32>, f64)>,
-    resize_handler: Box<dyn FnMut(PhysicalSize<u32>)>,
+    scale_handler: Box<dyn Fn(PhysicalSize<u32>, f64)>,
+    resize_handler: Box<dyn Fn(PhysicalSize<u32>)>,
     notify_scale: Cell<bool>,
 }
 
@@ -65,15 +66,15 @@ impl ResizeScaleInternal {
         window: Window,
         document: Document,
         canvas: HtmlCanvasElement,
-        style: CssStyleDeclaration,
+        style: Style,
         scale_handler: S,
         resize_handler: R,
-    ) -> Rc<RefCell<Self>>
+    ) -> Rc<Self>
     where
-        S: 'static + FnMut(PhysicalSize<u32>, f64),
-        R: 'static + FnMut(PhysicalSize<u32>),
+        S: 'static + Fn(PhysicalSize<u32>, f64),
+        R: 'static + Fn(PhysicalSize<u32>),
     {
-        Rc::<RefCell<ResizeScaleInternal>>::new_cyclic(|weak_self| {
+        Rc::<ResizeScaleInternal>::new_cyclic(|weak_self| {
             let mql = Self::create_mql(&window, {
                 let weak_self = weak_self.clone();
                 move |mql| {
@@ -85,9 +86,7 @@ impl ResizeScaleInternal {
 
             let weak_self = weak_self.clone();
             let observer_closure = Closure::new(move |entries: Array, _| {
-                if let Some(rc_self) = weak_self.upgrade() {
-                    let mut this = rc_self.borrow_mut();
-
+                if let Some(this) = weak_self.upgrade() {
                     let size = this.process_entry(entries);
 
                     if this.notify_scale.replace(false) {
@@ -100,18 +99,18 @@ impl ResizeScaleInternal {
             });
             let observer = Self::create_observer(&canvas, observer_closure.as_ref());
 
-            RefCell::new(Self {
+            Self {
                 window,
                 document,
                 canvas,
                 style,
-                mql,
+                mql: RefCell::new(mql),
                 observer,
                 _observer_closure: observer_closure,
                 scale_handler: Box::new(scale_handler),
                 resize_handler: Box::new(resize_handler),
                 notify_scale: Cell::new(false),
-            })
+            }
         })
     }
 
@@ -140,10 +139,9 @@ impl ResizeScaleInternal {
 
         // Safari doesn't support `devicePixelContentBoxSize`
         if has_device_pixel_support() {
-            observer.observe_with_options(
-                canvas,
-                ResizeObserverOptions::new().box_(ResizeObserverBoxOptions::DevicePixelContentBox),
-            );
+            let options = ResizeObserverOptions::new();
+            options.set_box(ResizeObserverBoxOptions::DevicePixelContentBox);
+            observer.observe_with_options(canvas, &options);
         } else {
             observer.observe(canvas);
         }
@@ -151,10 +149,8 @@ impl ResizeScaleInternal {
         observer
     }
 
-    fn notify(&mut self) {
-        if !self.document.contains(Some(&self.canvas))
-            || self.style.get_property_value("display").unwrap() == "none"
-        {
+    fn notify(&self) {
+        if !self.document.contains(Some(&self.canvas)) || self.style.get("display") == "none" {
             let size = PhysicalSize::new(0, 0);
 
             if self.notify_scale.replace(false) {
@@ -180,7 +176,7 @@ impl ResizeScaleInternal {
             backend::style_size_property(&self.style, "height"),
         );
 
-        if self.style.get_property_value("box-sizing").unwrap() == "border-box" {
+        if self.style.get("box-sizing") == "border-box" {
             size.width -= backend::style_size_property(&self.style, "border-left-width")
                 + backend::style_size_property(&self.style, "border-right-width")
                 + backend::style_size_property(&self.style, "padding-left")
@@ -201,33 +197,31 @@ impl ResizeScaleInternal {
         }
     }
 
-    fn handle_scale(this: Rc<RefCell<Self>>, mql: &MediaQueryList) {
-        let weak_self = Rc::downgrade(&this);
-        let mut this = this.borrow_mut();
-        let scale = super::scale_factor(&this.window);
+    fn handle_scale(self: Rc<Self>, mql: &MediaQueryList) {
+        let weak_self = Rc::downgrade(&self);
+        let scale = super::scale_factor(&self.window);
 
         // TODO: confirm/reproduce this problem, see:
         // <https://github.com/rust-windowing/winit/issues/2597>.
         // This should never happen, but if it does then apparently the scale factor didn't change.
         if mql.matches() {
             warn!(
-                "media query tracking scale factor was triggered without a change:\n\
-                Media Query: {}\n\
-                Current Scale: {scale}",
+                "media query tracking scale factor was triggered without a change:\nMedia Query: \
+                 {}\nCurrent Scale: {scale}",
                 mql.media(),
             );
             return;
         }
 
-        let new_mql = Self::create_mql(&this.window, move |mql| {
+        let new_mql = Self::create_mql(&self.window, move |mql| {
             if let Some(rc_self) = weak_self.upgrade() {
                 Self::handle_scale(rc_self, mql);
             }
         });
-        this.mql = new_mql;
+        self.mql.replace(new_mql);
 
-        this.notify_scale.set(true);
-        this.notify();
+        self.notify_scale.set(true);
+        self.notify();
     }
 
     fn process_entry(&self, entries: Array) -> PhysicalSize<u32> {
@@ -241,15 +235,10 @@ impl ResizeScaleInternal {
                 .to_physical(backend::scale_factor(&self.window));
         }
 
-        let entry: ResizeObserverSize = entry
-            .device_pixel_content_box_size()
-            .get(0)
-            .unchecked_into();
+        let entry: ResizeObserverSize =
+            entry.device_pixel_content_box_size().get(0).unchecked_into();
 
-        let writing_mode = self
-            .style
-            .get_property_value("writing-mode")
-            .expect("`writing-mode` is a valid CSS property");
+        let writing_mode = self.style.get("writing-mode");
 
         // means the canvas is not inserted into the DOM
         if writing_mode.is_empty() {
@@ -263,14 +252,14 @@ impl ResizeScaleInternal {
             _ if writing_mode.starts_with("horizontal") => true,
             _ if writing_mode.starts_with("vertical") | writing_mode.starts_with("sideways") => {
                 false
-            }
+            },
             // deprecated values
             "lr" | "lr-tb" | "rl" => true,
             "tb" | "tb-lr" | "tb-rl" => false,
             _ => {
                 warn!("unrecognized `writing-mode`, assuming horizontal");
                 true
-            }
+            },
         };
 
         if horizontal {

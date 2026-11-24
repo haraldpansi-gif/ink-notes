@@ -1,19 +1,14 @@
-use std::{
-    collections::VecDeque,
-    sync::{Arc, Mutex},
-};
+use std::collections::VecDeque;
+use std::sync::{Arc, Mutex};
 
-use crate::{
-    dpi::{PhysicalPosition, PhysicalSize, Position, Size},
-    error,
-    platform_impl::Fullscreen,
-    window,
-    window::ImePurpose,
-};
+use crate::cursor::Cursor;
+use crate::dpi::{PhysicalPosition, PhysicalSize, Position, Size};
+use crate::platform_impl::Fullscreen;
+use crate::window::ImePurpose;
+use crate::{error, window};
 
 use super::{
-    EventLoopWindowTarget, MonitorHandle, OsError, PlatformSpecificWindowBuilderAttributes,
-    RedoxSocket, TimeSocket, WindowId, WindowProperties,
+    ActiveEventLoop, MonitorHandle, OsError, RedoxSocket, TimeSocket, WindowId, WindowProperties,
 };
 
 // These values match the values uses in the `window_new` function in orbital:
@@ -35,10 +30,9 @@ pub struct Window {
 }
 
 impl Window {
-    pub(crate) fn new<T: 'static>(
-        el: &EventLoopWindowTarget<T>,
+    pub(crate) fn new(
+        el: &ActiveEventLoop,
         attrs: window::WindowAttributes,
-        _: PlatformSpecificWindowBuilderAttributes,
     ) -> Result<Self, error::OsError> {
         let scale = MonitorHandle.scale_factor();
 
@@ -55,7 +49,7 @@ impl Window {
             (1024, 768)
         };
 
-        //TODO: min/max inner_size
+        // TODO: min/max inner_size
 
         // Async by default.
         let mut flag_str = ORBITAL_FLAG_ASYNC.to_string();
@@ -68,7 +62,7 @@ impl Window {
             flag_str.push(ORBITAL_FLAG_RESIZABLE);
         }
 
-        //TODO: fullscreen
+        // TODO: fullscreen
 
         if attrs.transparent {
             flag_str.push(ORBITAL_FLAG_TRANSPARENT);
@@ -85,14 +79,14 @@ impl Window {
         match attrs.window_level {
             window::WindowLevel::AlwaysOnBottom => {
                 flag_str.push(ORBITAL_FLAG_BACK);
-            }
-            window::WindowLevel::Normal => {}
+            },
+            window::WindowLevel::Normal => {},
             window::WindowLevel::AlwaysOnTop => {
                 flag_str.push(ORBITAL_FLAG_FRONT);
-            }
+            },
         }
 
-        //TODO: window_icon
+        // TODO: window_icon
 
         // Open window.
         let window = RedoxSocket::orbital(&WindowProperties {
@@ -159,9 +153,7 @@ impl Window {
 
     #[inline]
     pub fn id(&self) -> WindowId {
-        WindowId {
-            fd: self.window_socket.fd as u64,
-        }
+        WindowId { fd: self.window_socket.fd as u64 }
     }
 
     #[inline]
@@ -208,36 +200,28 @@ impl Window {
     #[inline]
     pub fn inner_position(&self) -> Result<PhysicalPosition<i32>, error::NotSupportedError> {
         let mut buf: [u8; 4096] = [0; 4096];
-        let path = self
-            .window_socket
-            .fpath(&mut buf)
-            .expect("failed to read properties");
+        let path = self.window_socket.fpath(&mut buf).expect("failed to read properties");
         let properties = WindowProperties::new(path);
         Ok((properties.x, properties.y).into())
     }
 
     #[inline]
     pub fn outer_position(&self) -> Result<PhysicalPosition<i32>, error::NotSupportedError> {
-        //TODO: adjust for window decorations
+        // TODO: adjust for window decorations
         self.inner_position()
     }
 
     #[inline]
     pub fn set_outer_position(&self, position: Position) {
-        //TODO: adjust for window decorations
+        // TODO: adjust for window decorations
         let (x, y): (i32, i32) = position.to_physical::<i32>(self.scale_factor()).into();
-        self.window_socket
-            .write(format!("P,{x},{y}").as_bytes())
-            .expect("failed to set position");
+        self.window_socket.write(format!("P,{x},{y}").as_bytes()).expect("failed to set position");
     }
 
     #[inline]
     pub fn inner_size(&self) -> PhysicalSize<u32> {
         let mut buf: [u8; 4096] = [0; 4096];
-        let path = self
-            .window_socket
-            .fpath(&mut buf)
-            .expect("failed to read properties");
+        let path = self.window_socket.fpath(&mut buf).expect("failed to read properties");
         let properties = WindowProperties::new(path);
         (properties.w, properties.h).into()
     }
@@ -245,15 +229,13 @@ impl Window {
     #[inline]
     pub fn request_inner_size(&self, size: Size) -> Option<PhysicalSize<u32>> {
         let (w, h): (u32, u32) = size.to_physical::<u32>(self.scale_factor()).into();
-        self.window_socket
-            .write(format!("S,{w},{h}").as_bytes())
-            .expect("failed to set size");
+        self.window_socket.write(format!("S,{w},{h}").as_bytes()).expect("failed to set size");
         None
     }
 
     #[inline]
     pub fn outer_size(&self) -> PhysicalSize<u32> {
-        //TODO: adjust for window decorations
+        // TODO: adjust for window decorations
         self.inner_size()
     }
 
@@ -266,19 +248,14 @@ impl Window {
     #[inline]
     pub fn title(&self) -> String {
         let mut buf: [u8; 4096] = [0; 4096];
-        let path = self
-            .window_socket
-            .fpath(&mut buf)
-            .expect("failed to read properties");
+        let path = self.window_socket.fpath(&mut buf).expect("failed to read properties");
         let properties = WindowProperties::new(path);
         properties.title.to_string()
     }
 
     #[inline]
     pub fn set_title(&self, title: &str) {
-        self.window_socket
-            .write(format!("T,{title}").as_bytes())
-            .expect("failed to set title");
+        self.window_socket.write(format!("T,{title}").as_bytes()).expect("failed to set title");
     }
 
     #[inline]
@@ -358,14 +335,14 @@ impl Window {
         match level {
             window::WindowLevel::AlwaysOnBottom => {
                 let _ = self.set_flag(ORBITAL_FLAG_BACK, true);
-            }
+            },
             window::WindowLevel::Normal => {
                 let _ = self.set_flag(ORBITAL_FLAG_BACK, false);
                 let _ = self.set_flag(ORBITAL_FLAG_FRONT, false);
-            }
+            },
             window::WindowLevel::AlwaysOnTop => {
                 let _ = self.set_flag(ORBITAL_FLAG_FRONT, true);
-            }
+            },
         }
     }
 
@@ -388,13 +365,11 @@ impl Window {
     pub fn request_user_attention(&self, _request_type: Option<window::UserAttentionType>) {}
 
     #[inline]
-    pub fn set_cursor_icon(&self, _: window::CursorIcon) {}
+    pub fn set_cursor(&self, _: Cursor) {}
 
     #[inline]
     pub fn set_cursor_position(&self, _: Position) -> Result<(), error::ExternalError> {
-        Err(error::ExternalError::NotSupported(
-            error::NotSupportedError::new(),
-        ))
+        Err(error::ExternalError::NotSupported(error::NotSupportedError::new()))
     }
 
     #[inline]
@@ -418,9 +393,7 @@ impl Window {
 
     #[inline]
     pub fn set_cursor_visible(&self, visible: bool) {
-        let _ = self
-            .window_socket
-            .write(format!("M,C,{}", if visible { 1 } else { 0 }).as_bytes());
+        let _ = self.window_socket.write(format!("M,C,{}", if visible { 1 } else { 0 }).as_bytes());
     }
 
     #[inline]
@@ -447,7 +420,7 @@ impl Window {
             window::ResizeDirection::West => "L",
         };
         self.window_socket
-            .write(format!("D,{}", arg).as_bytes())
+            .write(format!("D,{arg}").as_bytes())
             .map_err(|err| error::ExternalError::Os(os_error!(OsError::new(err))))?;
         Ok(())
     }
@@ -457,9 +430,7 @@ impl Window {
 
     #[inline]
     pub fn set_cursor_hittest(&self, _hittest: bool) -> Result<(), error::ExternalError> {
-        Err(error::ExternalError::NotSupported(
-            error::NotSupportedError::new(),
-        ))
+        Err(error::ExternalError::NotSupported(error::NotSupportedError::new()))
     }
 
     #[cfg(feature = "rwh_04")]
@@ -489,7 +460,7 @@ impl Window {
     pub fn raw_window_handle_rwh_06(&self) -> Result<rwh_06::RawWindowHandle, rwh_06::HandleError> {
         let handle = rwh_06::OrbitalWindowHandle::new({
             let window = self.window_socket.fd as *mut _;
-            std::ptr::NonNull::new(window).expect("orbital fd shoul never be null")
+            std::ptr::NonNull::new(window).expect("orbital fd should never be null")
         });
         Ok(rwh_06::RawWindowHandle::Orbital(handle))
     }
@@ -499,9 +470,7 @@ impl Window {
     pub fn raw_display_handle_rwh_06(
         &self,
     ) -> Result<rwh_06::RawDisplayHandle, rwh_06::HandleError> {
-        Ok(rwh_06::RawDisplayHandle::Orbital(
-            rwh_06::OrbitalDisplayHandle::new(),
-        ))
+        Ok(rwh_06::RawDisplayHandle::Orbital(rwh_06::OrbitalDisplayHandle::new()))
     }
 
     #[inline]

@@ -35,8 +35,6 @@ pub enum EventLoopError {
     NotSupported(NotSupportedError),
     /// The OS cannot perform the operation.
     Os(OsError),
-    /// The event loop can't be re-run while it's already running
-    AlreadyRunning,
     /// The event loop can't be re-created.
     RecreationAttempt,
     /// Application has exit with an error status.
@@ -73,10 +71,7 @@ macro_rules! os_error {
 
 impl fmt::Display for OsError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
-        f.pad(&format!(
-            "os error at {}:{}: {}",
-            self.file, self.line, self.error
-        ))
+        f.pad(&format!("os error at {}:{}: {}", self.file, self.line, self.error))
     }
 }
 
@@ -105,7 +100,6 @@ impl fmt::Display for NotSupportedError {
 impl fmt::Display for EventLoopError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
         match self {
-            EventLoopError::AlreadyRunning => write!(f, "EventLoop is already running"),
             EventLoopError::RecreationAttempt => write!(f, "EventLoop can't be recreated"),
             EventLoopError::NotSupported(e) => e.fmt(f),
             EventLoopError::Os(e) => e.fmt(f),
@@ -120,19 +114,14 @@ impl error::Error for NotSupportedError {}
 impl error::Error for EventLoopError {}
 
 #[cfg(test)]
+#[allow(clippy::redundant_clone)]
 mod tests {
-    #![allow(clippy::redundant_clone)]
-
     use super::*;
 
     // Eat attributes for testing
     #[test]
     fn ensure_fmt_does_not_panic() {
-        let _ = format!(
-            "{:?}, {}",
-            NotSupportedError::new(),
-            NotSupportedError::new().clone()
-        );
+        let _ = format!("{:?}, {}", NotSupportedError::new(), NotSupportedError::new().clone());
         let _ = format!(
             "{:?}, {}",
             ExternalError::NotSupported(NotSupportedError::new()),

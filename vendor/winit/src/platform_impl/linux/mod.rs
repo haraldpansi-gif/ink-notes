@@ -3,51 +3,45 @@
 #[cfg(all(not(x11_platform), not(wayland_platform)))]
 compile_error!("Please select a feature to build for unix: `x11`, `wayland`");
 
+use std::collections::VecDeque;
 use std::os::unix::io::{AsFd, AsRawFd, BorrowedFd, RawFd};
 use std::sync::Arc;
 use std::time::Duration;
-use std::{collections::VecDeque, env, fmt};
+use std::{env, fmt};
 #[cfg(x11_platform)]
 use std::{ffi::CStr, mem::MaybeUninit, os::raw::*, sync::Mutex};
 
 #[cfg(x11_platform)]
-use once_cell::sync::Lazy;
+use crate::utils::Lazy;
 use smol_str::SmolStr;
 
 #[cfg(x11_platform)]
-use crate::platform::x11::XlibErrorHook;
-use crate::{
-    dpi::{PhysicalPosition, PhysicalSize, Position, Size},
-    error::{EventLoopError, ExternalError, NotSupportedError, OsError as RootOsError},
-    event::KeyEvent,
-    event_loop::{
-        AsyncRequestSerial, ControlFlow, DeviceEvents, EventLoopClosed,
-        EventLoopWindowTarget as RootELW,
-    },
-    icon::Icon,
-    keyboard::{Key, PhysicalKey},
-    platform::{
-        modifier_supplement::KeyEventExtModifierSupplement, pump_events::PumpStatus,
-        scancode::PhysicalKeyExtScancode,
-    },
-    window::{
-        ActivationToken, CursorGrabMode, CursorIcon, ImePurpose, ResizeDirection, Theme,
-        UserAttentionType, WindowAttributes, WindowButtons, WindowLevel,
-    },
+use self::x11::{X11Error, XConnection, XError, XNotSupported};
+use crate::dpi::{PhysicalPosition, PhysicalSize, Position, Size};
+use crate::error::{EventLoopError, ExternalError, NotSupportedError, OsError as RootOsError};
+use crate::event_loop::{
+    ActiveEventLoop as RootELW, AsyncRequestSerial, ControlFlow, DeviceEvents, EventLoopClosed,
 };
+use crate::icon::Icon;
+use crate::keyboard::Key;
+use crate::platform::pump_events::PumpStatus;
 #[cfg(x11_platform)]
-pub use x11::XNotSupported;
-#[cfg(x11_platform)]
-use x11::{util::WindowType as XWindowType, X11Error, XConnection, XError};
+use crate::platform::x11::{WindowType as XWindowType, XlibErrorHook};
+use crate::window::{
+    ActivationToken, Cursor, CursorGrabMode, CustomCursor, CustomCursorSource, ImePurpose,
+    ResizeDirection, Theme, UserAttentionType, WindowAttributes, WindowButtons, WindowLevel,
+};
 
+pub(crate) use self::common::xkb::{physicalkey_to_scancode, scancode_to_physicalkey};
+pub(crate) use crate::cursor::OnlyCursorImageSource as PlatformCustomCursorSource;
 pub(crate) use crate::icon::RgbaIcon as PlatformIcon;
 pub(crate) use crate::platform_impl::Fullscreen;
 
-pub mod common;
+pub(crate) mod common;
 #[cfg(wayland_platform)]
-pub mod wayland;
+pub(crate) mod wayland;
 #[cfg(x11_platform)]
-pub mod x11;
+pub(crate) mod x11;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub(crate) enum Backend {
@@ -75,17 +69,17 @@ impl ApplicationName {
     }
 }
 
-#[derive(Clone)]
-pub struct PlatformSpecificWindowBuilderAttributes {
+#[derive(Clone, Debug)]
+pub struct PlatformSpecificWindowAttributes {
     pub name: Option<ApplicationName>,
     pub activation_token: Option<ActivationToken>,
     #[cfg(x11_platform)]
-    pub x11: X11WindowBuilderAttributes,
+    pub x11: X11WindowAttributes,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 #[cfg(x11_platform)]
-pub struct X11WindowBuilderAttributes {
+pub struct X11WindowAttributes {
     pub visual_id: Option<x11rb::protocol::xproto::Visualid>,
     pub screen_id: Option<i32>,
     pub base_size: Option<Size>,
@@ -96,13 +90,14 @@ pub struct X11WindowBuilderAttributes {
     pub embed_window: Option<x11rb::protocol::xproto::Window>,
 }
 
-impl Default for PlatformSpecificWindowBuilderAttributes {
+#[cfg_attr(not(x11_platform), allow(clippy::derivable_impls))]
+impl Default for PlatformSpecificWindowAttributes {
     fn default() -> Self {
         Self {
             name: None,
             activation_token: None,
             #[cfg(x11_platform)]
-            x11: X11WindowBuilderAttributes {
+            x11: X11WindowAttributes {
                 visual_id: None,
                 screen_id: None,
                 base_size: None,
@@ -122,6 +117,8 @@ pub(crate) static X11_BACKEND: Lazy<Mutex<Result<Arc<XConnection>, XNotSupported
 pub enum OsError {
     Misc(&'static str),
     #[cfg(x11_platform)]
+    XNotSupported(XNotSupported),
+    #[cfg(x11_platform)]
     XError(Arc<X11Error>),
     #[cfg(wayland_platform)]
     WaylandError(Arc<wayland::WaylandError>),
@@ -131,6 +128,8 @@ impl fmt::Display for OsError {
     fn fmt(&self, _f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
         match *self {
             OsError::Misc(e) => _f.pad(e),
+            #[cfg(x11_platform)]
+            OsError::XNotSupported(ref e) => fmt::Display::fmt(e, _f),
             #[cfg(x11_platform)]
             OsError::XError(ref e) => fmt::Display::fmt(e, _f),
             #[cfg(wayland_platform)]
@@ -162,7 +161,7 @@ impl From<u64> for WindowId {
 }
 
 impl WindowId {
-    pub const unsafe fn dummy() -> Self {
+    pub const fn dummy() -> Self {
         Self(0)
     }
 }
@@ -176,11 +175,11 @@ pub enum DeviceId {
 }
 
 impl DeviceId {
-    pub const unsafe fn dummy() -> Self {
+    pub const fn dummy() -> Self {
         #[cfg(wayland_platform)]
-        return DeviceId::Wayland(unsafe { wayland::DeviceId::dummy() });
+        return DeviceId::Wayland(wayland::DeviceId::dummy());
         #[cfg(all(not(wayland_platform), x11_platform))]
-        return DeviceId::X(unsafe { x11::DeviceId::dummy() });
+        return DeviceId::X(x11::DeviceId::dummy());
     }
 }
 
@@ -252,57 +251,56 @@ impl MonitorHandle {
     }
 
     #[inline]
-    pub fn video_modes(&self) -> Box<dyn Iterator<Item = VideoMode>> {
+    pub fn video_modes(&self) -> Box<dyn Iterator<Item = VideoModeHandle>> {
         x11_or_wayland!(match self; MonitorHandle(m) => Box::new(m.video_modes()))
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum VideoMode {
+pub enum VideoModeHandle {
     #[cfg(x11_platform)]
-    X(x11::VideoMode),
+    X(x11::VideoModeHandle),
     #[cfg(wayland_platform)]
-    Wayland(wayland::VideoMode),
+    Wayland(wayland::VideoModeHandle),
 }
 
-impl VideoMode {
+impl VideoModeHandle {
     #[inline]
     pub fn size(&self) -> PhysicalSize<u32> {
-        x11_or_wayland!(match self; VideoMode(m) => m.size())
+        x11_or_wayland!(match self; VideoModeHandle(m) => m.size())
     }
 
     #[inline]
     pub fn bit_depth(&self) -> u16 {
-        x11_or_wayland!(match self; VideoMode(m) => m.bit_depth())
+        x11_or_wayland!(match self; VideoModeHandle(m) => m.bit_depth())
     }
 
     #[inline]
     pub fn refresh_rate_millihertz(&self) -> u32 {
-        x11_or_wayland!(match self; VideoMode(m) => m.refresh_rate_millihertz())
+        x11_or_wayland!(match self; VideoModeHandle(m) => m.refresh_rate_millihertz())
     }
 
     #[inline]
     pub fn monitor(&self) -> MonitorHandle {
-        x11_or_wayland!(match self; VideoMode(m) => m.monitor(); as MonitorHandle)
+        x11_or_wayland!(match self; VideoModeHandle(m) => m.monitor(); as MonitorHandle)
     }
 }
 
 impl Window {
     #[inline]
-    pub(crate) fn new<T>(
-        window_target: &EventLoopWindowTarget<T>,
+    pub(crate) fn new(
+        window_target: &ActiveEventLoop,
         attribs: WindowAttributes,
-        pl_attribs: PlatformSpecificWindowBuilderAttributes,
     ) -> Result<Self, RootOsError> {
         match *window_target {
             #[cfg(wayland_platform)]
-            EventLoopWindowTarget::Wayland(ref window_target) => {
-                wayland::Window::new(window_target, attribs, pl_attribs).map(Window::Wayland)
-            }
+            ActiveEventLoop::Wayland(ref window_target) => {
+                wayland::Window::new(window_target, attribs).map(Window::Wayland)
+            },
             #[cfg(x11_platform)]
-            EventLoopWindowTarget::X(ref window_target) => {
-                x11::Window::new(window_target, attribs, pl_attribs).map(Window::X)
-            }
+            ActiveEventLoop::X(ref window_target) => {
+                x11::Window::new(window_target, attribs).map(Window::X)
+            },
         }
     }
 
@@ -420,8 +418,8 @@ impl Window {
     }
 
     #[inline]
-    pub fn set_cursor_icon(&self, cursor: CursorIcon) {
-        x11_or_wayland!(match self; Window(w) => w.set_cursor_icon(cursor))
+    pub fn set_cursor(&self, cursor: Cursor) {
+        x11_or_wayland!(match self; Window(w) => w.set_cursor(cursor))
     }
 
     #[inline]
@@ -538,6 +536,7 @@ impl Window {
     pub fn focus_window(&self) {
         x11_or_wayland!(match self; Window(w) => w.focus_window())
     }
+
     pub fn request_user_attention(&self, request_type: Option<UserAttentionType>) {
         x11_or_wayland!(match self; Window(w) => w.request_user_attention(request_type))
     }
@@ -561,17 +560,13 @@ impl Window {
     pub fn available_monitors(&self) -> VecDeque<MonitorHandle> {
         match self {
             #[cfg(x11_platform)]
-            Window::X(ref window) => window
-                .available_monitors()
-                .into_iter()
-                .map(MonitorHandle::X)
-                .collect(),
+            Window::X(ref window) => {
+                window.available_monitors().into_iter().map(MonitorHandle::X).collect()
+            },
             #[cfg(wayland_platform)]
-            Window::Wayland(ref window) => window
-                .available_monitors()
-                .into_iter()
-                .map(MonitorHandle::Wayland)
-                .collect(),
+            Window::Wayland(ref window) => {
+                window.available_monitors().into_iter().map(MonitorHandle::Wayland).collect()
+            },
         }
     }
 
@@ -638,50 +633,32 @@ impl Window {
 
 #[derive(Debug, Clone, Eq, PartialEq, Hash)]
 pub struct KeyEventExtra {
-    pub key_without_modifiers: Key,
     pub text_with_all_modifiers: Option<SmolStr>,
+    pub key_without_modifiers: Key,
 }
 
-impl KeyEventExtModifierSupplement for KeyEvent {
-    #[inline]
-    fn text_with_all_modifiers(&self) -> Option<&str> {
-        self.platform_specific
-            .text_with_all_modifiers
-            .as_ref()
-            .map(|s| s.as_str())
-    }
-
-    #[inline]
-    fn key_without_modifiers(&self) -> Key {
-        self.platform_specific.key_without_modifiers.clone()
-    }
-}
-
-impl PhysicalKeyExtScancode for PhysicalKey {
-    fn from_scancode(scancode: u32) -> PhysicalKey {
-        common::xkb::scancode_to_keycode(scancode)
-    }
-
-    fn to_scancode(self) -> Option<u32> {
-        common::xkb::physicalkey_to_scancode(self)
-    }
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub(crate) enum PlatformCustomCursor {
+    #[cfg(wayland_platform)]
+    Wayland(wayland::CustomCursor),
+    #[cfg(x11_platform)]
+    X(x11::CustomCursor),
 }
 
 /// Hooks for X11 errors.
 #[cfg(x11_platform)]
-pub(crate) static mut XLIB_ERROR_HOOKS: Lazy<Mutex<Vec<XlibErrorHook>>> =
-    Lazy::new(|| Mutex::new(Vec::new()));
+pub(crate) static XLIB_ERROR_HOOKS: Mutex<Vec<XlibErrorHook>> = Mutex::new(Vec::new());
 
 #[cfg(x11_platform)]
 unsafe extern "C" fn x_error_callback(
     display: *mut x11::ffi::Display,
     event: *mut x11::ffi::XErrorEvent,
 ) -> c_int {
-    let xconn_lock = X11_BACKEND.lock().unwrap();
+    let xconn_lock = X11_BACKEND.lock().unwrap_or_else(|e| e.into_inner());
     if let Ok(ref xconn) = *xconn_lock {
         // Call all the hooks.
         let mut error_handled = false;
-        for hook in unsafe { XLIB_ERROR_HOOKS.lock() }.unwrap().iter() {
+        for hook in XLIB_ERROR_HOOKS.lock().unwrap().iter() {
             error_handled |= hook(display as *mut _, event as *mut _);
         }
 
@@ -710,7 +687,7 @@ unsafe extern "C" fn x_error_callback(
 
         // Don't log error.
         if !error_handled {
-            error!("X11 error: {:#?}", error);
+            tracing::error!("X11 error: {:#?}", error);
             // XXX only update the error, if it wasn't handled by any of the hooks.
             *xconn.latest_error.lock().unwrap() = Some(error);
         }
@@ -719,6 +696,7 @@ unsafe extern "C" fn x_error_callback(
     0
 }
 
+#[allow(clippy::large_enum_variant)]
 pub enum EventLoop<T: 'static> {
     #[cfg(wayland_platform)]
     Wayland(Box<wayland::EventLoop<T>>),
@@ -748,7 +726,8 @@ impl<T: 'static> EventLoop<T> {
                 "Initializing the event loop outside of the main thread is a significant \
                  cross-platform compatibility hazard. If you absolutely need to create an \
                  EventLoop on a different thread, you can use the \
-                 `EventLoopBuilderExtUnix::any_thread` function."
+                 `EventLoopBuilderExtX11::any_thread` or `EventLoopBuilderExtWayland::any_thread` \
+                 functions."
             );
         }
 
@@ -762,12 +741,10 @@ impl<T: 'static> EventLoop<T> {
                 .or_else(|| env::var("WAYLAND_SOCKET").ok())
                 .filter(|var| !var.is_empty())
                 .is_some(),
-            env::var("DISPLAY")
-                .map(|var| !var.is_empty())
-                .unwrap_or(false),
+            env::var("DISPLAY").map(|var| !var.is_empty()).unwrap_or(false),
         ) {
             // User is forcing a backend.
-            (Some(backend), _, _) => backend,
+            (Some(backend), ..) => backend,
             // Wayland is present.
             #[cfg(wayland_platform)]
             (None, true, _) => Backend::Wayland,
@@ -777,22 +754,24 @@ impl<T: 'static> EventLoop<T> {
             // No backend is present.
             (_, wayland_display, x11_display) => {
                 let msg = if wayland_display && !cfg!(wayland_platform) {
-                    "DISPLAY is not set; note: enable the `winit/wayland` feature to support Wayland"
+                    "DISPLAY is not set; note: enable the `winit/wayland` feature to support \
+                     Wayland"
                 } else if x11_display && !cfg!(x11_platform) {
-                    "neither WAYLAND_DISPLAY nor WAYLAND_SOCKET is set; note: enable the `winit/x11` feature to support X11"
+                    "neither WAYLAND_DISPLAY nor WAYLAND_SOCKET is set; note: enable the \
+                     `winit/x11` feature to support X11"
                 } else {
                     "neither WAYLAND_DISPLAY nor WAYLAND_SOCKET nor DISPLAY is set."
                 };
                 return Err(EventLoopError::Os(os_error!(OsError::Misc(msg))));
-            }
+            },
         };
 
         // Create the display based on the backend.
         match backend {
             #[cfg(wayland_platform)]
-            Backend::Wayland => EventLoop::new_wayland_any_thread().map_err(Into::into),
+            Backend::Wayland => EventLoop::new_wayland_any_thread(),
             #[cfg(x11_platform)]
-            Backend::X => EventLoop::new_x11_any_thread().map_err(Into::into),
+            Backend::X => EventLoop::new_x11_any_thread(),
         }
     }
 
@@ -803,12 +782,24 @@ impl<T: 'static> EventLoop<T> {
 
     #[cfg(x11_platform)]
     fn new_x11_any_thread() -> Result<EventLoop<T>, EventLoopError> {
-        let xconn = match X11_BACKEND.lock().unwrap().as_ref() {
+        let xconn = match X11_BACKEND.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
             Ok(xconn) => xconn.clone(),
-            Err(_) => return Err(EventLoopError::NotSupported(NotSupportedError::new())),
+            Err(err) => {
+                return Err(EventLoopError::Os(os_error!(OsError::XNotSupported(err.clone()))))
+            },
         };
 
         Ok(EventLoop::X(x11::EventLoop::new(xconn)))
+    }
+
+    #[inline]
+    pub fn is_wayland(&self) -> bool {
+        match *self {
+            #[cfg(wayland_platform)]
+            EventLoop::Wayland(_) => true,
+            #[cfg(x11_platform)]
+            _ => false,
+        }
     }
 
     pub fn create_proxy(&self) -> EventLoopProxy<T> {
@@ -817,26 +808,26 @@ impl<T: 'static> EventLoop<T> {
 
     pub fn run<F>(mut self, callback: F) -> Result<(), EventLoopError>
     where
-        F: FnMut(crate::event::Event<T>, &RootELW<T>),
+        F: FnMut(crate::event::Event<T>, &RootELW),
     {
         self.run_on_demand(callback)
     }
 
     pub fn run_on_demand<F>(&mut self, callback: F) -> Result<(), EventLoopError>
     where
-        F: FnMut(crate::event::Event<T>, &RootELW<T>),
+        F: FnMut(crate::event::Event<T>, &RootELW),
     {
         x11_or_wayland!(match self; EventLoop(evlp) => evlp.run_on_demand(callback))
     }
 
     pub fn pump_events<F>(&mut self, timeout: Option<Duration>, callback: F) -> PumpStatus
     where
-        F: FnMut(crate::event::Event<T>, &RootELW<T>),
+        F: FnMut(crate::event::Event<T>, &RootELW),
     {
         x11_or_wayland!(match self; EventLoop(evlp) => evlp.pump_events(timeout, callback))
     }
 
-    pub fn window_target(&self) -> &crate::event_loop::EventLoopWindowTarget<T> {
+    pub fn window_target(&self) -> &crate::event_loop::ActiveEventLoop {
         x11_or_wayland!(match self; EventLoop(evlp) => evlp.window_target())
     }
 }
@@ -859,43 +850,47 @@ impl<T: 'static> EventLoopProxy<T> {
     }
 }
 
-pub enum EventLoopWindowTarget<T> {
+#[allow(clippy::large_enum_variant)]
+pub enum ActiveEventLoop {
     #[cfg(wayland_platform)]
-    Wayland(wayland::EventLoopWindowTarget<T>),
+    Wayland(wayland::ActiveEventLoop),
     #[cfg(x11_platform)]
-    X(x11::EventLoopWindowTarget<T>),
+    X(x11::ActiveEventLoop),
 }
 
-impl<T> EventLoopWindowTarget<T> {
+impl ActiveEventLoop {
     #[inline]
     pub fn is_wayland(&self) -> bool {
         match *self {
             #[cfg(wayland_platform)]
-            EventLoopWindowTarget::Wayland(_) => true,
+            ActiveEventLoop::Wayland(_) => true,
             #[cfg(x11_platform)]
             _ => false,
         }
+    }
+
+    pub fn create_custom_cursor(&self, cursor: CustomCursorSource) -> CustomCursor {
+        x11_or_wayland!(match self; ActiveEventLoop(evlp) => evlp.create_custom_cursor(cursor))
     }
 
     #[inline]
     pub fn available_monitors(&self) -> VecDeque<MonitorHandle> {
         match *self {
             #[cfg(wayland_platform)]
-            EventLoopWindowTarget::Wayland(ref evlp) => evlp
-                .available_monitors()
-                .map(MonitorHandle::Wayland)
-                .collect(),
+            ActiveEventLoop::Wayland(ref evlp) => {
+                evlp.available_monitors().map(MonitorHandle::Wayland).collect()
+            },
             #[cfg(x11_platform)]
-            EventLoopWindowTarget::X(ref evlp) => {
+            ActiveEventLoop::X(ref evlp) => {
                 evlp.available_monitors().map(MonitorHandle::X).collect()
-            }
+            },
         }
     }
 
     #[inline]
     pub fn primary_monitor(&self) -> Option<MonitorHandle> {
         Some(
-            x11_or_wayland!(match self; EventLoopWindowTarget(evlp) => evlp.primary_monitor()?; as MonitorHandle),
+            x11_or_wayland!(match self; ActiveEventLoop(evlp) => evlp.primary_monitor()?; as MonitorHandle),
         )
     }
 
@@ -908,6 +903,11 @@ impl<T> EventLoopWindowTarget<T> {
     #[inline]
     pub fn raw_display_handle_rwh_05(&self) -> rwh_05::RawDisplayHandle {
         x11_or_wayland!(match self; Self(evlp) => evlp.raw_display_handle_rwh_05())
+    }
+
+    #[inline]
+    pub fn system_theme(&self) -> Option<Theme> {
+        None
     }
 
     #[cfg(feature = "rwh_06")]
@@ -938,6 +938,15 @@ impl<T> EventLoopWindowTarget<T> {
         x11_or_wayland!(match self; Self(evlp) => evlp.exiting())
     }
 
+    pub(crate) fn owned_display_handle(&self) -> OwnedDisplayHandle {
+        match self {
+            #[cfg(x11_platform)]
+            Self::X(conn) => OwnedDisplayHandle::X(conn.x_connection().clone()),
+            #[cfg(wayland_platform)]
+            Self::Wayland(conn) => OwnedDisplayHandle::Wayland(conn.connection.clone()),
+        }
+    }
+
     #[allow(dead_code)]
     fn set_exit_code(&self, code: i32) {
         x11_or_wayland!(match self; Self(evlp) => evlp.set_exit_code(code))
@@ -949,13 +958,72 @@ impl<T> EventLoopWindowTarget<T> {
     }
 }
 
+#[derive(Clone)]
+#[allow(dead_code)]
+pub(crate) enum OwnedDisplayHandle {
+    #[cfg(x11_platform)]
+    X(Arc<XConnection>),
+    #[cfg(wayland_platform)]
+    Wayland(wayland_client::Connection),
+}
+
+impl OwnedDisplayHandle {
+    #[cfg(feature = "rwh_05")]
+    #[inline]
+    pub fn raw_display_handle_rwh_05(&self) -> rwh_05::RawDisplayHandle {
+        match self {
+            #[cfg(x11_platform)]
+            Self::X(xconn) => {
+                let mut xlib_handle = rwh_05::XlibDisplayHandle::empty();
+                xlib_handle.display = xconn.display.cast();
+                xlib_handle.screen = xconn.default_screen_index() as _;
+                xlib_handle.into()
+            },
+
+            #[cfg(wayland_platform)]
+            Self::Wayland(conn) => {
+                use sctk::reexports::client::Proxy;
+
+                let mut wayland_handle = rwh_05::WaylandDisplayHandle::empty();
+                wayland_handle.display = conn.display().id().as_ptr() as *mut _;
+                wayland_handle.into()
+            },
+        }
+    }
+
+    #[cfg(feature = "rwh_06")]
+    #[inline]
+    pub fn raw_display_handle_rwh_06(
+        &self,
+    ) -> Result<rwh_06::RawDisplayHandle, rwh_06::HandleError> {
+        use std::ptr::NonNull;
+
+        match self {
+            #[cfg(x11_platform)]
+            Self::X(xconn) => Ok(rwh_06::XlibDisplayHandle::new(
+                NonNull::new(xconn.display.cast()),
+                xconn.default_screen_index() as _,
+            )
+            .into()),
+
+            #[cfg(wayland_platform)]
+            Self::Wayland(conn) => {
+                use sctk::reexports::client::Proxy;
+
+                Ok(rwh_06::WaylandDisplayHandle::new(
+                    NonNull::new(conn.display().id().as_ptr().cast()).unwrap(),
+                )
+                .into())
+            },
+        }
+    }
+}
+
 /// Returns the minimum `Option<Duration>`, taking into account that `None`
 /// equates to an infinite timeout, not a zero timeout (so can't just use
 /// `Option::min`)
 fn min_timeout(a: Option<Duration>, b: Option<Duration>) -> Option<Duration> {
-    a.map_or(b, |a_timeout| {
-        b.map_or(Some(a_timeout), |b_timeout| Some(a_timeout.min(b_timeout)))
-    })
+    a.map_or(b, |a_timeout| b.map_or(Some(a_timeout), |b_timeout| Some(a_timeout.min(b_timeout))))
 }
 
 #[cfg(target_os = "linux")]

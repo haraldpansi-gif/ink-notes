@@ -3,35 +3,37 @@
 //! If you want to get basic information about a monitor, you can use the
 //! [`MonitorHandle`] type. This is retrieved from one of the following
 //! methods, which return an iterator of [`MonitorHandle`]:
-//! - [`EventLoopWindowTarget::available_monitors`](crate::event_loop::EventLoopWindowTarget::available_monitors).
-//! - [`Window::available_monitors`](crate::window::Window::available_monitors).
-use crate::{
-    dpi::{PhysicalPosition, PhysicalSize},
-    platform_impl,
-};
+//! - [`ActiveEventLoop::available_monitors`][crate::event_loop::ActiveEventLoop::available_monitors].
+//! - [`Window::available_monitors`][crate::window::Window::available_monitors].
+use crate::dpi::{PhysicalPosition, PhysicalSize};
+use crate::platform_impl;
+
+/// Deprecated! Use `VideoModeHandle` instead.
+#[deprecated = "Renamed to `VideoModeHandle`"]
+pub type VideoMode = VideoModeHandle;
 
 /// Describes a fullscreen video mode of a monitor.
 ///
 /// Can be acquired with [`MonitorHandle::video_modes`].
 #[derive(Clone, PartialEq, Eq, Hash)]
-pub struct VideoMode {
-    pub(crate) video_mode: platform_impl::VideoMode,
+pub struct VideoModeHandle {
+    pub(crate) video_mode: platform_impl::VideoModeHandle,
 }
 
-impl std::fmt::Debug for VideoMode {
+impl std::fmt::Debug for VideoModeHandle {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         self.video_mode.fmt(f)
     }
 }
 
-impl PartialOrd for VideoMode {
-    fn partial_cmp(&self, other: &VideoMode) -> Option<std::cmp::Ordering> {
+impl PartialOrd for VideoModeHandle {
+    fn partial_cmp(&self, other: &VideoModeHandle) -> Option<std::cmp::Ordering> {
         Some(self.cmp(other))
     }
 }
 
-impl Ord for VideoMode {
-    fn cmp(&self, other: &VideoMode) -> std::cmp::Ordering {
+impl Ord for VideoModeHandle {
+    fn cmp(&self, other: &VideoModeHandle) -> std::cmp::Ordering {
         self.monitor().cmp(&other.monitor()).then(
             self.size()
                 .cmp(&other.size())
@@ -45,7 +47,7 @@ impl Ord for VideoMode {
     }
 }
 
-impl VideoMode {
+impl VideoModeHandle {
     /// Returns the resolution of this video mode.
     #[inline]
     pub fn size(&self) -> PhysicalSize<u32> {
@@ -75,13 +77,11 @@ impl VideoMode {
     /// a separate set of valid video modes.
     #[inline]
     pub fn monitor(&self) -> MonitorHandle {
-        MonitorHandle {
-            inner: self.video_mode.monitor(),
-        }
+        MonitorHandle { inner: self.video_mode.monitor() }
     }
 }
 
-impl std::fmt::Display for VideoMode {
+impl std::fmt::Display for VideoModeHandle {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
@@ -131,8 +131,8 @@ impl MonitorHandle {
     /// Return `Some` if succeed, or `None` if failed, which usually happens when the monitor
     /// the window is on is removed.
     ///
-    /// When using exclusive fullscreen, the refresh rate of the [`VideoMode`] that was used to
-    /// enter fullscreen should be used instead.
+    /// When using exclusive fullscreen, the refresh rate of the [`VideoModeHandle`] that was
+    /// used to enter fullscreen should be used instead.
     #[inline]
     pub fn refresh_rate_millihertz(&self) -> Option<u32> {
         self.inner.refresh_rate_millihertz()
@@ -141,7 +141,7 @@ impl MonitorHandle {
     /// Returns the scale factor of the underlying monitor. To map logical pixels to physical
     /// pixels and vice versa, use [`Window::scale_factor`].
     ///
-    /// See the [`dpi`](crate::dpi) module for more information.
+    /// See the [`dpi`] module for more information.
     ///
     /// ## Platform-specific
     ///
@@ -161,9 +161,7 @@ impl MonitorHandle {
     ///
     /// - **Web:** Always returns an empty iterator
     #[inline]
-    pub fn video_modes(&self) -> impl Iterator<Item = VideoMode> {
-        self.inner
-            .video_modes()
-            .map(|video_mode| VideoMode { video_mode })
+    pub fn video_modes(&self) -> impl Iterator<Item = VideoModeHandle> {
+        self.inner.video_modes().map(|video_mode| VideoModeHandle { video_mode })
     }
 }

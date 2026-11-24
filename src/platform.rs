@@ -63,7 +63,7 @@ pub fn display_backend_from_env() -> DisplayBackend {
 pub fn desktop_event_loop() -> Result<winit::event_loop::EventLoop<()>, winit::error::EventLoopError>
 {
     #[allow(unused_mut)]
-    let mut builder = winit::event_loop::EventLoopBuilder::new();
+    let mut builder = winit::event_loop::EventLoop::builder();
     #[cfg(target_os = "linux")]
     {
         use winit::platform::{wayland::EventLoopBuilderExtWayland, x11::EventLoopBuilderExtX11};
@@ -82,49 +82,12 @@ pub fn desktop_event_loop() -> Result<winit::event_loop::EventLoop<()>, winit::e
     builder.build()
 }
 
-/// Waits until the window can be drawn to. On Android the native window only exists after
-/// `Event::Resumed` (Issue #42); on the desktop it is there right away.
-pub fn wait_until_resumed(
-    #[allow(unused_variables)] event_loop: &mut winit::event_loop::EventLoop<()>,
-) {
-    #[cfg(target_os = "android")]
-    {
-        use winit::event::Event;
-        use winit::platform::pump_events::{EventLoopExtPumpEvents, PumpStatus};
-        let mut resumed = false;
-        while !resumed {
-            let status = event_loop.pump_events(None, |event, _| {
-                if matches!(event, Event::Resumed) {
-                    resumed = true;
-                }
-            });
-            if let PumpStatus::Exit(_) = status {
-                std::process::exit(0);
-            }
-        }
-    }
-}
-
-/// Runs the event loop until the app quits. On Android the loop was already started by
-/// [`wait_until_resumed`], so it is driven with `pump_events` (`run` would refuse to start).
-pub fn run_event_loop<F>(
-    #[allow(unused_mut)] mut event_loop: winit::event_loop::EventLoop<()>,
-    #[allow(unused_mut)] mut handler: F,
-) -> Result<(), winit::error::EventLoopError>
-where
-    F: FnMut(winit::event::Event<()>, &winit::event_loop::EventLoopWindowTarget<()>),
-{
-    #[cfg(target_os = "android")]
-    {
-        use winit::platform::pump_events::{EventLoopExtPumpEvents, PumpStatus};
-        loop {
-            if let PumpStatus::Exit(_) = event_loop.pump_events(None, &mut handler) {
-                return Ok(());
-            }
-        }
-    }
-    #[cfg(not(target_os = "android"))]
-    event_loop.run(handler)
+/// Runs the event loop until the app quits (winit 0.30 ApplicationHandler).
+pub fn run_event_loop<A: winit::application::ApplicationHandler<()>>(
+    event_loop: winit::event_loop::EventLoop<()>,
+    app: &mut A,
+) -> Result<(), winit::error::EventLoopError> {
+    event_loop.run_app(app)
 }
 
 /// The Android activity, for calls winit doesn't offer (soft keyboard, Issue #42).
@@ -285,20 +248,20 @@ mod android_files {
 /// Gives the window the app id (Wayland: app_id, X11: WM_CLASS), so that dock and task bar
 /// show the app icon for it.
 pub fn with_app_id(
-    builder: winit::window::WindowBuilder,
+    attrs: winit::window::WindowAttributes,
     #[allow(unused_variables)] app_id: &str,
-) -> winit::window::WindowBuilder {
+) -> winit::window::WindowAttributes {
     #[cfg(target_os = "linux")]
     {
-        let builder = winit::platform::wayland::WindowBuilderExtWayland::with_name(
-            builder,
+        let attrs = winit::platform::wayland::WindowAttributesExtWayland::with_name(
+            attrs,
             app_id,
             "ink-notes",
         );
-        winit::platform::x11::WindowBuilderExtX11::with_name(builder, app_id, "ink-notes")
+        winit::platform::x11::WindowAttributesExtX11::with_name(attrs, app_id, "ink-notes")
     }
     #[cfg(not(target_os = "linux"))]
-    builder
+    attrs
 }
 
 /// Ignores touches on the client-side title bar until `until` (palm rejection while the pen

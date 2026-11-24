@@ -75,8 +75,10 @@ impl KeyboardRequester {
 pub fn plain_ime_commits_to_text(events: &mut [egui::Event], composing: &mut bool) {
     for event in events {
         match event {
-            egui::Event::CompositionStart => *composing = true,
-            egui::Event::CompositionEnd(text) => {
+            egui::Event::Ime(egui::ImeEvent::Preedit { text, .. }) if !text.is_empty() => {
+                *composing = true;
+            }
+            egui::Event::Ime(egui::ImeEvent::Commit(text)) => {
                 if !*composing && !text.is_empty() && !text.contains(['\n', '\r']) {
                     *event = egui::Event::Text(std::mem::take(text));
                 }
@@ -156,8 +158,8 @@ mod tests {
     fn commits_without_preedit_become_text() {
         let mut composing = false;
         let mut events = vec![
-            egui::Event::CompositionEnd("h".into()),
-            egui::Event::CompositionEnd("i".into()),
+            egui::Event::Ime(egui::ImeEvent::Commit("h".into())),
+            egui::Event::Ime(egui::ImeEvent::Commit("i".into())),
         ];
         plain_ime_commits_to_text(&mut events, &mut composing);
         assert_eq!(
@@ -170,16 +172,19 @@ mod tests {
     #[test]
     fn commits_after_preedit_stay_with_egui() {
         let mut composing = false;
-        let mut events = vec![
-            egui::Event::CompositionStart,
-            egui::Event::CompositionUpdate("ni".into()),
-        ];
+        let mut events = vec![egui::Event::Ime(egui::ImeEvent::Preedit {
+            text: "ni".into(),
+            active_range_chars: None,
+        })];
         plain_ime_commits_to_text(&mut events, &mut composing);
         assert!(composing);
         // Abschluss erst im nächsten Frame
-        let mut events = vec![egui::Event::CompositionEnd("你".into())];
+        let mut events = vec![egui::Event::Ime(egui::ImeEvent::Commit("你".into()))];
         plain_ime_commits_to_text(&mut events, &mut composing);
-        assert_eq!(events, vec![egui::Event::CompositionEnd("你".into())]);
+        assert_eq!(
+            events,
+            vec![egui::Event::Ime(egui::ImeEvent::Commit("你".into()))]
+        );
         assert!(!composing);
     }
 
@@ -187,8 +192,8 @@ mod tests {
     fn line_breaks_and_empty_commits_are_left_alone() {
         let mut composing = false;
         let mut events = vec![
-            egui::Event::CompositionEnd("\n".into()),
-            egui::Event::CompositionEnd(String::new()),
+            egui::Event::Ime(egui::ImeEvent::Commit("\n".into())),
+            egui::Event::Ime(egui::ImeEvent::Commit(String::new())),
         ];
         let before = events.clone();
         plain_ime_commits_to_text(&mut events, &mut composing);

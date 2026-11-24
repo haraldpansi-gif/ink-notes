@@ -36,14 +36,6 @@ impl TextFont {
         }
     }
 
-    /// Name der Schrift in den egui-Standardschriften.
-    fn egui_name(self) -> &'static str {
-        match self {
-            TextFont::Sans => "Ubuntu-Light",
-            TextFont::Mono => "Hack",
-        }
-    }
-
     /// egui-Schriftfamilie, deren erste Schrift diese ist (für die Bearbeitung).
     pub fn egui_family(self) -> egui::FontFamily {
         match self {
@@ -56,7 +48,8 @@ impl TextFont {
     pub fn bytes(self) -> &'static [u8] {
         static DEFINITIONS: OnceLock<egui::FontDefinitions> = OnceLock::new();
         let definitions = DEFINITIONS.get_or_init(egui::FontDefinitions::default);
-        &definitions.font_data[self.egui_name()].font
+        let name = &definitions.families[&self.egui_family()][0];
+        definitions.font_data[name].font.as_ref().as_ref()
     }
 
     pub fn face(self) -> &'static FontRef<'static> {

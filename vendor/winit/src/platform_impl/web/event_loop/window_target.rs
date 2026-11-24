@@ -1,27 +1,29 @@
 use std::cell::{Cell, RefCell};
-use std::collections::{vec_deque::IntoIter as VecDequeIter, VecDeque};
+use std::clone::Clone;
+use std::collections::vec_deque::IntoIter as VecDequeIter;
+use std::collections::VecDeque;
 use std::iter;
-use std::marker::PhantomData;
 use std::rc::{Rc, Weak};
 
 use web_sys::Element;
 
+use super::super::monitor::MonitorHandle;
+use super::super::KeyEventExtra;
+use super::device::DeviceId;
 use super::runner::{EventWrapper, Execution};
-use super::{
-    super::{monitor::MonitorHandle, KeyEventExtra},
-    backend,
-    device::DeviceId,
-    runner,
-    window::WindowId,
-};
+use super::window::WindowId;
+use super::{backend, runner};
 use crate::event::{
     DeviceId as RootDeviceId, ElementState, Event, KeyEvent, Touch, TouchPhase, WindowEvent,
 };
 use crate::event_loop::{ControlFlow, DeviceEvents};
 use crate::keyboard::ModifiersState;
-use crate::platform::web::PollStrategy;
+use crate::platform::web::{CustomCursorFuture, PollStrategy, WaitUntilStrategy};
+use crate::platform_impl::platform::cursor::CustomCursor;
 use crate::platform_impl::platform::r#async::Waker;
-use crate::window::{Theme, WindowId as RootWindowId};
+use crate::window::{
+    CustomCursor as RootCustomCursor, CustomCursorSource, Theme, WindowId as RootWindowId,
+};
 
 #[derive(Default)]
 struct ModifiersShared(Rc<Cell<ModifiersState>>);
@@ -42,29 +44,15 @@ impl Clone for ModifiersShared {
     }
 }
 
-pub struct EventLoopWindowTarget<T: 'static> {
+#[derive(Clone)]
+pub struct ActiveEventLoop {
     pub(crate) runner: runner::Shared,
     modifiers: ModifiersShared,
-    _marker: PhantomData<T>,
 }
 
-impl<T> Clone for EventLoopWindowTarget<T> {
-    fn clone(&self) -> Self {
-        Self {
-            runner: self.runner.clone(),
-            modifiers: self.modifiers.clone(),
-            _marker: PhantomData,
-        }
-    }
-}
-
-impl<T> EventLoopWindowTarget<T> {
+impl ActiveEventLoop {
     pub fn new() -> Self {
-        Self {
-            runner: runner::Shared::new(),
-            modifiers: ModifiersShared::default(),
-            _marker: PhantomData,
-        }
+        Self { runner: runner::Shared::new(), modifiers: ModifiersShared::default() }
     }
 
     pub fn run(&self, event_handler: Box<runner::EventHandler>, event_loop_recreation: bool) {
@@ -76,17 +64,21 @@ impl<T> EventLoopWindowTarget<T> {
         WindowId(self.runner.generate_id())
     }
 
-    pub fn register(
-        &self,
-        canvas: &Rc<RefCell<backend::Canvas>>,
-        id: WindowId,
-        prevent_default: bool,
-    ) {
+    pub fn create_custom_cursor(&self, source: CustomCursorSource) -> RootCustomCursor {
+        RootCustomCursor { inner: CustomCursor::new(self, source.inner) }
+    }
+
+    pub fn create_custom_cursor_async(&self, source: CustomCursorSource) -> CustomCursorFuture {
+        CustomCursorFuture(CustomCursor::new_async(self, source.inner))
+    }
+
+    pub fn register(&self, canvas: &Rc<RefCell<backend::Canvas>>, id: WindowId) {
         let canvas_clone = canvas.clone();
         let mut canvas = canvas.borrow_mut();
+        #[cfg(any(feature = "rwh_04", feature = "rwh_05"))]
         canvas.set_attribute("data-raw-handle", &id.0.to_string());
 
-        canvas.on_touch_start(prevent_default);
+        canvas.on_touch_start();
 
         let runner = self.runner.clone();
         let has_focus = canvas.has_focus.clone();
@@ -102,14 +94,10 @@ impl<T> EventLoopWindowTarget<T> {
                 }
             });
 
-            runner.send_events(
-                clear_modifiers
-                    .into_iter()
-                    .chain(iter::once(Event::WindowEvent {
-                        window_id: RootWindowId(id),
-                        event: WindowEvent::Focused(false),
-                    })),
-            );
+            runner.send_events(clear_modifiers.into_iter().chain(iter::once(Event::WindowEvent {
+                window_id: RootWindowId(id),
+                event: WindowEvent::Focused(false),
+            })));
         });
 
         let runner = self.runner.clone();
@@ -154,7 +142,7 @@ impl<T> EventLoopWindowTarget<T> {
                     }
                 });
 
-                let device_id = RootDeviceId(unsafe { DeviceId::dummy() });
+                let device_id = RootDeviceId(DeviceId::dummy());
 
                 runner.send_events(
                     iter::once(Event::WindowEvent {
@@ -176,7 +164,6 @@ impl<T> EventLoopWindowTarget<T> {
                     .chain(modifiers_changed),
                 );
             },
-            prevent_default,
         );
 
         let runner = self.runner.clone();
@@ -191,7 +178,7 @@ impl<T> EventLoopWindowTarget<T> {
                     }
                 });
 
-                let device_id = RootDeviceId(unsafe { DeviceId::dummy() });
+                let device_id = RootDeviceId(DeviceId::dummy());
 
                 runner.send_events(
                     iter::once(Event::WindowEvent {
@@ -213,7 +200,6 @@ impl<T> EventLoopWindowTarget<T> {
                     .chain(modifiers_changed),
                 )
             },
-            prevent_default,
         );
 
         let has_focus = canvas.has_focus.clone();
@@ -277,21 +263,6 @@ impl<T> EventLoopWindowTarget<T> {
                 let has_focus = has_focus.clone();
                 let modifiers = self.modifiers.clone();
 
-                move |active_modifiers| {
-                    if has_focus.get() && modifiers.get() != active_modifiers {
-                        modifiers.set(active_modifiers);
-                        runner.send_event(Event::WindowEvent {
-                            window_id: RootWindowId(id),
-                            event: WindowEvent::ModifiersChanged(active_modifiers.into()),
-                        })
-                    }
-                }
-            },
-            {
-                let runner = self.runner.clone();
-                let has_focus = has_focus.clone();
-                let modifiers = self.modifiers.clone();
-
                 move |active_modifiers, pointer_id, events| {
                     let modifiers =
                         (has_focus.get() && modifiers.get() != active_modifiers).then(|| {
@@ -307,10 +278,7 @@ impl<T> EventLoopWindowTarget<T> {
 
                         iter::once(Event::WindowEvent {
                             window_id: RootWindowId(id),
-                            event: WindowEvent::CursorMoved {
-                                device_id,
-                                position,
-                            },
+                            event: WindowEvent::CursorMoved { device_id, position },
                         })
                     })));
                 }
@@ -377,40 +345,18 @@ impl<T> EventLoopWindowTarget<T> {
                     runner.send_events(modifiers.into_iter().chain([
                         Event::WindowEvent {
                             window_id: RootWindowId(id),
-                            event: WindowEvent::CursorMoved {
-                                device_id,
-                                position,
-                            },
+                            event: WindowEvent::CursorMoved { device_id, position },
                         },
                         Event::WindowEvent {
                             window_id: RootWindowId(id),
-                            event: WindowEvent::MouseInput {
-                                device_id,
-                                state,
-                                button,
-                            },
+                            event: WindowEvent::MouseInput { device_id, state, button },
                         },
                     ]));
                 }
             },
-            prevent_default,
         );
 
         canvas.on_mouse_press(
-            {
-                let runner = self.runner.clone();
-                let modifiers = self.modifiers.clone();
-
-                move |active_modifiers| {
-                    if modifiers.get() != active_modifiers {
-                        modifiers.set(active_modifiers);
-                        runner.send_event(Event::WindowEvent {
-                            window_id: RootWindowId(id),
-                            event: WindowEvent::ModifiersChanged(active_modifiers.into()),
-                        })
-                    }
-                }
-            },
             {
                 let runner = self.runner.clone();
                 let modifiers = self.modifiers.clone();
@@ -432,10 +378,7 @@ impl<T> EventLoopWindowTarget<T> {
                     runner.send_events(modifiers.into_iter().chain([
                         Event::WindowEvent {
                             window_id: RootWindowId(id),
-                            event: WindowEvent::CursorMoved {
-                                device_id,
-                                position,
-                            },
+                            event: WindowEvent::CursorMoved { device_id, position },
                         },
                         Event::WindowEvent {
                             window_id: RootWindowId(id),
@@ -475,25 +418,9 @@ impl<T> EventLoopWindowTarget<T> {
                     )))
                 }
             },
-            prevent_default,
         );
 
         canvas.on_mouse_release(
-            {
-                let runner = self.runner.clone();
-                let has_focus = has_focus.clone();
-                let modifiers = self.modifiers.clone();
-
-                move |active_modifiers| {
-                    if has_focus.get() && modifiers.get() != active_modifiers {
-                        modifiers.set(active_modifiers);
-                        runner.send_event(Event::WindowEvent {
-                            window_id: RootWindowId(id),
-                            event: WindowEvent::ModifiersChanged(active_modifiers.into()),
-                        });
-                    }
-                }
-            },
             {
                 let runner = self.runner.clone();
                 let has_focus = has_focus.clone();
@@ -517,10 +444,7 @@ impl<T> EventLoopWindowTarget<T> {
                     runner.send_events(modifiers.into_iter().chain([
                         Event::WindowEvent {
                             window_id: RootWindowId(id),
-                            event: WindowEvent::CursorMoved {
-                                device_id,
-                                position,
-                            },
+                            event: WindowEvent::CursorMoved { device_id, position },
                         },
                         Event::WindowEvent {
                             window_id: RootWindowId(id),
@@ -566,30 +490,27 @@ impl<T> EventLoopWindowTarget<T> {
 
         let runner = self.runner.clone();
         let modifiers = self.modifiers.clone();
-        canvas.on_mouse_wheel(
-            move |pointer_id, delta, active_modifiers| {
-                let modifiers_changed = (has_focus.get() && modifiers.get() != active_modifiers)
-                    .then(|| {
-                        modifiers.set(active_modifiers);
-                        Event::WindowEvent {
-                            window_id: RootWindowId(id),
-                            event: WindowEvent::ModifiersChanged(active_modifiers.into()),
-                        }
-                    });
-
-                runner.send_events(modifiers_changed.into_iter().chain(iter::once(
+        canvas.on_mouse_wheel(move |pointer_id, delta, active_modifiers| {
+            let modifiers_changed =
+                (has_focus.get() && modifiers.get() != active_modifiers).then(|| {
+                    modifiers.set(active_modifiers);
                     Event::WindowEvent {
                         window_id: RootWindowId(id),
-                        event: WindowEvent::MouseWheel {
-                            device_id: RootDeviceId(DeviceId(pointer_id)),
-                            delta,
-                            phase: TouchPhase::Moved,
-                        },
+                        event: WindowEvent::ModifiersChanged(active_modifiers.into()),
+                    }
+                });
+
+            runner.send_events(modifiers_changed.into_iter().chain(iter::once(
+                Event::WindowEvent {
+                    window_id: RootWindowId(id),
+                    event: WindowEvent::MouseWheel {
+                        device_id: RootDeviceId(DeviceId(pointer_id)),
+                        delta,
+                        phase: TouchPhase::Moved,
                     },
-                )));
-            },
-            prevent_default,
-        );
+                },
+            )));
+        });
 
         let runner = self.runner.clone();
         canvas.on_touch_cancel(move |device_id, location, force| {
@@ -607,11 +528,7 @@ impl<T> EventLoopWindowTarget<T> {
 
         let runner = self.runner.clone();
         canvas.on_dark_mode(move |is_dark_mode| {
-            let theme = if is_dark_mode {
-                Theme::Dark
-            } else {
-                Theme::Light
-            };
+            let theme = if is_dark_mode { Theme::Dark } else { Theme::Light };
             runner.send_event(Event::WindowEvent {
                 window_id: RootWindowId(id),
                 event: WindowEvent::ThemeChanged(theme),
@@ -644,7 +561,7 @@ impl<T> EventLoopWindowTarget<T> {
                             window_id: RootWindowId(id),
                             event: WindowEvent::Resized(new_size),
                         });
-                        runner.request_redraw(RootWindowId(id));
+                        canvas.request_animation_frame();
                     }
                 }
             },
@@ -668,9 +585,7 @@ impl<T> EventLoopWindowTarget<T> {
         let runner = self.runner.clone();
         canvas.on_animation_frame(move || runner.request_redraw(RootWindowId(id)));
 
-        canvas.on_touch_end();
-
-        canvas.on_context_menu(prevent_default);
+        canvas.on_context_menu();
     }
 
     pub fn available_monitors(&self) -> VecDequeIter<MonitorHandle> {
@@ -692,13 +607,21 @@ impl<T> EventLoopWindowTarget<T> {
     pub fn raw_display_handle_rwh_06(
         &self,
     ) -> Result<rwh_06::RawDisplayHandle, rwh_06::HandleError> {
-        Ok(rwh_06::RawDisplayHandle::Web(
-            rwh_06::WebDisplayHandle::new(),
-        ))
+        Ok(rwh_06::RawDisplayHandle::Web(rwh_06::WebDisplayHandle::new()))
     }
 
     pub fn listen_device_events(&self, allowed: DeviceEvents) {
         self.runner.listen_device_events(allowed)
+    }
+
+    pub fn system_theme(&self) -> Option<Theme> {
+        backend::is_dark_mode(self.runner.window()).map(|is_dark_mode| {
+            if is_dark_mode {
+                Theme::Dark
+            } else {
+                Theme::Light
+            }
+        })
     }
 
     pub(crate) fn set_control_flow(&self, control_flow: ControlFlow) {
@@ -725,7 +648,38 @@ impl<T> EventLoopWindowTarget<T> {
         self.runner.poll_strategy()
     }
 
+    pub(crate) fn set_wait_until_strategy(&self, strategy: WaitUntilStrategy) {
+        self.runner.set_wait_until_strategy(strategy)
+    }
+
+    pub(crate) fn wait_until_strategy(&self) -> WaitUntilStrategy {
+        self.runner.wait_until_strategy()
+    }
+
     pub(crate) fn waker(&self) -> Waker<Weak<Execution>> {
         self.runner.waker()
+    }
+
+    pub(crate) fn owned_display_handle(&self) -> OwnedDisplayHandle {
+        OwnedDisplayHandle
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct OwnedDisplayHandle;
+
+impl OwnedDisplayHandle {
+    #[cfg(feature = "rwh_05")]
+    #[inline]
+    pub fn raw_display_handle_rwh_05(&self) -> rwh_05::RawDisplayHandle {
+        rwh_05::WebDisplayHandle::empty().into()
+    }
+
+    #[cfg(feature = "rwh_06")]
+    #[inline]
+    pub fn raw_display_handle_rwh_06(
+        &self,
+    ) -> Result<rwh_06::RawDisplayHandle, rwh_06::HandleError> {
+        Ok(rwh_06::WebDisplayHandle::new().into())
     }
 }
