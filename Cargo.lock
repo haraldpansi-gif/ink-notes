@@ -1503,7 +1503,7 @@ dependencies = [
 
 [[package]]
 name = "ink-notes"
-version = "0.46.1"
+version = "0.47.0"
 dependencies = [
  "ab_glyph",
  "android_logger",

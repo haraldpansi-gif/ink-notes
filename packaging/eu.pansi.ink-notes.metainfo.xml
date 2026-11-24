@@ -84,6 +84,11 @@
   </branding>
   <content_rating type="oars-1.1" />
   <releases>
+    <release version="0.47.0" date="2026-11-24">
+      <description>
+        <p>Updated the windowing, UI and graphics stack (winit 0.30, egui 0.37, wgpu 30), enabled network access in the Flatpak package for Nextcloud sync, and hardened update downloads, archive imports, PDF rendering and file saving.</p>
+      </description>
+    </release>
     <release version="0.46.1" date="2026-11-24">
       <description>
         <p>Text boxes with formulas that were written with an earlier version are no longer squeezed: their size now fits the typeset formulas.</p>
