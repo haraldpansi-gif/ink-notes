@@ -268,9 +268,14 @@ impl AppState {
             self.window.request_redraw();
         }
 
-        // 2. Prüfen, ob das UI Pointer-Interaktionen beansprucht (Event-Isolation)
-        // Konsumiert Klicks innerhalb der abgerundeten Pill-Toolbar, des Popovers oder offener Menüs
-        let is_pointer_in_ui = self.egui_ctx.egui_wants_pointer_input()
+        // 2. Prüfen, ob das UI Pointer-Interaktionen beansprucht (Event-Isolation).
+        // Konsumiert Klicks/Scrolls innerhalb der Pill-Toolbar, der Popover oder offener Menüs.
+        // Wichtig (egui 0.37 / Issue #64): `egui_wants_pointer_input()` meldet bei `begin_pass`
+        // fälschlich `true` über `Order::Background`-Ebenen (z. B. Seitentrennlinien bei ≥ 2
+        // Seiten oder Lineal) und blockiert dann Touchpad-Scrollen auf dem Blatt. Daher prüfen
+        // wir `egui_is_using_pointer()` (aktives Ziehen an einem UI-Widget) plus unser eigenes
+        // `is_screen_point_in_ui` (ignoriert `Order::Background`).
+        let is_pointer_in_ui = self.egui_ctx.egui_is_using_pointer()
             || ui::is_screen_point_in_ui(
                 &self.egui_ctx,
                 &self.ui_state,

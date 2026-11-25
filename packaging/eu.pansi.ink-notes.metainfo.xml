@@ -84,6 +84,11 @@
   </branding>
   <content_rating type="oars-1.1" />
   <releases>
+    <release version="0.50.3" date="2026-11-25">
+      <description>
+        <p>Fixed touchpad scrolling on multi-page notebooks (#64), fixed pasted text staying narrow inside newly opened text boxes (#62), and added an ink-only eraser mode that erases handwriting and shapes while leaving typed text untouched (#63).</p>
+      </description>
+    </release>
     <release version="0.50.2" date="2026-11-25">
       <description>
         <p>Reorganized the ☰ menu into three tidy tabs (Page, Paper, App) with a fixed save-status and updates footer.</p>

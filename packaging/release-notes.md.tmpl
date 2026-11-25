@@ -3,6 +3,7 @@
 Notebook app for pen, touch and mouse on Linux (tested on Zorin OS 18 / Ubuntu 24.04).
 
 ### Highlights:
+- **Touchpad scrolling, text paste & ink-only eraser (#62, #63, #64)**: Fixed touchpad scrolling being blocked on multi-page notebooks by an egui 0.37 background-layer change (#64), fixed newly opened text boxes staying narrow when pasting text (#62), and added an ink-only eraser mode (✏) that erases handwriting, shapes and highlighter while keeping typed text underneath untouched (#63)
 - **Tidy 3-tab ☰ menu**: Reorganized the sidebar's ☰ menu into three clean tabs (**Page**, **Paper**, **App**) with evenly aligned controls and a fixed footer showing save status and updates
 - **Toolbar height after view mode fixed**: Leaving view-only mode (👁) now reliably restores the toolbar to its full height instead of staying stuck at the collapsed view-mode height
 - **100% offline handwriting recognition (optional ~8 MB language pack)**: Download the verified PP-OCRv5 Latin ONNX pack in the ☰ menu (HTTPS + pinned SHA-256, Pure Rust via `tract-onnx`) to index handwritten notes (including German umlauts `ä, ö, ü, ß`) in the background for `Ctrl+F` full-text search (`✍: …` matches) and convert selected handwriting into editable text boxes (`✍T`, single-step undo)

@@ -269,10 +269,12 @@ impl StrokeTool {
 /// Welche Striche der Radierer entfernt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum EraserMode {
-    /// Alle getroffenen Striche
+    /// Alle getroffenen Striche (inkl. Textfelder)
     #[default]
     All,
-    /// Nur Textmarker – die Handschrift darunter bleibt erhalten
+    /// Nur Handschrift, Formen und Textmarker – getippte Textfelder bleiben erhalten (Issue #63)
+    InkOnly,
+    /// Nur Textmarker – die Handschrift und Textfelder darunter bleiben erhalten
     HighlighterOnly,
     /// Nur den überstrichenen Teil eines Strichs entfernen; der Rest bleibt in Stücken
     /// erhalten. Formen und Textfelder werden als Ganzes radiert.
@@ -283,9 +285,14 @@ impl EraserMode {
     /// Darf ein Strich dieses Werkzeugs radiert werden?
     pub fn erases(self, tool: StrokeTool) -> bool {
         match self {
-            EraserMode::All | EraserMode::Partial => true,
+            EraserMode::All | EraserMode::InkOnly | EraserMode::Partial => true,
             EraserMode::HighlighterOnly => tool == StrokeTool::Highlighter,
         }
+    }
+
+    /// Darf dieser Radiermodus getippte Textfelder entfernen?
+    pub fn erases_text(self) -> bool {
+        matches!(self, EraserMode::All | EraserMode::Partial)
     }
 }
 
@@ -1009,8 +1016,7 @@ impl Page {
 
         for (i, stroke) in self.strokes.iter().enumerate() {
             let hit = if stroke.is_text() {
-                mode != EraserMode::HighlighterOnly
-                    && stroke.erased_as_text(eraser_pos, eraser_radius)
+                mode.erases_text() && stroke.erased_as_text(eraser_pos, eraser_radius)
             } else {
                 !stroke.is_object()
                     && mode.erases(stroke.tool)
@@ -2421,6 +2427,38 @@ mod tests {
                 EraserMode::HighlighterOnly
             )
             .is_empty());
+
+        // InkOnly erases pen strokes on top of text while keeping the text box (Issue #63)
+        let pen_over_text = Stroke::new(
+            3,
+            vec![
+                StylusSample {
+                    position: glam::Vec2::new(120.0, 120.0),
+                    pressure: 0.5,
+                    timestamp: 0.0,
+                },
+                StylusSample {
+                    position: glam::Vec2::new(180.0, 120.0),
+                    pressure: 0.5,
+                    timestamp: 0.1,
+                },
+            ],
+            Vec::new(),
+            [0.0, 0.0, 0.0, 1.0],
+        );
+        page.add_stroke(pen_over_text);
+        let removed = page.erase_at(
+            glam::Vec2::new(150.0, 120.0),
+            10.0,
+            2.0,
+            EraserMode::InkOnly,
+        );
+        assert_eq!(removed.len(), 1);
+        assert_eq!(removed[0].id, 3);
+        assert_eq!(
+            page.strokes.iter().map(|s| s.id).collect::<Vec<_>>(),
+            vec![1]
+        );
     }
 
     #[test]

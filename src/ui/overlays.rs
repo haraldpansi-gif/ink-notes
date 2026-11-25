@@ -236,12 +236,17 @@ pub(super) fn text_edit_overlay(ctx: &egui::Context, state: &mut UiState) {
         .fixed_pos(view.to_screen(edit.origin))
         .order(egui::Order::Middle)
         .show(ctx, |ui| {
+            // egui::Area merkt sich die Breite des letzten Frames (bei leerem Feld nur ~3 Zeichen).
+            // Ohne explizites set_max_width/set_width bliebe das Feld beim Einfügen (Strg+V)
+            // schmal und würde den Text senkrecht umbrechen (Issue #62).
+            ui.set_max_width(width + 4.0);
             egui::Frame::NONE
                 .stroke(egui::Stroke::new(
                     1.0_f32,
                     egui::Color32::from_rgba_unmultiplied(70, 130, 230, 200),
                 ))
                 .show(ui, |ui| {
+                    ui.set_width(width);
                     let response = ui.add(
                         egui::TextEdit::multiline(&mut edit.text.content)
                             .id(egui::Id::unique("text_edit_field"))

@@ -2417,6 +2417,100 @@ mod tests {
     }
 
     #[test]
+    fn test_multi_page_background_layer_does_not_block_canvas_scroll() {
+        // Regression für Issue #64: Bei ≥ 2 Seiten zeichnet `page_separators` auf Order::Background.
+        // In egui 0.37 meldet `egui_wants_pointer_input()` dann über dem gesamten Blatt `true`,
+        // weil `root_ui_available_rect` bei `begin_pass` fehlt. `egui_is_using_pointer()` und
+        // `is_screen_point_in_ui()` dürfen das Blatt nicht blockieren.
+        let ctx = egui::Context::default();
+        let mut state = UiState::new();
+        state.continuous_scroll = true;
+        state.page_view = Some(PageView {
+            origin: egui::pos2(100.0, 40.0),
+            scale: 0.25,
+        });
+        let mut notebook = Notebook::new();
+        notebook.add_page(PageBackground::Grid5mm);
+        let updater = crate::updater::UpdaterController::new();
+        let screen = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1280.0, 900.0));
+        let canvas_pt = egui::pos2(600.0, 400.0);
+
+        for _ in 0..2 {
+            let input = egui::RawInput {
+                screen_rect: Some(screen),
+                events: vec![egui::Event::PointerMoved(canvas_pt)],
+                ..Default::default()
+            };
+            ctx.begin_pass(input);
+            let _ = render_ui(&ctx, &mut state, &notebook, AutosaveStatus::Saved, &updater);
+            let mut out = ctx.end_pass();
+            out.textures_delta.clear();
+        }
+
+        assert!(
+            !ctx.egui_is_using_pointer(),
+            "egui darf beim Schweben über dem Blatt nicht als aktiv gelten"
+        );
+        assert!(
+            !is_screen_point_in_ui(&ctx, &state, (canvas_pt.x, canvas_pt.y), 1.0),
+            "Blattpunkt darf bei mehrseitigem Notizbuch nicht als UI gelten"
+        );
+    }
+
+    #[test]
+    fn test_text_edit_overlay_grows_width_when_pasting() {
+        // Regression für Issue #62: Ein neu geöffnetes (leeres) Textfeld startet schmal (~3 Zeichen).
+        // Nach dem Einfügen eines längeren Textes muss die egui::Area sofort mitwachsen.
+        let ctx = egui::Context::default();
+        let mut state = UiState::new();
+        state.page_view = Some(PageView {
+            origin: egui::pos2(100.0, 40.0),
+            scale: 0.5,
+        });
+        let notebook = Notebook::new();
+        let updater = crate::updater::UpdaterController::new();
+        let screen = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1280.0, 900.0));
+
+        state.text_edit = Some(TextEditing::new_at(
+            notebook.current_page().id,
+            glam::Vec2::new(200.0, 200.0),
+            crate::document::PAGE_WIDTH,
+            14.0 * crate::text::UNITS_PER_PT,
+            TextFont::Sans,
+            [0.0, 0.0, 0.0, 1.0],
+        ));
+
+        let step = |state: &mut UiState| -> f32 {
+            let input = egui::RawInput {
+                screen_rect: Some(screen),
+                ..Default::default()
+            };
+            ctx.begin_pass(input);
+            let _ = render_ui(&ctx, state, &notebook, AutosaveStatus::Saved, &updater);
+            let mut out = ctx.end_pass();
+            out.textures_delta.clear();
+            ctx.memory(|m| {
+                m.area_rect(egui::Id::unique("text_edit_area"))
+                    .expect("text_edit_area rect")
+                    .width()
+            })
+        };
+
+        let width_empty = step(&mut state);
+        if let Some(edit) = state.text_edit.as_mut() {
+            edit.text.content =
+                "Dies ist ein längerer eingefügter Satz, der nicht schmal umbrechen darf."
+                    .to_string();
+        }
+        let _ = step(&mut state);
+        let width_pasted = step(&mut state);
+        assert!(
+            width_pasted > width_empty * 3.0,
+            "Textfeld blieb nach Einfügen schmal: leer {width_empty}, danach {width_pasted}"
+        );
+    }
+
+    #[test]
     fn test_long_press_detection() {
         let t0 = Instant::now();
         let ms = |n| t0 + std::time::Duration::from_millis(n);

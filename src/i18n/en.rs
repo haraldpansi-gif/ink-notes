@@ -648,6 +648,10 @@ pub const EN: &[(&str, &str)] = &[
         "Prüfsumme stimmt nicht überein (erwartet {expected}, erhalten {actual})",
         "Checksum mismatch (expected {expected}, got {actual})",
     ),
+    (
+        "Nur Handschrift & Formen radieren – getippter Text darunter bleibt",
+        "Erase handwriting & shapes only – typed text underneath stays",
+    ),
     ("📄 Seite", "📄 Page"),
     ("🎨 Papier", "🎨 Paper"),
     ("⚙ App", "⚙ App"),

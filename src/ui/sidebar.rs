@@ -438,6 +438,12 @@ pub(super) fn render_sidebar(
                                                 t!("Teilstrich radieren – nur den überstrichenen Teil entfernen (Formen ganz)"),
                                             ),
                                             (
+                                                EraserMode::InkOnly,
+                                                SidebarIcon::Glyph("✏"),
+                                                None,
+                                                t!("Nur Handschrift & Formen radieren – getippter Text darunter bleibt"),
+                                            ),
+                                            (
                                                 EraserMode::HighlighterOnly,
                                                 SidebarIcon::Glyph("🖊"),
                                                 Some(state.highlighter_color),
