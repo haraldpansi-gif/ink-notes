@@ -64,6 +64,10 @@ pub(super) fn render_sidebar(
         .default_size(egui::vec2(btn + 12.0, max_height + 12.0))
         .order(egui::Order::Foreground)
         .show(ctx, |ui| {
+            // egui::Area merkt sich die Größe des letzten Frames (z. B. im Nur-Ansehen-Modus
+            // nur ~200 px). Ohne Reset auf max_height klemmt die ScrollArea beim Zurückschalten
+            // auf die kleine Vorframe-Höhe fest und die Werkzeugleiste bleibt dauerhaft kurz.
+            ui.set_max_height(max_height + 12.0);
             egui::Frame::NONE
                 .fill(egui::Color32::from_rgba_premultiplied(24, 24, 28, 225))
                 .corner_radius(egui::CornerRadius::same((UiState::TOOLBAR_ROUNDING) as u8))
@@ -79,8 +83,10 @@ pub(super) fn render_sidebar(
                     color: egui::Color32::from_black_alpha(100),
                 })
                 .show(ui, |ui| {
+                    ui.set_max_height(max_height);
                     egui::ScrollArea::vertical()
                         .max_height(max_height)
+                        .min_scrolled_height(max_height)
                         .scroll_bar_visibility(
                             egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded,
                         )

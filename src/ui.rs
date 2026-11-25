@@ -1890,6 +1890,51 @@ mod tests {
     }
 
     #[test]
+    fn test_toolbar_regrows_after_leaving_view_mode() {
+        let ctx = egui::Context::default();
+        let mut state = UiState::new();
+        let notebook = Notebook::new();
+        let updater = crate::updater::UpdaterController::new();
+        let screen = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1280.0, 900.0));
+
+        let step = |state: &mut UiState| -> f32 {
+            let mut input = egui::RawInput {
+                screen_rect: Some(screen),
+                ..Default::default()
+            };
+            input.time = Some(0.0);
+            ctx.begin_pass(input);
+            let _ = render_ui(&ctx, state, &notebook, AutosaveStatus::Saved, &updater);
+            let mut output = ctx.end_pass();
+            output.textures_delta.clear();
+            state.toolbar_rect.expect("toolbar rect").height()
+        };
+
+        // 1. Schreibmodus: volle Höhe
+        state.view_mode = false;
+        let _ = step(&mut state);
+        let height_before = step(&mut state);
+
+        // 2. View-Modus: Leiste schrumpft
+        state.view_mode = true;
+        let _ = step(&mut state);
+        let height_view = step(&mut state);
+        assert!(
+            height_view < height_before * 0.6,
+            "im View-Modus sollte die Leiste deutlich kürzer sein ({height_view} vs {height_before})"
+        );
+
+        // 3. Zurück in den Schreibmodus: Leiste muss wieder die volle Höhe erreichen
+        state.view_mode = false;
+        let _ = step(&mut state);
+        let height_after = step(&mut state);
+        assert!(
+            (height_after - height_before).abs() < 2.0,
+            "Werkzeugleiste blieb nach View-Modus kurz: vorher {height_before}, danach {height_after}"
+        );
+    }
+
+    #[test]
     fn test_eraser_size_stays_in_the_slider_range() {
         let mut state = UiState::new();
         assert_eq!(state.eraser_radius(), 30.0);

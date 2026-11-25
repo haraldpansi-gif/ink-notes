@@ -84,6 +84,11 @@
   </branding>
   <content_rating type="oars-1.1" />
   <releases>
+    <release version="0.50.1" date="2026-11-25">
+      <description>
+        <p>Fixed the toolbar staying collapsed to its short view-only height after leaving view mode.</p>
+      </description>
+    </release>
     <release version="0.50.0" date="2026-11-25">
       <description>
         <p>100% offline handwriting recognition via an optional ~8 MB ONNX language pack (PP-OCRv5 Latin, including German umlauts): index handwritten notes in the background for Ctrl+F full-text search and convert selected handwriting into editable text boxes with one click.</p>
