@@ -301,6 +301,12 @@ pub enum UiAction {
     InsertStamp(String),
     /// Gespeicherten Stempel per ID löschen
     DeleteStamp(String),
+    /// Offline-Handschrifterkennung: Sprachpaket herunterladen / entfernen / Notizbuch indexieren
+    OcrDownloadModel,
+    OcrRemoveModel,
+    OcrIndexNotebook,
+    /// Ausgewählte Handschrift-Striche in ein bearbeitbares Textfeld umwandeln
+    ConvertSelectionToText,
     // Dokumenten- & Notizbuch-Verwaltung
     OpenNotebook(String),
     /// Einen geöffneten Notizbuch-Tab schließen (wechselt bei aktivem Tab zum Nachbar-Tab)
@@ -586,6 +592,8 @@ pub struct UiState {
     /// Nextcloud sync as the app last saw it, and the server address being typed
     pub cloud: crate::cloud_sync::View,
     pub cloud_server_input: String,
+    /// Status der Offline-Handschrifterkennung (ONNX-Sprachpaket)
+    pub ocr_status: crate::handwriting_ocr::OcrStatus,
 }
 
 impl Default for UiState {
@@ -691,6 +699,7 @@ impl Default for UiState {
             storage_dir_custom: false,
             cloud: crate::cloud_sync::View::default(),
             cloud_server_input: String::new(),
+            ocr_status: crate::handwriting_ocr::OcrStatus::NotInstalled,
         }
     }
 }

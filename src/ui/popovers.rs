@@ -981,6 +981,7 @@ pub(super) fn render_popovers(
                                 }
                             });
                             cloud_section(ui, state, actions);
+                            ocr_section(ui, state, actions);
 
                             section(ui, t!("STATUS"));
                             let (dot_color, status_text) = autosave_status_style(autosave_status);
@@ -1296,6 +1297,117 @@ pub(super) fn render_popovers(
                 state.is_stamps_menu_open = false;
                 state.is_more_menu_open = false;
                 state.show_page_jump_popup = false;
+            }
+        }
+    }
+}
+
+/// Abschnitt „HANDSCHRIFT-ERKENNUNG (OFFLINE)“ im ☰-Menü: Sprachpaket laden/entfernen &
+/// Notizbuch manuell indexieren.
+fn ocr_section(ui: &mut egui::Ui, state: &UiState, actions: &mut Vec<UiAction>) {
+    use crate::handwriting_ocr::OcrStatus;
+
+    ui.add_space(6.0);
+    ui.separator();
+    ui.label(
+        egui::RichText::new(t!("HANDSCHRIFT-ERKENNUNG (OFFLINE)"))
+            .size(10.5)
+            .strong()
+            .color(egui::Color32::from_gray(160)),
+    );
+    match &state.ocr_status {
+        OcrStatus::NotInstalled => {
+            ui.label(
+                egui::RichText::new(t!(
+                    "Optionales Sprachpaket (~8 MB, 100 % offline) für Handschrift-Suche und Textumwandlung."
+                ))
+                .size(11.5)
+                .color(egui::Color32::from_gray(180)),
+            );
+            if ui
+                .add_sized(
+                    [ui.available_width(), 30.0],
+                    egui::Button::new(t!("⬇  Sprachpaket laden (~8 MB)")),
+                )
+                .on_hover_text(t!(
+                    "Lädt das PP-OCRv5-Sprachpaket einmalig über HTTPS mit SHA-256-Prüfung herunter"
+                ))
+                .clicked()
+            {
+                actions.push(UiAction::OcrDownloadModel);
+            }
+        }
+        OcrStatus::Downloading { percent } => {
+            ui.label(
+                egui::RichText::new(t!(
+                    "⏳  Sprachpaket lädt … {percent} %",
+                    percent = format!("{:.0}", percent * 100.0)
+                ))
+                .color(egui::Color32::from_rgb(130, 185, 255)),
+            );
+            ui.add(egui::ProgressBar::new(*percent).desired_height(8.0));
+        }
+        OcrStatus::Ready {
+            indexing,
+            indexed_pages,
+            total_pages,
+        } => {
+            if *indexing {
+                let done = (*indexed_pages + 1).min(*total_pages);
+                ui.label(
+                    egui::RichText::new(t!(
+                        "🔄  Indexiere Seite {done}/{total} …",
+                        done = done,
+                        total = total_pages
+                    ))
+                    .color(egui::Color32::from_rgb(130, 185, 255)),
+                );
+            } else {
+                ui.label(
+                    egui::RichText::new(t!("✔  Aktiv (~8 MB, 100 % offline)"))
+                        .color(egui::Color32::from_rgb(120, 215, 145)),
+                );
+            }
+            ui.horizontal(|ui| {
+                let half = (ui.available_width() - ui.spacing().item_spacing.x) / 2.0;
+                if ui
+                    .add_enabled(
+                        !*indexing,
+                        egui::Button::new(t!("🔍  Indexieren")).min_size(egui::vec2(half, 28.0)),
+                    )
+                    .on_hover_text(t!(
+                        "Alle Seiten dieses Notizbuchs für die Handschrift-Suche indexieren"
+                    ))
+                    .clicked()
+                {
+                    actions.push(UiAction::OcrIndexNotebook);
+                }
+                if ui
+                    .add_enabled(
+                        !*indexing,
+                        egui::Button::new(t!("🗑  Entfernen")).min_size(egui::vec2(half, 28.0)),
+                    )
+                    .on_hover_text(t!("Sprachpaket von der Festplatte löschen"))
+                    .clicked()
+                {
+                    actions.push(UiAction::OcrRemoveModel);
+                }
+            });
+        }
+        OcrStatus::Error(err) => {
+            ui.label(
+                egui::RichText::new(err)
+                    .size(11.5)
+                    .color(egui::Color32::from_rgb(255, 145, 135)),
+            );
+            if ui
+                .add_sized(
+                    [ui.available_width(), 30.0],
+                    egui::Button::new(t!("⬇  Sprachpaket erneut laden")),
+                )
+                .clicked()
+            {
+                actions.push(UiAction::OcrDownloadModel);
             }
         }
     }

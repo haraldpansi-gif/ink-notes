@@ -500,6 +500,26 @@ pub(super) fn render_sidebar(
                                             actions.push(UiAction::ToggleAspectLock);
                                         }
                                         used += swatch + spacing;
+
+                                        if matches!(
+                                            state.ocr_status,
+                                            crate::handwriting_ocr::OcrStatus::Ready { .. }
+                                        ) {
+                                            if sidebar_button(
+                                                ui,
+                                                swatch,
+                                                SidebarIcon::Text("✍T"),
+                                                false,
+                                                locked.is_some(),
+                                                None,
+                                                t!("Ausgewählte Handschrift in Text umwandeln"),
+                                            )
+                                            .clicked()
+                                            {
+                                                actions.push(UiAction::ConvertSelectionToText);
+                                            }
+                                            used += swatch + spacing;
+                                        }
                                     }
                                     let reserved =
                                         UiState::MAX_PALETTE_LEN as f32 * (swatch + spacing);

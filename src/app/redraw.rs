@@ -129,6 +129,7 @@ impl AppState {
             .filter(|(id, _, _)| *id == self.manifest.id)
             .map(|(_, index, _)| index + 1);
         self.ui_state.cloud = self.cloud.view();
+        self.ui_state.ocr_status = self.ocr.status().clone();
         let actions = ui::render_ui(
             &self.egui_ctx,
             &mut self.ui_state,

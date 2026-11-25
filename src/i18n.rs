@@ -156,6 +156,7 @@ mod tests {
         ("export.rs", include_str!("export.rs")),
         ("file_picker.rs", include_str!("file_picker.rs")),
         ("geometry.rs", include_str!("geometry.rs")),
+        ("handwriting_ocr.rs", include_str!("handwriting_ocr.rs")),
         ("library.rs", include_str!("library.rs")),
         ("app.rs", include_str!("app.rs")),
         ("app/about_to_wait.rs", include_str!("app/about_to_wait.rs")),

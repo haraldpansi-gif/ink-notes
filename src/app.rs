@@ -84,6 +84,7 @@ struct AppState {
     egui_winit_state: egui_winit::State,
     ui_state: UiState,
     cloud: crate::cloud_sync::CloudSync,
+    ocr: crate::handwriting_ocr::OcrController,
     selection_state: SelectionState,
     last_deleted_page: Option<(String, usize, crate::document::Page)>,
     clipboard: ClipboardBridge,
@@ -641,6 +642,7 @@ impl AppState {
             ui_state.set_export_message(warning);
         }
         let selection_state = SelectionState::new();
+        let ocr = crate::handwriting_ocr::OcrController::new();
         // Zuletzt gelöschte Seite (Notizbuch-Kennung, Index, Seite) zum Wiederherstellen in dieser
         // Sitzung
         let last_deleted_page: Option<(String, usize, crate::document::Page)> = None;
@@ -826,6 +828,7 @@ impl AppState {
             egui_winit_state,
             ui_state,
             cloud,
+            ocr,
             selection_state,
             last_deleted_page,
             clipboard,

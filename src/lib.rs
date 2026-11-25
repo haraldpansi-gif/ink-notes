@@ -14,6 +14,7 @@ pub mod export;
 pub mod file_picker;
 pub mod filter;
 pub mod geometry;
+pub mod handwriting_ocr;
 pub mod history;
 pub mod i18n;
 pub mod image_layer;

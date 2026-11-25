@@ -50,6 +50,83 @@ impl AppState {
         }
         if prev_status != AutosaveStatus::Saved && new_status == AutosaveStatus::Saved {
             self.cloud.sync_soon();
+            if self.ocr.is_ready() {
+                let page = self.notebook.current_page();
+                self.ocr
+                    .schedule_page(self.storage_dir.clone(), page.id, &page.strokes);
+            }
+        }
+
+        // Offline-Handschrifterkennung (Download-Fortschritt, Hintergrund-Index, Auswahl→Text)
+        let (ocr_changed, ocr_events) = self.ocr.update();
+        if ocr_changed {
+            self.window.request_redraw();
+        }
+        for event in ocr_events {
+            match event {
+                crate::handwriting_ocr::OcrEvent::PageIndexed { .. } => {}
+                crate::handwriting_ocr::OcrEvent::NotebookIndexed { recognized_pages } => {
+                    self.ui_state.set_export_message(t!(
+                        "Handschrift-Index aktualisiert ({count} Seiten)",
+                        count = recognized_pages
+                    ));
+                    self.window.request_redraw();
+                }
+                crate::handwriting_ocr::OcrEvent::SelectionConverted {
+                    stroke_ids,
+                    bounds,
+                    text,
+                } => {
+                    if !self.notebook.current_page().is_readonly() {
+                        let page = self.notebook.current_page();
+                        let font = self.ui_state.text_font;
+                        let size = self.ui_state.text_size_pt * crate::text::UNITS_PER_PT;
+                        let origin = bounds.min;
+                        let mut edit = crate::text::TextEditing::new_at(
+                            page.id,
+                            origin,
+                            page.text_right_edge(origin.x),
+                            size,
+                            font,
+                            self.ui_state.text_color,
+                        );
+                        edit.origin = origin;
+                        edit.text.content = text;
+                        let max_line = edit
+                            .text
+                            .layout()
+                            .lines
+                            .iter()
+                            .map(|l| l.width)
+                            .fold(0.0_f32, f32::max);
+                        let target_w = (bounds.max.x - bounds.min.x)
+                            .max(max_line + size)
+                            .max(crate::text::MIN_WRAP_WIDTH);
+                        edit.text.wrap_width = target_w.min(
+                            page.text_right_edge(origin.x)
+                                .max(crate::text::MIN_WRAP_WIDTH),
+                        );
+                        let new_id = self.notebook.next_stroke_id();
+                        if let Some(text_stroke) = edit.to_stroke(new_id) {
+                            let page = self.notebook.current_page_mut();
+                            if page.replace_strokes_with(&stroke_ids, vec![text_stroke]) {
+                                self.selection_state.selected_ids = vec![new_id];
+                                self.canvas.sync_page(page);
+                                self.manifest.next_stroke_id = self.notebook.next_stroke_id;
+                                self.autosave.mark_dirty(&self.notebook, &mut self.manifest);
+                                self.ui_state.set_export_message(
+                                    t!("Handschrift in Text umgewandelt").to_string(),
+                                );
+                            }
+                        }
+                    }
+                    self.window.request_redraw();
+                }
+                crate::handwriting_ocr::OcrEvent::SelectionError(err) => {
+                    self.ui_state.set_export_message(err);
+                    self.window.request_redraw();
+                }
+            }
         }
 
         // Take over changes from other devices (Issue #49), but only while everything
@@ -820,6 +897,7 @@ impl AppState {
             self.ui_state.math.deadline(),
             Some(self.disk_watch.deadline()),
             self.cloud.deadline(),
+            self.ocr.next_wake(),
             // The updater thread does not wake the loop: look for its results now and then
             matches!(
                 self.updater.status(),

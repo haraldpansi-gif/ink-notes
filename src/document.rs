@@ -1277,6 +1277,37 @@ impl Page {
         self.strokes.extend(new_strokes);
         self.is_dirty = true;
     }
+
+    /// Ersetzt alle Striche mit den IDs in `remove_ids` atomar durch `added` (ein einziger
+    /// Undo/Redo-Schritt, z. B. Handschrift → Textfeld).
+    pub fn replace_strokes_with(&mut self, remove_ids: &[u64], added: Vec<Stroke>) -> bool {
+        if remove_ids.is_empty() && added.is_empty() {
+            return false;
+        }
+        let mut removed = Vec::new();
+        self.strokes.retain(|s| {
+            if remove_ids.contains(&s.id) {
+                removed.push(s.clone());
+                false
+            } else {
+                true
+            }
+        });
+        if removed.is_empty() && added.is_empty() {
+            return false;
+        }
+        self.strokes.extend(added.clone());
+        let past = std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_secs(60))
+            .unwrap_or_else(std::time::Instant::now);
+        self.history.push(HistoryAction::SplitStrokes {
+            removed,
+            added,
+            at: past,
+        });
+        self.is_dirty = true;
+        true
+    }
 }
 
 /// Anteil der Seitenhöhe am unteren Rand der letzten Seite, in dem Schreiben in der

@@ -201,6 +201,47 @@ impl AppState {
                     self.window.request_redraw();
                 }
             }
+            UiAction::OcrDownloadModel => {
+                self.ocr.start_download();
+                self.window.request_redraw();
+            }
+            UiAction::OcrRemoveModel => {
+                match self.ocr.remove_model() {
+                    Ok(()) => self
+                        .ui_state
+                        .set_export_message(t!("Sprachpaket entfernt").to_string()),
+                    Err(err) => self.ui_state.set_export_message(err),
+                }
+                self.window.request_redraw();
+            }
+            UiAction::OcrIndexNotebook => {
+                let pages: Vec<(u64, Option<Vec<crate::document::Stroke>>)> = self
+                    .notebook
+                    .pages
+                    .iter()
+                    .map(|p| (p.id, p.is_loaded.then(|| p.strokes.clone())))
+                    .collect();
+                self.ocr.index_notebook(self.storage_dir.clone(), pages);
+                self.window.request_redraw();
+            }
+            UiAction::ConvertSelectionToText => {
+                if self.selection_state.is_empty() {
+                    self.ui_state
+                        .set_export_message(t!("Keine Handschrift-Striche ausgewählt").to_string());
+                } else {
+                    let selected = self
+                        .notebook
+                        .current_page()
+                        .get_strokes(&self.selection_state.selected_ids);
+                    match self.ocr.convert_selection(&selected) {
+                        Ok(()) => self
+                            .ui_state
+                            .set_export_message(t!("Erkenne Handschrift …").to_string()),
+                        Err(err) => self.ui_state.set_export_message(err),
+                    }
+                }
+                self.window.request_redraw();
+            }
             UiAction::CopySelected => {
                 let count = self
                     .selection_state

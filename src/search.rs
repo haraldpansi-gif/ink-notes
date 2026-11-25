@@ -143,8 +143,36 @@ fn search_pdf_background(
     }
 }
 
-/// Durchsucht das aktuell geöffnete Notizbuch (Seitentitel, Textfelder und PDF-Hintergründe;
-/// für ungeladene Seiten direkt aus `page_<id>.json`).
+/// Durchsucht den erkannten Handschrift-Text einer Seite aus dem lokalen `.ocr_cache.json`.
+#[allow(clippy::too_many_arguments)]
+fn search_ocr_text(
+    hits: &mut Vec<SearchHit>,
+    max_hits: usize,
+    notebook_id: &str,
+    notebook_title: &str,
+    page_index: usize,
+    page_id: u64,
+    ocr_cache: &crate::handwriting_ocr::OcrCache,
+    needle: &str,
+) {
+    if hits.len() >= max_hits {
+        return;
+    }
+    if let Some(text) = ocr_cache.page_text(page_id) {
+        if let Some(snippet) = make_snippet(text, needle) {
+            hits.push(SearchHit {
+                notebook_id: notebook_id.to_string(),
+                notebook_title: notebook_title.to_string(),
+                page_index,
+                page_id,
+                snippet: format!("✍: {snippet}"),
+            });
+        }
+    }
+}
+
+/// Durchsucht das aktuell geöffnete Notizbuch (Seitentitel, Textfelder, PDF-Hintergründe und
+/// lokalen Handschrift-OCR-Cache; für ungeladene Seiten direkt aus `page_<id>.json`).
 pub fn search_notebook(
     notebook_id: &str,
     notebook_title: &str,
@@ -158,6 +186,7 @@ pub fn search_notebook(
         return Vec::new();
     }
     let mut hits = Vec::new();
+    let ocr_cache = crate::handwriting_ocr::OcrCache::load(storage_dir);
 
     for (page_index, page) in notebook.pages.iter().enumerate() {
         if hits.len() >= max_hits {
@@ -234,6 +263,16 @@ pub fn search_notebook(
                 &needle,
             );
         }
+        search_ocr_text(
+            &mut hits,
+            max_hits,
+            notebook_id,
+            notebook_title,
+            page_index,
+            page.id,
+            &ocr_cache,
+            &needle,
+        );
     }
 
     hits
@@ -298,6 +337,7 @@ pub fn search_all_notebooks(
         } else {
             manifest.page_ids.clone()
         };
+        let ocr_cache = crate::handwriting_ocr::OcrCache::load(&nb_dir);
         for (page_index, page_id) in page_ids.into_iter().enumerate() {
             if hits.len() >= max_hits {
                 break;
@@ -345,6 +385,16 @@ pub fn search_all_notebooks(
                     &needle,
                 );
             }
+            search_ocr_text(
+                &mut hits,
+                max_hits,
+                &summary.id,
+                &manifest.title,
+                page_index,
+                page_id,
+                &ocr_cache,
+                &needle,
+            );
         }
     }
 
@@ -482,5 +532,26 @@ mod tests {
         assert_eq!(hits[0].page_index, 0);
         assert!(hits[0].snippet.starts_with("PDF: "));
         assert!(hits[0].snippet.contains("Maschenregel"));
+    }
+
+    #[test]
+    fn test_search_finds_handwriting_from_ocr_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut nb = Notebook::new();
+        nb.add_page(PageBackground::Blank);
+
+        let mut cache = crate::handwriting_ocr::OcrCache::default();
+        cache.set_page(
+            nb.pages[1].id,
+            42,
+            "Prüfungsvorbereitung Übung 3\nKirchhoffsche Regel".to_string(),
+        );
+        cache.save(dir.path()).unwrap();
+
+        let hits = search_notebook("nb1", "ET", &nb, dir.path(), "übung 3", 20);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].page_index, 1);
+        assert!(hits[0].snippet.starts_with("✍: "));
+        assert!(hits[0].snippet.contains("Übung 3"));
     }
 }
