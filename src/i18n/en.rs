@@ -345,7 +345,6 @@ pub const EN: &[(&str, &str)] = &[
     ("Sprache der Oberfläche", "Interface language"),
     ("Standard-Notizbuch erstellt", "Default notebook created"),
     ("Standard-Notizbuch", "Default notebook"),
-    ("STATUS", "STATUS"),
     ("Stift (B/U/R für Farben) – erneut tippen für Farbe & Stärke", "Pen (B/U/R for colors) – tap again for color & width"),
     ("Stift (Pen)", "Pen"),
     ("Stift {number} ({width} mm) – erneut tippen für Farbe & Stärke; Änderungen merkt sich der Stift", "Pen {number} ({width} mm) – tap again for color & width; the pen remembers changes"),
@@ -649,4 +648,8 @@ pub const EN: &[(&str, &str)] = &[
         "Prüfsumme stimmt nicht überein (erwartet {expected}, erhalten {actual})",
         "Checksum mismatch (expected {expected}, got {actual})",
     ),
+    ("📄 Seite", "📄 Page"),
+    ("🎨 Papier", "🎨 Paper"),
+    ("⚙ App", "⚙ App"),
+    ("SEITE", "PAGE"),
 ];

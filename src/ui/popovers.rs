@@ -628,7 +628,7 @@ pub(super) fn render_popovers(
         }
     }
 
-    // 2b. ☰-MENÜ (selten genutzte Funktionen), öffnet sich nach oben zur Blattseite hin
+    // 2b. ☰-MENÜ (aufgeräumt in 3 Tabs: Seite / Papier / App + feste Status-/Update-Fußzeile)
     if state.is_more_menu_open {
         if let Some(btn_rect) = anchors.more_btn_rect {
             let (mut pos, pivot) =
@@ -646,7 +646,7 @@ pub(super) fn render_popovers(
                 .show(ctx, |ui| {
                     popover_frame()
                         .show(ui, |ui| {
-                            ui.set_width(260.0);
+                            ui.set_width(292.0);
                             touch_friendly_spacing(ui);
                             let section = |ui: &mut egui::Ui, title: &str| {
                                 ui.add_space(8.0);
@@ -654,23 +654,23 @@ pub(super) fn render_popovers(
                                     egui::RichText::new(title)
                                         .size(10.5)
                                         .strong()
-                                        .color(egui::Color32::from_gray(160)),
+                                        .color(egui::Color32::from_gray(155)),
                                 );
                                 ui.add_space(2.0);
                             };
 
+                            // Kopfzeile
                             ui.horizontal(|ui| {
                                 ui.label(
                                     egui::RichText::new(t!("Weitere Funktionen"))
                                         .strong()
                                         .color(egui::Color32::WHITE)
-                                        .size(12.5),
+                                        .size(13.0),
                                 );
                                 ui.with_layout(
                                     egui::Layout::right_to_left(egui::Align::Center),
                                     |ui| {
-                                        if close_button(ui).clicked()
-                                        {
+                                        if close_button(ui).clicked() {
                                             state.is_more_menu_open = false;
                                         }
                                     },
@@ -678,327 +678,395 @@ pub(super) fn render_popovers(
                             });
 
                             ui.add_space(4.0);
-                            if ui
-                                .add_sized(
-                                    [ui.available_width(), 32.0],
-                                    egui::Button::new(t!("🔍 Suchen (Strg+F)")),
-                                )
-                                .clicked()
-                            {
-                                state.close_overlays();
-                                state.is_search_open = true;
-                                state.search_focus = true;
-                                if !state.search_query.trim().is_empty() {
-                                    actions.push(UiAction::RunSearch);
-                                }
-                            }
 
-                            // Bei kleinen Fenstern scrollen statt abschneiden
-                            egui::ScrollArea::vertical()
-                                .max_height((ctx.viewport_rect().height() - 90.0).max(150.0))
-                                .show(ui, |ui| {
-                            section(ui, t!("DOKUMENT"));
-                            if ui
-                                .add_sized([ui.available_width(), 30.0], egui::Button::new(t!("📄  Als PDF exportieren (Strg+E)")))
-                                .clicked()
-                            {
-                                actions.push(UiAction::ExportPdf);
-                                state.is_more_menu_open = false;
-                            }
+                            // Kompakte 3-Tab-Leiste
                             ui.horizontal(|ui| {
-                                ui.label(egui::RichText::new(t!("Seite als")).color(egui::Color32::from_gray(190)));
-                                for (label, kind, hint) in [
-                                    ("PNG", PageExportKind::Png, t!("Bild mit Papier und Raster (200 dpi)")),
-                                    ("PNG transp.", PageExportKind::PngTransparent, t!("Bild mit transparentem Hintergrund, nur Inhalt")),
-                                    ("SVG", PageExportKind::Svg, t!("Vektorgrafik, z. B. für Inkscape oder LaTeX")),
+                                let spacing = ui.spacing().item_spacing.x;
+                                let tab_w = ((ui.available_width() - 2.0 * spacing) / 3.0).max(60.0);
+                                for (tab, label) in [
+                                    (super::MoreMenuTab::Page, t!("📄 Seite")),
+                                    (super::MoreMenuTab::Paper, t!("🎨 Papier")),
+                                    (super::MoreMenuTab::Settings, t!("⚙ App")),
                                 ] {
-                                    if ui.button(label).on_hover_text(hint).clicked() {
-                                        actions.push(UiAction::ExportPage(kind));
-                                        state.is_more_menu_open = false;
+                                    let selected = state.more_menu_tab == tab;
+                                    let btn = egui::Button::selectable(
+                                        selected,
+                                        egui::RichText::new(label).size(12.0),
+                                    );
+                                    if ui.add_sized([tab_w, 30.0], btn).clicked() {
+                                        state.more_menu_tab = tab;
                                     }
                                 }
                             });
-                            if ui
-                                .add_enabled_ui(!state.endless, |ui| {
-                                    ui.add_sized([ui.available_width(), 30.0], egui::Button::new(t!("➕  Neue Seite einfügen")))
-                                })
-                                .inner
-                                .on_hover_text(t!("Leere Seite direkt nach der aktuellen Seite"))
-                                .clicked()
-                            {
-                                actions.push(UiAction::AddPage);
-                            }
-                            delete_page_buttons(ui, state, notebook, actions);
-                            if ui
-                                .add_sized([ui.available_width(), 30.0], egui::Button::new(t!("🖼  Bild einfügen … (Strg+I)")))
-                                .on_hover_text(t!("Auch per Strg+V aus der Zwischenablage oder durch Ziehen einer Bilddatei ins Fenster"))
-                                .clicked()
-                            {
-                                state.open_image_picker();
-                            }
-                            if ui
-                                .add_sized([ui.available_width(), 30.0], egui::Button::new(t!("📄  Importieren (PDF, Xournal++, Rnote, Saber) …")))
-                                .on_hover_text(t!("Vorlesungsfolien, Übungsblätter, Formulare oder Notizbücher aus Xournal++, Rnote und Saber als neues Notizbuch öffnen und darauf schreiben"))
-                                .clicked()
-                            {
-                                state.open_import_picker();
-                            }
 
-                            section(ui, t!("HINTERGRUND DIESER SEITE"));
-                            let current_bg = notebook.current_page().background;
-                            egui::Grid::new("more_menu_backgrounds")
-                                .num_columns(2)
-                                .spacing([6.0, 6.0])
+                            ui.add_space(2.0);
+                            ui.separator();
+
+                            // Scrollbarer Tab-Inhalt (passt bei normalen Fenstern fast ohne Scrollen)
+                            let body_max_h = (ctx.viewport_rect().height() - 175.0).max(140.0);
+                            egui::ScrollArea::vertical()
+                                .id_salt(("more_menu_scroll", state.more_menu_tab))
+                                .max_height(body_max_h)
                                 .show(ui, |ui| {
-                                    for (i, (bg, label)) in [
-                                        (PageBackground::Grid5mm, t!("Kariert")),
-                                        (PageBackground::Lined, t!("Liniert")),
-                                        (PageBackground::DotGrid, t!("Punkte")),
-                                        (PageBackground::Blank, t!("Blanko")),
-                                    ]
-                                    .into_iter()
-                                    .enumerate()
-                                    {
-                                        if ui
-                                            .add_sized(
-                                                [115.0, 28.0],
-                                                egui::Button::selectable(current_bg == bg, label),
+                                    ui.set_width(ui.available_width());
+                                    match state.more_menu_tab {
+                                        super::MoreMenuTab::Page => {
+                                            ui.add_space(4.0);
+                                            if ui
+                                                .add_sized(
+                                                    [ui.available_width(), 32.0],
+                                                    egui::Button::new(t!("🔍 Suchen (Strg+F)")),
+                                                )
+                                                .clicked()
+                                            {
+                                                state.close_overlays();
+                                                state.is_search_open = true;
+                                                state.search_focus = true;
+                                                if !state.search_query.trim().is_empty() {
+                                                    actions.push(UiAction::RunSearch);
+                                                }
+                                            }
+
+                                            section(ui, t!("DOKUMENT"));
+                                            if ui
+                                                .add_sized(
+                                                    [ui.available_width(), 30.0],
+                                                    egui::Button::new(t!("📄  Als PDF exportieren (Strg+E)")),
+                                                )
+                                                .clicked()
+                                            {
+                                                actions.push(UiAction::ExportPdf);
+                                                state.is_more_menu_open = false;
+                                            }
+                                            ui.horizontal(|ui| {
+                                                ui.label(
+                                                    egui::RichText::new(t!("Seite als"))
+                                                        .size(12.0)
+                                                        .color(egui::Color32::from_gray(190)),
+                                                );
+                                                for (label, kind, hint) in [
+                                                    ("PNG", PageExportKind::Png, t!("Bild mit Papier und Raster (200 dpi)")),
+                                                    ("PNG transp.", PageExportKind::PngTransparent, t!("Bild mit transparentem Hintergrund, nur Inhalt")),
+                                                    ("SVG", PageExportKind::Svg, t!("Vektorgrafik, z. B. für Inkscape oder LaTeX")),
+                                                ] {
+                                                    if ui.button(label).on_hover_text(hint).clicked() {
+                                                        actions.push(UiAction::ExportPage(kind));
+                                                        state.is_more_menu_open = false;
+                                                    }
+                                                }
+                                            });
+                                            if ui
+                                                .add_sized(
+                                                    [ui.available_width(), 30.0],
+                                                    egui::Button::new(t!("🖼  Bild einfügen … (Strg+I)")),
+                                                )
+                                                .on_hover_text(t!("Auch per Strg+V aus der Zwischenablage oder durch Ziehen einer Bilddatei ins Fenster"))
+                                                .clicked()
+                                            {
+                                                state.open_image_picker();
+                                            }
+                                            if ui
+                                                .add_sized(
+                                                    [ui.available_width(), 30.0],
+                                                    egui::Button::new(t!("📄  Importieren (PDF, Xournal++, Rnote, Saber) …")),
+                                                )
+                                                .on_hover_text(t!("Vorlesungsfolien, Übungsblätter, Formulare oder Notizbücher aus Xournal++, Rnote und Saber als neues Notizbuch öffnen und darauf schreiben"))
+                                                .clicked()
+                                            {
+                                                state.open_import_picker();
+                                            }
+
+                                            section(ui, t!("SEITE"));
+                                            if ui
+                                                .add_enabled_ui(!state.endless, |ui| {
+                                                    ui.add_sized(
+                                                        [ui.available_width(), 30.0],
+                                                        egui::Button::new(t!("➕  Neue Seite einfügen")),
+                                                    )
+                                                })
+                                                .inner
+                                                .on_hover_text(t!("Leere Seite direkt nach der aktuellen Seite"))
+                                                .clicked()
+                                            {
+                                                actions.push(UiAction::AddPage);
+                                            }
+                                            delete_page_buttons(ui, state, notebook, actions);
+
+                                            section(ui, t!("ZOOM"));
+                                            ui.horizontal(|ui| {
+                                                let spacing = ui.spacing().item_spacing.x;
+                                                let third = ((ui.available_width() - 2.0 * spacing) / 3.0).max(56.0);
+                                                if ui
+                                                    .add_enabled(
+                                                        state.current_zoom > 0.25,
+                                                        egui::Button::new("🔍 −").min_size(egui::vec2(third, 28.0)),
+                                                    )
+                                                    .on_hover_text(t!("Herauszoomen (Strg+-)"))
+                                                    .clicked()
+                                                {
+                                                    actions.push(UiAction::ZoomOut);
+                                                }
+                                                let pct = (state.current_zoom * 100.0).round() as u32;
+                                                if ui
+                                                    .add_sized([third, 28.0], egui::Button::new(format!("{pct} %")))
+                                                    .on_hover_text(t!("Zurücksetzen (Strg+0)"))
+                                                    .clicked()
+                                                {
+                                                    actions.push(UiAction::ResetZoom);
+                                                }
+                                                if ui
+                                                    .add_enabled(
+                                                        state.current_zoom < 5.0,
+                                                        egui::Button::new("🔍 +").min_size(egui::vec2(third, 28.0)),
+                                                    )
+                                                    .on_hover_text(t!("Heranzoomen (Strg++)"))
+                                                    .clicked()
+                                                {
+                                                    actions.push(UiAction::ZoomIn);
+                                                }
+                                            });
+                                        }
+                                        super::MoreMenuTab::Paper => {
+                                            section(ui, t!("HINTERGRUND DIESER SEITE"));
+                                            let current_bg = notebook.current_page().background;
+                                            let col_w = ((ui.available_width() - 6.0) / 2.0).max(100.0);
+                                            egui::Grid::new("more_menu_backgrounds")
+                                                .num_columns(2)
+                                                .spacing([6.0, 6.0])
+                                                .show(ui, |ui| {
+                                                    for (i, (bg, label)) in [
+                                                        (PageBackground::Grid5mm, t!("Kariert")),
+                                                        (PageBackground::Lined, t!("Liniert")),
+                                                        (PageBackground::DotGrid, t!("Punkte")),
+                                                        (PageBackground::Blank, t!("Blanko")),
+                                                    ]
+                                                    .into_iter()
+                                                    .enumerate()
+                                                    {
+                                                        if ui
+                                                            .add_sized(
+                                                                [col_w, 30.0],
+                                                                egui::Button::selectable(current_bg == bg, label),
+                                                            )
+                                                            .clicked()
+                                                        {
+                                                            actions.push(UiAction::SetBackground(bg));
+                                                        }
+                                                        if i % 2 == 1 {
+                                                            ui.end_row();
+                                                        }
+                                                    }
+                                                });
+
+                                            section(ui, t!("PAPIERFARBE (NUR ANZEIGE)"));
+                                            let mut paper_changed = false;
+                                            egui::Grid::new("more_menu_paper")
+                                                .num_columns(2)
+                                                .spacing([6.0, 6.0])
+                                                .show(ui, |ui| {
+                                                    for (i, theme) in PaperTheme::ALL.into_iter().enumerate() {
+                                                        if paper_theme_button(ui, theme, state.paper_theme == theme)
+                                                            .clicked()
+                                                            && state.paper_theme != theme
+                                                        {
+                                                            state.paper_theme = theme;
+                                                            paper_changed = true;
+                                                        }
+                                                        if i % 2 == 1 {
+                                                            ui.end_row();
+                                                        }
+                                                    }
+                                                });
+                                            if ui
+                                                .add_enabled(
+                                                    state.paper_theme.is_dark(),
+                                                    egui::Checkbox::new(
+                                                        &mut state.adapt_ink_colors,
+                                                        t!("Dunkle Stiftfarben aufhellen"),
+                                                    ),
+                                                )
+                                                .on_hover_text(
+                                                    t!("Schwarz wird Weiß, Dunkelblau wird Hellblau. Gespeichert und \
+                                                     als PDF exportiert werden immer die Originalfarben."),
+                                                )
+                                                .changed()
+                                            {
+                                                paper_changed = true;
+                                            }
+                                            if paper_changed {
+                                                actions.push(UiAction::SetPaperTheme {
+                                                    theme: state.paper_theme,
+                                                    adapt_ink: state.adapt_ink_colors,
+                                                });
+                                            }
+
+                                            section(ui, t!("KAROS, LINIEN UND PUNKTE"));
+                                            ui.horizontal_wrapped(|ui| {
+                                                ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
+                                                for pattern in PatternColor::ALL {
+                                                    if pattern_color_button(
+                                                        ui,
+                                                        pattern,
+                                                        state.paper_theme,
+                                                        state.pattern_color == pattern,
+                                                    )
+                                                    .clicked()
+                                                        && state.pattern_color != pattern
+                                                    {
+                                                        state.pattern_color = pattern;
+                                                        actions.push(UiAction::SetPatternColor(pattern));
+                                                    }
+                                                }
+                                            });
+
+                                            section(ui, t!("SEITEN DIESES NOTIZBUCHS"));
+                                            let mut layout = if state.endless {
+                                                NotebookLayout::Endless
+                                            } else if state.continuous_scroll {
+                                                NotebookLayout::Continuous
+                                            } else {
+                                                NotebookLayout::Paged
+                                            };
+                                            if layout_picker(ui, &mut layout, state.endless_switch_possible, true) {
+                                                actions.push(UiAction::SetNotebookLayout(layout));
+                                            }
+                                        }
+                                        super::MoreMenuTab::Settings => {
+                                            section(ui, t!("EINGABE"));
+                                            if ui
+                                                .checkbox(
+                                                    &mut state.touch_draw_enabled,
+                                                    t!("Mit dem Finger zeichnen"),
+                                                )
+                                                .on_hover_text(
+                                                    t!("Aus: ein Finger verschiebt, zwei Finger zoomen (empfohlen mit Stift).\nAn: ein Finger zeichnet."),
+                                                )
+                                                .changed()
+                                            {
+                                                actions.push(UiAction::SetTouchDraw(state.touch_draw_enabled));
+                                            }
+                                            let mut math = state.math.enabled;
+                                            if ui
+                                                .checkbox(&mut math, t!("Formeln nach „=“ ausrechnen"))
+                                                .on_hover_text(t!("Nach einem handgeschriebenen „=“ erscheint das Ergebnis daneben, z. B. 2⁴ = 16. Antippen mit dem Stift oder Klicken fügt es als Text ein.\nGelesen werden Ziffern, + − · : /, Klammern, Hochzahlen, Brüche und x, y, a, b."))
+                                                .changed()
+                                            {
+                                                state.math.set_enabled(math);
+                                                actions.push(UiAction::SetMathAssist(math));
+                                            }
+                                            if let Some(curve) = pressure_curve_editor(ui, state) {
+                                                actions.push(UiAction::SavePressureCurve(curve));
+                                            }
+                                            if stylus_buttons_editor(ui, state) {
+                                                actions.push(UiAction::SaveStylusButtons);
+                                            }
+
+                                            ocr_section(ui, state, actions);
+
+                                            ui.add_space(6.0);
+                                            ui.separator();
+                                            section(ui, t!("SPEICHERORT"));
+                                            ui.add(
+                                                egui::Label::new(
+                                                    egui::RichText::new(state.storage_dir.display().to_string())
+                                                        .size(11.5)
+                                                        .color(egui::Color32::from_gray(190)),
+                                                )
+                                                .truncate(),
                                             )
-                                            .clicked()
-                                        {
-                                            actions.push(UiAction::SetBackground(bg));
-                                        }
-                                        if i % 2 == 1 {
-                                            ui.end_row();
+                                            .on_hover_text(state.storage_dir.display().to_string());
+                                            ui.horizontal(|ui| {
+                                                let half = ((ui.available_width() - ui.spacing().item_spacing.x) / 2.0).max(90.0);
+                                                if ui
+                                                    .add_sized([half, 28.0], egui::Button::new(t!("📁  Ändern …")))
+                                                    .on_hover_text(t!("Z. B. einen Nextcloud- oder Google-Drive-Ordner wählen, um die Notizbücher mit anderen Geräten abzugleichen"))
+                                                    .clicked()
+                                                {
+                                                    state.open_storage_picker();
+                                                }
+                                                if ui
+                                                    .add_enabled(
+                                                        state.storage_dir_custom,
+                                                        egui::Button::new(t!("Standard")).min_size(egui::vec2(half, 28.0)),
+                                                    )
+                                                    .on_hover_text(t!("Zurück zum Standard-Speicherort"))
+                                                    .clicked()
+                                                {
+                                                    actions.push(UiAction::SetStorageDir(None));
+                                                }
+                                            });
+                                            cloud_section(ui, state, actions);
+
+                                            ui.add_space(6.0);
+                                            ui.separator();
+                                            section(ui, t!("WERKZEUGLEISTE"));
+                                            ui.horizontal(|ui| {
+                                                let half = ((ui.available_width() - ui.spacing().item_spacing.x) / 2.0).max(90.0);
+                                                for (side, label) in
+                                                    [(SidebarSide::Left, t!("Links")), (SidebarSide::Right, t!("Rechts"))]
+                                                {
+                                                    if ui
+                                                        .add_sized(
+                                                            [half, 28.0],
+                                                            egui::Button::selectable(
+                                                                state.sidebar_side == side,
+                                                                label,
+                                                            ),
+                                                        )
+                                                        .clicked()
+                                                        && state.sidebar_side != side
+                                                    {
+                                                        state.sidebar_side = side;
+                                                        actions.push(UiAction::SetSidebarSide(side));
+                                                    }
+                                                }
+                                            });
+
+                                            // Zweisprachig, damit man die Auswahl in jeder Sprache findet
+                                            section(ui, "SPRACHE / LANGUAGE");
+                                            ui.horizontal(|ui| {
+                                                let spacing = ui.spacing().item_spacing.x;
+                                                let third = ((ui.available_width() - 2.0 * spacing) / 3.0).max(65.0);
+                                                let choices = [
+                                                    (None, t!("System")),
+                                                    (Some(crate::i18n::Language::German), "Deutsch"),
+                                                    (Some(crate::i18n::Language::English), "English"),
+                                                ];
+                                                for (language, label) in choices {
+                                                    if ui
+                                                        .add_sized(
+                                                            [third, 28.0],
+                                                            egui::Button::selectable(
+                                                                state.language == language,
+                                                                label,
+                                                            ),
+                                                        )
+                                                        .on_hover_text(t!("Sprache der Oberfläche"))
+                                                        .clicked()
+                                                        && state.language != language
+                                                    {
+                                                        state.language = language;
+                                                        actions.push(UiAction::SetLanguage(language));
+                                                    }
+                                                }
+                                            });
                                         }
                                     }
                                 });
 
-                            section(ui, t!("PAPIERFARBE (NUR ANZEIGE)"));
-                            let mut paper_changed = false;
-                            egui::Grid::new("more_menu_paper")
-                                .num_columns(2)
-                                .spacing([6.0, 6.0])
-                                .show(ui, |ui| {
-                                    for (i, theme) in PaperTheme::ALL.into_iter().enumerate() {
-                                        if paper_theme_button(ui, theme, state.paper_theme == theme)
-                                            .clicked()
-                                            && state.paper_theme != theme
-                                        {
-                                            state.paper_theme = theme;
-                                            paper_changed = true;
-                                        }
-                                        if i % 2 == 1 {
-                                            ui.end_row();
-                                        }
-                                    }
-                                });
-                            if ui
-                                .add_enabled(
-                                    state.paper_theme.is_dark(),
-                                    egui::Checkbox::new(
-                                        &mut state.adapt_ink_colors,
-                                        t!("Dunkle Stiftfarben aufhellen"),
-                                    ),
-                                )
-                                .on_hover_text(
-                                    t!("Schwarz wird Weiß, Dunkelblau wird Hellblau. Gespeichert und \
-                                     als PDF exportiert werden immer die Originalfarben."),
-                                )
-                                .changed()
-                            {
-                                paper_changed = true;
-                            }
-                            if paper_changed {
-                                actions.push(UiAction::SetPaperTheme {
-                                    theme: state.paper_theme,
-                                    adapt_ink: state.adapt_ink_colors,
-                                });
-                            }
-
-                            section(ui, t!("KAROS, LINIEN UND PUNKTE"));
-                            ui.horizontal_wrapped(|ui| {
-                                ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
-                                for pattern in PatternColor::ALL {
-                                    if pattern_color_button(
-                                        ui,
-                                        pattern,
-                                        state.paper_theme,
-                                        state.pattern_color == pattern,
-                                    )
-                                    .clicked()
-                                        && state.pattern_color != pattern
-                                    {
-                                        state.pattern_color = pattern;
-                                        actions.push(UiAction::SetPatternColor(pattern));
-                                    }
-                                }
-                            });
-
-                            section(ui, t!("SEITEN DIESES NOTIZBUCHS"));
-                            let mut layout = if state.endless {
-                                NotebookLayout::Endless
-                            } else if state.continuous_scroll {
-                                NotebookLayout::Continuous
-                            } else {
-                                NotebookLayout::Paged
-                            };
-                            if layout_picker(ui, &mut layout, state.endless_switch_possible, true) {
-                                actions.push(UiAction::SetNotebookLayout(layout));
-                            }
-
-                            section(ui, t!("ZOOM"));
-                            ui.horizontal(|ui| {
-                                if ui
-                                    .add_enabled(state.current_zoom > 0.25, egui::Button::new("🔍 -"))
-                                    .on_hover_text(t!("Herauszoomen (Strg+-)"))
-                                    .clicked()
-                                {
-                                    actions.push(UiAction::ZoomOut);
-                                }
-                                let pct = (state.current_zoom * 100.0).round() as u32;
-                                if ui
-                                    .button(format!("{pct} %"))
-                                    .on_hover_text(t!("Zurücksetzen (Strg+0)"))
-                                    .clicked()
-                                {
-                                    actions.push(UiAction::ResetZoom);
-                                }
-                                if ui
-                                    .add_enabled(state.current_zoom < 5.0, egui::Button::new("🔍 +"))
-                                    .on_hover_text(t!("Heranzoomen (Strg++)"))
-                                    .clicked()
-                                {
-                                    actions.push(UiAction::ZoomIn);
-                                }
-                            });
-
-                            section(ui, t!("EINGABE"));
-                            if ui
-                                .checkbox(
-                                    &mut state.touch_draw_enabled,
-                                    t!("Mit dem Finger zeichnen"),
-                                )
-                                .on_hover_text(
-                                    t!("Aus: ein Finger verschiebt, zwei Finger zoomen (empfohlen mit Stift).\nAn: ein Finger zeichnet."),
-                                )
-                                .changed()
-                            {
-                                actions.push(UiAction::SetTouchDraw(state.touch_draw_enabled));
-                            }
-                            let mut math = state.math.enabled;
-                            if ui
-                                .checkbox(&mut math, t!("Formeln nach „=“ ausrechnen"))
-                                .on_hover_text(t!("Nach einem handgeschriebenen „=“ erscheint das Ergebnis daneben, z. B. 2⁴ = 16. Antippen mit dem Stift oder Klicken fügt es als Text ein.\nGelesen werden Ziffern, + − · : /, Klammern, Hochzahlen, Brüche und x, y, a, b."))
-                                .changed()
-                            {
-                                state.math.set_enabled(math);
-                                actions.push(UiAction::SetMathAssist(math));
-                            }
-                            if let Some(curve) = pressure_curve_editor(ui, state) {
-                                actions.push(UiAction::SavePressureCurve(curve));
-                            }
-                            if stylus_buttons_editor(ui, state) {
-                                actions.push(UiAction::SaveStylusButtons);
-                            }
-
-                            section(ui, t!("WERKZEUGLEISTE"));
-                            ui.horizontal(|ui| {
-                                for (side, label) in
-                                    [(SidebarSide::Left, t!("Links")), (SidebarSide::Right, t!("Rechts"))]
-                                {
-                                    if ui
-                                        .add_sized(
-                                            [115.0, 28.0],
-                                            egui::Button::selectable(
-                                                state.sidebar_side == side,
-                                                label,
-                                            ),
-                                        )
-                                        .clicked()
-                                        && state.sidebar_side != side
-                                    {
-                                        state.sidebar_side = side;
-                                        actions.push(UiAction::SetSidebarSide(side));
-                                    }
-                                }
-                            });
-
-                            // Zweisprachig, damit man die Auswahl in jeder Sprache findet
-                            section(ui, "SPRACHE / LANGUAGE");
-                            ui.horizontal(|ui| {
-                                let choices = [
-                                    (None, t!("System")),
-                                    (Some(crate::i18n::Language::German), "Deutsch"),
-                                    (Some(crate::i18n::Language::English), "English"),
-                                ];
-                                for (language, label) in choices {
-                                    if ui
-                                        .add_sized(
-                                            [75.0, 28.0],
-                                            egui::Button::selectable(
-                                                state.language == language,
-                                                label,
-                                            ),
-                                        )
-                                        .on_hover_text(t!("Sprache der Oberfläche"))
-                                        .clicked()
-                                        && state.language != language
-                                    {
-                                        state.language = language;
-                                        actions.push(UiAction::SetLanguage(language));
-                                    }
-                                }
-                            });
-
-                            section(ui, t!("SPEICHERORT"));
-                            ui.add(
-                                egui::Label::new(
-                                    egui::RichText::new(state.storage_dir.display().to_string())
-                                        .size(11.5)
-                                        .color(egui::Color32::from_gray(190)),
-                                )
-                                .truncate(),
-                            )
-                            .on_hover_text(state.storage_dir.display().to_string());
-                            ui.horizontal(|ui| {
-                                if ui
-                                    .add_sized([115.0, 28.0], egui::Button::new(t!("📁  Ändern …")))
-                                    .on_hover_text(t!("Z. B. einen Nextcloud- oder Google-Drive-Ordner wählen, um die Notizbücher mit anderen Geräten abzugleichen"))
-                                    .clicked()
-                                {
-                                    state.open_storage_picker();
-                                }
-                                if ui
-                                    .add_enabled(
-                                        state.storage_dir_custom,
-                                        egui::Button::new(t!("Standard")).min_size(egui::vec2(115.0, 28.0)),
-                                    )
-                                    .on_hover_text(t!("Zurück zum Standard-Speicherort"))
-                                    .clicked()
-                                {
-                                    actions.push(UiAction::SetStorageDir(None));
-                                }
-                            });
-                            cloud_section(ui, state, actions);
-                            ocr_section(ui, state, actions);
-
-                            section(ui, t!("STATUS"));
+                            // Feste Status- & Update-Fußzeile (in allen Tabs sichtbar)
+                            ui.add_space(4.0);
+                            ui.separator();
                             let (dot_color, status_text) = autosave_status_style(autosave_status);
-                            ui.horizontal(|ui| {
-                                let (dot_rect, _) = ui.allocate_exact_size(
-                                    egui::vec2(10.0, 10.0),
-                                    egui::Sense::hover(),
-                                );
-                                ui.painter().circle_filled(dot_rect.center(), 4.0, dot_color);
-                                ui.label(egui::RichText::new(status_text).color(dot_color));
-                            });
                             let update_label = match updater.status() {
                                 crate::updater::UpdaterStatus::UpdateAvailable(rel) => {
                                     t!("🚀  Update {version} verfügbar", version = rel.tag_name)
                                 }
                                 crate::updater::UpdaterStatus::Downloading { percent, .. } => {
-                                    t!("⏳  Update lädt … {percent} %", percent = format!("{:.0}", percent * 100.0))
+                                    t!(
+                                        "⏳  Update lädt … {percent} %",
+                                        percent = format!("{:.0}", percent * 100.0)
+                                    )
                                 }
                                 crate::updater::UpdaterStatus::DownloadFinished { .. } => {
                                     t!("✔  Update bereit").to_string()
@@ -1008,14 +1076,35 @@ pub(super) fn render_popovers(
                                 }
                                 _ => t!("🔄  Updates & Versionen").to_string(),
                             };
-                            if ui
-                                .add_sized([ui.available_width(), 30.0], egui::Button::new(update_label))
-                                .clicked()
-                            {
-                                state.close_overlays();
-                                state.is_update_dialog_open = true;
-                            }
-                                });
+                            ui.horizontal(|ui| {
+                                let (dot_rect, _) = ui.allocate_exact_size(
+                                    egui::vec2(10.0, 10.0),
+                                    egui::Sense::hover(),
+                                );
+                                ui.painter().circle_filled(dot_rect.center(), 4.0, dot_color);
+                                ui.label(
+                                    egui::RichText::new(status_text)
+                                        .size(11.5)
+                                        .color(dot_color),
+                                );
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        if ui
+                                            .add(
+                                                egui::Button::new(
+                                                    egui::RichText::new(update_label).size(11.5),
+                                                )
+                                                .min_size(egui::vec2(0.0, 26.0)),
+                                            )
+                                            .clicked()
+                                        {
+                                            state.close_overlays();
+                                            state.is_update_dialog_open = true;
+                                        }
+                                    },
+                                );
+                            });
                         })
                         .response
                         .rect

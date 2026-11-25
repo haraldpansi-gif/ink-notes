@@ -235,6 +235,15 @@ pub enum RulerDrag {
     Rotate,
 }
 
+/// Aktiver Tab im ☰-Menü (hält das Popover kompakt und übersichtlich).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum MoreMenuTab {
+    #[default]
+    Page,
+    Paper,
+    Settings,
+}
+
 /// Format für den Export der aktuellen Seite.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PageExportKind {
@@ -528,8 +537,9 @@ pub struct UiState {
     pub sidebar_side: SidebarSide,
     /// Gewählte Sprache der Oberfläche; `None` = Sprache des Systems
     pub language: Option<crate::i18n::Language>,
-    /// Öffnungszustand des ☰-Menüs
+    /// Öffnungszustand und aktiver Tab des ☰-Menüs
     pub is_more_menu_open: bool,
+    pub more_menu_tab: MoreMenuTab,
     /// Welche Striche der Radierer entfernt (gilt auch für Stiftrückseite und Seitentaste)
     pub eraser_mode: EraserMode,
     /// Eraser radius in mm, one of [`ERASER_RADII_MM`] (also for the pen's eraser end)
@@ -667,6 +677,7 @@ impl Default for UiState {
             sidebar_side: SidebarSide::Left,
             language: None,
             is_more_menu_open: false,
+            more_menu_tab: MoreMenuTab::Page,
             eraser_mode: EraserMode::All,
             eraser_radius_mm: ERASER_RADII_MM[1],
             pdf_thumbnails: std::collections::HashMap::new(),
@@ -2357,6 +2368,7 @@ mod tests {
         let notebook = Notebook::new();
         let mut state = UiState::new();
         state.is_more_menu_open = true;
+        state.more_menu_tab = MoreMenuTab::Settings;
         // Ohne gelernte Tasten: nur der Hinweis, keine Aktion
         let ctx = egui::Context::default();
         let updater = crate::updater::UpdaterController::new();
@@ -2385,6 +2397,23 @@ mod tests {
         output.textures_delta.clear();
         assert!(!output.shapes.is_empty());
         assert_eq!(state.stylus_buttons.len(), 2);
+    }
+
+    #[test]
+    fn test_more_menu_tabs_render_cleanly() {
+        let notebook = Notebook::new();
+        for tab in [MoreMenuTab::Page, MoreMenuTab::Paper, MoreMenuTab::Settings] {
+            let mut state = UiState::new();
+            state.is_more_menu_open = true;
+            state.more_menu_tab = tab;
+            render_frames(&mut state, &notebook, 5);
+            let pop = state.popover_rect.expect("☰-Menü muss offen sein");
+            assert!(
+                pop.min.y >= 0.0 && pop.max.y <= 850.0,
+                "Tab {tab:?} sprengt das Fenster: {pop:?}"
+            );
+            assert!(pop.width() >= 280.0 && pop.width() <= 340.0, "{pop:?}");
+        }
     }
 
     #[test]

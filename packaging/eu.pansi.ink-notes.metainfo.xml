@@ -84,6 +84,11 @@
   </branding>
   <content_rating type="oars-1.1" />
   <releases>
+    <release version="0.50.2" date="2026-11-25">
+      <description>
+        <p>Reorganized the ☰ menu into three tidy tabs (Page, Paper, App) with a fixed save-status and updates footer.</p>
+      </description>
+    </release>
     <release version="0.50.1" date="2026-11-25">
       <description>
         <p>Fixed the toolbar staying collapsed to its short view-only height after leaving view mode.</p>
