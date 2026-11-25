@@ -77,6 +77,9 @@ pub struct StrokeData {
     /// Optionale halbtransparente Füllfarbe für geschlossene Formen
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fill_color: Option<[f32; 4]>,
+    /// Füllart für geschlossene Formen (Vollfläche, Schraffur, Kreuzschraffur)
+    #[serde(default, skip_serializing_if = "crate::document::FillStyle::is_none")]
+    pub fill_style: crate::document::FillStyle,
     /// Eingefügtes Bild (Name im Asset-Ordner); die Samples sind dann die vier Bildecken
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image: Option<String>,
@@ -101,6 +104,7 @@ impl From<&Stroke> for StrokeData {
             finalized: stroke.finalized,
             line_style: stroke.line_style,
             fill_color: stroke.fill_color,
+            fill_style: stroke.fill_style,
             image: stroke.image.clone(),
             text: stroke.text.clone(),
             typeset: stroke.text.is_some(),
@@ -143,6 +147,12 @@ impl StrokeData {
         } else {
             5.0
         };
+        let fill_style =
+            if self.fill_style == crate::document::FillStyle::None && self.fill_color.is_some() {
+                crate::document::FillStyle::Solid
+            } else {
+                self.fill_style
+            };
         let vertices = if let Some(ref shape) = self.shape {
             let (_, shape_verts) = crate::geometry::shape_to_mesh_styled(
                 shape,
@@ -150,6 +160,7 @@ impl StrokeData {
                 self.color,
                 self.line_style,
                 self.fill_color,
+                fill_style,
             );
             shape_verts
         } else if self.line_style != crate::document::LineStyle::Solid && self.finalized {
@@ -186,6 +197,7 @@ impl StrokeData {
         stroke.finalized = self.finalized;
         stroke.line_style = self.line_style;
         stroke.fill_color = self.fill_color;
+        stroke.fill_style = fill_style;
         stroke
     }
 }

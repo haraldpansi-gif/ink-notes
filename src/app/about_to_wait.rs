@@ -724,19 +724,28 @@ impl AppState {
                     let width_units =
                         self.ui_state.current_stroke_width_mm() * crate::document::UNITS_PER_MM;
                     let color = self.canvas.current_ink_color;
-                    let fill = if self.ui_state.shape_fill
-                        && self.ui_state.active_tool != ActiveTool::Highlighter
-                    {
-                        Some([color[0], color[1], color[2], 0.18])
+                    let fill_style = if self.ui_state.active_tool == ActiveTool::Highlighter {
+                        crate::document::FillStyle::None
                     } else {
-                        None
+                        self.ui_state.shape_fill
+                    };
+                    let fill_color = match fill_style {
+                        crate::document::FillStyle::None => None,
+                        crate::document::FillStyle::Solid => {
+                            Some([color[0], color[1], color[2], 0.18])
+                        }
+                        crate::document::FillStyle::Hatched
+                        | crate::document::FillStyle::CrossHatched => {
+                            Some([color[0], color[1], color[2], 0.55])
+                        }
                     };
                     let (samples, vertices) = geometry::shape_to_mesh_styled(
                         &shape,
                         width_units,
                         color,
                         self.canvas.current_line_style,
-                        fill,
+                        fill_color,
+                        fill_style,
                     );
                     self.canvas.set_live_shape_mesh(samples, vertices);
                     self.ui_state

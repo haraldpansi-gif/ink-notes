@@ -161,16 +161,39 @@ pub(super) fn render_popovers(
                                 }
                             }
                         });
-                        ui.add_space(6.0);
-                        if ui
-                            .checkbox(&mut state.shape_fill, t!("Erkannte Formen füllen"))
-                            .on_hover_text(t!(
-                                "Geschlossene Formen (Kreis, Rechteck, Dreieck) halbtransparent füllen"
-                            ))
-                            .changed()
-                        {
-                            actions.push(UiAction::SetShapeFill(state.shape_fill));
-                        }
+                        ui.add_space(8.0);
+                        ui.label(
+                            egui::RichText::new(t!("FORM-FÜLLUNG"))
+                                .size(10.5)
+                                .strong()
+                                .color(egui::Color32::from_gray(160)),
+                        );
+                        ui.add_space(4.0);
+                        ui.horizontal(|ui| {
+                            use crate::document::FillStyle;
+                            for (fill, label, tip) in [
+                                (FillStyle::None, t!("Keine"), t!("Ohne Füllung")),
+                                (
+                                    FillStyle::Solid,
+                                    t!("Fläche"),
+                                    t!("Halbtransparente Vollfläche"),
+                                ),
+                                (FillStyle::Hatched, "///", t!("45°-Schraffur")),
+                                (FillStyle::CrossHatched, "###", t!("Kreuzschraffur")),
+                            ] {
+                                if ui
+                                    .add_sized(
+                                        [67.0, 28.0],
+                                        egui::Button::selectable(state.shape_fill == fill, label),
+                                    )
+                                    .on_hover_text(tip)
+                                    .clicked()
+                                {
+                                    state.shape_fill = fill;
+                                    actions.push(UiAction::SetShapeFill(fill));
+                                }
+                            }
+                        });
                     });
 
                     frame.response.rect

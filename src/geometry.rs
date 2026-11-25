@@ -1989,12 +1989,12 @@ pub fn octahedron_edges(
     ]
 }
 
-/// Erzeugt ein halbtransparentes Füll-Mesh (Triangle-Strip) für geschlossene erkannte Formen.
-pub fn shape_fill_strip(shape: &RecognizedShape, fill_color: [f32; 4]) -> Vec<InkVertex> {
-    let perimeter: Vec<Vec2> = match shape {
+/// Liefert die geschlossene Umriss-Polylinie (ohne Schlussduplikat) für füllbare Formen.
+fn shape_perimeter(shape: &RecognizedShape) -> Vec<Vec2> {
+    match shape {
         RecognizedShape::Circle { center, radius } => {
             let n = 48;
-            (0..=n)
+            (0..n)
                 .map(|i| {
                     let a = (i as f32 / n as f32) * std::f32::consts::TAU;
                     *center + Vec2::new(a.cos(), a.sin()) * *radius
@@ -2009,7 +2009,7 @@ pub fn shape_fill_strip(shape: &RecognizedShape, fill_color: [f32; 4]) -> Vec<In
         } => {
             let n = 48;
             let (sin_r, cos_r) = rotation.sin_cos();
-            (0..=n)
+            (0..n)
                 .map(|i| {
                     let a = (i as f32 / n as f32) * std::f32::consts::TAU;
                     let lx = a.cos() * *radius_x;
@@ -2018,28 +2018,23 @@ pub fn shape_fill_strip(shape: &RecognizedShape, fill_color: [f32; 4]) -> Vec<In
                 })
                 .collect()
         }
-        RecognizedShape::Rectangle { corners } => {
-            vec![corners[0], corners[1], corners[2], corners[3], corners[0]]
-        }
-        RecognizedShape::Triangle { corners } => {
-            vec![corners[0], corners[1], corners[2], corners[0]]
-        }
-        RecognizedShape::Rhombus { corners } => {
-            vec![corners[0], corners[1], corners[2], corners[3], corners[0]]
-        }
-        RecognizedShape::Polygon { vertices } if vertices.len() >= 3 => {
-            let mut pts = vertices.clone();
-            pts.push(vertices[0]);
-            pts
-        }
-        _ => return Vec::new(),
-    };
+        RecognizedShape::Rectangle { corners } => corners.to_vec(),
+        RecognizedShape::Triangle { corners } => corners.to_vec(),
+        RecognizedShape::Rhombus { corners } => corners.to_vec(),
+        RecognizedShape::Polygon { vertices } if vertices.len() >= 3 => vertices.clone(),
+        _ => Vec::new(),
+    }
+}
 
-    if perimeter.len() < 4 {
+/// Erzeugt ein halbtransparentes Füll-Mesh (Triangle-Strip) für geschlossene erkannte Formen.
+pub fn shape_fill_strip(shape: &RecognizedShape, fill_color: [f32; 4]) -> Vec<InkVertex> {
+    let mut perimeter = shape_perimeter(shape);
+    if perimeter.len() < 3 {
         return Vec::new();
     }
-    let count = perimeter.len() - 1;
-    let center: Vec2 = perimeter[..count].iter().copied().sum::<Vec2>() / count as f32;
+    let count = perimeter.len();
+    let center: Vec2 = perimeter.iter().copied().sum::<Vec2>() / count as f32;
+    perimeter.push(perimeter[0]);
     let center_v = InkVertex::new(center.x, center.y, fill_color);
     let mut strip = Vec::with_capacity(perimeter.len() * 2);
     for p in perimeter {
@@ -2049,13 +2044,85 @@ pub fn shape_fill_strip(shape: &RecognizedShape, fill_color: [f32; 4]) -> Vec<In
     strip
 }
 
-/// Erzeugt Samples und GPU-Mesh für eine Form mit optionalem Linienstil und Füllfarbe.
+/// Erzeugt eine 45°-Schraffur (`cross == false`) oder Kreuzschraffur (`cross == true`) als
+/// Triangle-Strip, exakt an der Kontur der geschlossenen Form geclippt.
+pub fn shape_hatch_strip(
+    shape: &RecognizedShape,
+    hatch_color: [f32; 4],
+    width_units: f32,
+    cross: bool,
+) -> Vec<InkVertex> {
+    let poly = shape_perimeter(shape);
+    if poly.len() < 3 {
+        return Vec::new();
+    }
+    let spacing = (width_units * 4.5).clamp(24.0, 80.0);
+    let half_w = (width_units * 0.35).clamp(1.0, 3.0);
+    let angles: &[f32] = if cross {
+        &[std::f32::consts::FRAC_PI_4, -std::f32::consts::FRAC_PI_4]
+    } else {
+        &[std::f32::consts::FRAC_PI_4]
+    };
+
+    let mut strip: Vec<InkVertex> = Vec::new();
+    for &angle in angles {
+        let (sin_a, cos_a) = angle.sin_cos();
+        let to_local = |p: Vec2| Vec2::new(p.x * cos_a + p.y * sin_a, -p.x * sin_a + p.y * cos_a);
+        let to_world = |p: Vec2| Vec2::new(p.x * cos_a - p.y * sin_a, p.x * sin_a + p.y * cos_a);
+
+        let local: Vec<Vec2> = poly.iter().map(|&p| to_local(p)).collect();
+        let min_v = local.iter().map(|p| p.y).fold(f32::INFINITY, f32::min);
+        let max_v = local.iter().map(|p| p.y).fold(f32::NEG_INFINITY, f32::max);
+        if !min_v.is_finite() || !max_v.is_finite() || max_v - min_v < 2.0 {
+            continue;
+        }
+
+        let mut v = min_v + spacing * 0.5;
+        let mut guard = 0usize;
+        while v < max_v && guard < 400 {
+            guard += 1;
+            let mut xs = Vec::new();
+            for i in 0..local.len() {
+                let a = local[i];
+                let b = local[(i + 1) % local.len()];
+                if (a.y <= v && b.y > v) || (b.y <= v && a.y > v) {
+                    let t = (v - a.y) / (b.y - a.y);
+                    xs.push(a.x + t * (b.x - a.x));
+                }
+            }
+            xs.sort_by(|a, b| a.total_cmp(b));
+            for pair in xs.as_chunks::<2>().0 {
+                let p0 = to_world(Vec2::new(pair[0], v));
+                let p1 = to_world(Vec2::new(pair[1], v));
+                let dir = (p1 - p0).normalize_or_zero();
+                if dir.length_squared() < 0.5 {
+                    continue;
+                }
+                let n = Vec2::new(-dir.y, dir.x) * half_w;
+                let v0 = InkVertex::new(p0.x - n.x, p0.y - n.y, hatch_color);
+                let v1 = InkVertex::new(p0.x + n.x, p0.y + n.y, hatch_color);
+                let v2 = InkVertex::new(p1.x - n.x, p1.y - n.y, hatch_color);
+                let v3 = InkVertex::new(p1.x + n.x, p1.y + n.y, hatch_color);
+                if let Some(&last) = strip.last() {
+                    strip.push(last);
+                    strip.push(v0);
+                }
+                strip.extend_from_slice(&[v0, v1, v2, v3]);
+            }
+            v += spacing;
+        }
+    }
+    strip
+}
+
+/// Erzeugt Samples und GPU-Mesh für eine Form mit optionalem Linienstil und Füllart.
 pub fn shape_to_mesh_styled(
     shape: &RecognizedShape,
     width_units: f32,
     color: [f32; 4],
     style: crate::document::LineStyle,
     fill_color: Option<[f32; 4]>,
+    fill_style: crate::document::FillStyle,
 ) -> (Vec<StylusSample>, Vec<InkVertex>) {
     let (samples, mut outline) = shape_to_mesh(shape, width_units, color);
     if style != crate::document::LineStyle::Solid && samples.len() >= 2 {
@@ -2074,8 +2141,22 @@ pub fn shape_to_mesh_styled(
                 .collect();
         }
     }
+    let effective_fill = if fill_style == crate::document::FillStyle::None && fill_color.is_some() {
+        crate::document::FillStyle::Solid
+    } else {
+        fill_style
+    };
     if let Some(fill) = fill_color {
-        let mut combined = shape_fill_strip(shape, fill);
+        let mut combined = match effective_fill {
+            crate::document::FillStyle::None => Vec::new(),
+            crate::document::FillStyle::Solid => shape_fill_strip(shape, fill),
+            crate::document::FillStyle::Hatched => {
+                shape_hatch_strip(shape, fill, width_units.max(2.0), false)
+            }
+            crate::document::FillStyle::CrossHatched => {
+                shape_hatch_strip(shape, fill, width_units.max(2.0), true)
+            }
+        };
         if !combined.is_empty() && !outline.is_empty() {
             let last = *combined.last().unwrap();
             combined.push(last);
@@ -2095,14 +2176,17 @@ pub fn shape_to_stroke_styled(
     width_units: f32,
     style: crate::document::LineStyle,
     fill_color: Option<[f32; 4]>,
+    fill_style: crate::document::FillStyle,
 ) -> Stroke {
-    let (samples, vertices) = shape_to_mesh_styled(&shape, width_units, color, style, fill_color);
+    let (samples, vertices) =
+        shape_to_mesh_styled(&shape, width_units, color, style, fill_color, fill_style);
     let mut stroke = Stroke::new(id, samples, vertices, color);
     stroke.shape = Some(shape);
     stroke.tool = crate::document::StrokeTool::Shape;
     stroke.width = width_units;
     stroke.line_style = style;
     stroke.fill_color = fill_color;
+    stroke.fill_style = fill_style;
     stroke
 }
 

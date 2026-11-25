@@ -407,6 +407,25 @@ impl LineStyle {
     }
 }
 
+/// Füllart für geschlossene erkannte Formen (Kreis, Ellipse, Rechteck, Dreieck, Polygon).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub enum FillStyle {
+    #[default]
+    None,
+    /// Halbtransparente Vollfläche
+    Solid,
+    /// 45°-Schraffur (///)
+    Hatched,
+    /// Kreuzschraffur (###)
+    CrossHatched,
+}
+
+impl FillStyle {
+    pub fn is_none(&self) -> bool {
+        matches!(self, FillStyle::None)
+    }
+}
+
 /// Ein einzelner Vektor-Strich auf einer Seite.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Stroke {
@@ -423,6 +442,8 @@ pub struct Stroke {
     pub line_style: LineStyle,
     /// Optionale halbtransparente Füllfarbe für geschlossene erkannte Formen
     pub fill_color: Option<[f32; 4]>,
+    /// Füllart für geschlossene Formen (Vollfläche, Schraffur, Kreuzschraffur)
+    pub fill_style: FillStyle,
     /// Eingefügtes Bild (Name im Asset-Ordner, siehe `assets`). Die vier Punkte sind dann die
     /// Bildecken oben links, oben rechts, unten rechts, unten links; Verschieben, Drehen und
     /// Skalieren wirken so automatisch auch auf Bilder. Bilder liegen immer unter der Tinte.
@@ -464,6 +485,7 @@ impl Stroke {
             finalized: true,
             line_style: LineStyle::Solid,
             fill_color: None,
+            fill_style: FillStyle::None,
             image: None,
             text: None,
         }

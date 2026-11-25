@@ -348,10 +348,17 @@ pub(super) fn commit_stroke_to_notebook(
     let stroke_opt = if let Some(shape) = snapped_shape {
         let color = canvas.current_ink_color;
         let style = canvas.current_line_style;
-        let fill = if ui_state.shape_fill && ui_state.active_tool != ActiveTool::Highlighter {
-            Some([color[0], color[1], color[2], 0.18])
+        let fill_style = if ui_state.active_tool == ActiveTool::Highlighter {
+            crate::document::FillStyle::None
         } else {
-            None
+            ui_state.shape_fill
+        };
+        let fill_color = match fill_style {
+            crate::document::FillStyle::None => None,
+            crate::document::FillStyle::Solid => Some([color[0], color[1], color[2], 0.18]),
+            crate::document::FillStyle::Hatched | crate::document::FillStyle::CrossHatched => {
+                Some([color[0], color[1], color[2], 0.55])
+            }
         };
         canvas.cancel_stroke();
         Some(geometry::shape_to_stroke_styled(
@@ -360,7 +367,8 @@ pub(super) fn commit_stroke_to_notebook(
             color,
             stroke_width,
             style,
-            fill,
+            fill_color,
+            fill_style,
         ))
     } else {
         canvas.finish_stroke(new_id)

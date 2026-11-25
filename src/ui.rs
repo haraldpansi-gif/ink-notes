@@ -253,8 +253,8 @@ pub enum UiAction {
     SetStrokeWidthMm(f32),
     /// Linienstil für Stift, Lineal und Formen umschalten
     SetLineStyle(crate::document::LineStyle),
-    /// Geschlossene erkannte Formen halbtransparent füllen
-    SetShapeFill(bool),
+    /// Füllart für geschlossene erkannte Formen (Keine / Vollfläche / Schraffur / Kreuzschraffur)
+    SetShapeFill(crate::document::FillStyle),
     Undo,
     Redo,
     PreviousPage,
@@ -423,8 +423,8 @@ pub struct UiState {
     pub highlighter_stroke_width_mm: f32,
     /// Linienstil für Stift, Lineal und Formen (durchgezogen / gestrichelt / gepunktet)
     pub line_style: crate::document::LineStyle,
-    /// Geschlossene erkannte Formen halbtransparent in der Stiftfarbe füllen
-    pub shape_fill: bool,
+    /// Füllart für geschlossene erkannte Formen
+    pub shape_fill: crate::document::FillStyle,
     pub export_message: Option<(String, Instant)>,
     pub show_page_jump_popup: bool,
     /// Aktueller Zoomfaktor zur Anzeige in der Toolbar
@@ -597,7 +597,7 @@ impl Default for UiState {
             pen_stroke_width_mm: 0.5, // Standard: 0.5 mm (feine Handschrift)
             highlighter_stroke_width_mm: 6.0,
             line_style: crate::document::LineStyle::Solid,
-            shape_fill: false,
+            shape_fill: crate::document::FillStyle::None,
             export_message: None,
             show_page_jump_popup: false,
             current_zoom: 1.0,
